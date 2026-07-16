@@ -102,6 +102,13 @@ def test_shipped_definitions_parse(shipped_registry):
         "CURITIBA50CM",
         "PERNAMBUCO1M",
         "RIODEJANEIRO5M",
+        "CZECHIA2M",
+        "LITHUANIA1M",
+        "HONGKONG5M",
+        "ZAGREB1M",
+        "ESTONIA1M",
+        "SCOTLAND30M",
+        "NORTHERNIRELAND1M",
     }
     for code in (
         "VIEWFINDER1",
@@ -170,6 +177,16 @@ def test_shipped_definitions_parse(shipped_registry):
         shipped_registry["RIODEJANEIRO5M"]["access_strategy"]
         == "arcgis_lerc_tiles"
     )
+    # The ArcGIS hunt wave (2026-07-16).
+    for code in ("HONGKONG5M", "ZAGREB1M", "ESTONIA1M", "SCOTLAND30M"):
+        assert (
+            shipped_registry[code]["access_strategy"] == "arcgis_lerc_tiles"
+        )
+    for code in ("CZECHIA2M", "LITHUANIA1M"):
+        assert shipped_registry[code]["access_strategy"] == "wcs_kvp"
+    # Northern Ireland ships DISABLED until the DAERA/Bluesky licence
+    # is confirmed.
+    assert shipped_registry["NORTHERNIRELAND1M"]["enabled"] is False
     assert shipped_registry["SAXONYANHALT1M"]["access_strategy"] == "wcs"
     assert shipped_registry["HESSE1M"]["access_strategy"] == "wcs_kvp"
     # Saarland's open coverage has undocumented value semantics: OFF.

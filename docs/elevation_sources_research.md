@@ -41,6 +41,13 @@ means the endpoint answered an anonymous request on 2026-07-15.
 | `CURITIBA50CM` | Curitiba municipality, Brazil (covers Bacacheri, NOT Afonso Pena) | 0.5 m | `wcs_kvp` (ArcGIS exportImage) |
 | `PERNAMBUCO1M` | Pernambuco, Brazil (covers Recife; CAPTCHA-gated portal → drop folder) | 1 m | `xyz_archive_drop` |
 | `RIODEJANEIRO5M` | Rio de Janeiro municipality (Galeao + Santos Dumont) | 5 m | `arcgis_lerc_tiles` (tiles-only pyramid, 257-sample shared-edge LERC blobs, subprocess decode) |
+| `CZECHIA2M` | Czechia national DMR 5G | 2 m | `wcs_kvp` (ArcGIS exportImage) |
+| `LITHUANIA1M` | Lithuania national DTM-LT 2020 | 1 m | `wcs_kvp` (ArcGIS exportImage) |
+| `ESTONIA1M` | Estonia national (EPSG:3301 projected pyramid) | 1 m | `arcgis_lerc_tiles` |
+| `HONGKONG5M` | Hong Kong (some elevated roads remain in the grid) | 5 m | `arcgis_lerc_tiles` |
+| `SCOTLAND30M` | Scotland mainland (EPSG:27700 pyramid; the 50 cm FLS regionals + srsp-open-data S3 are future finer adds) | 30 m | `arcgis_lerc_tiles` |
+| `ZAGREB1M` | Zagreb city (the airport lies outside the data mask) | 1 m | `arcgis_lerc_tiles` |
+| `NORTHERNIRELAND1M` | Northern Ireland — DISABLED pending DAERA/Bluesky licence confirmation | ~1 m | `arcgis_lerc_tiles` |
 | `SONNY1` (base tier, not inset) | Europe | 1 arc-second | `hgt_archive_drop` |
 
 ## Verified, not yet integrated — ranked by ease of integration
@@ -190,6 +197,26 @@ capital (Guarulhos and Campinas have no open coverage), Porto Alegre
 (state lidar only now being procured post-flood — recheck SEMA-RS),
 Salvador, Fortaleza, Belo Horizonte.  Rio de Janeiro's tiles-only
 service is now SHIPPED via the arcgis_lerc_tiles strategy.
+
+## ArcGIS hunt (round 6, 2026-07-16)
+
+The anonymous ArcGIS Online search API
+(`arcgis.com/sharing/rest/search?q=type:"Image Service"` walked per
+country with local-language terrain terms) is the productive
+discovery tool.  Shipped from it: Czechia, Lithuania, Estonia, Hong
+Kong, Scotland 30 m, Zagreb (+ Northern Ireland disabled).  Colombia's
+IGAC catalog (504 per-department image services at
+`mapas.igac.gov.co/image/rest/services/md`) looked like the biggest
+win but FAILED value verification: the probed "antioquia" service is
+a mislabeled ~100 km project patch whose extent decodes to a
+different department entirely — a proper integration needs an
+extent-enumeration pass over all 504 services (an "arcgis_catalog"
+meta-index, same shape as the static STAC walker) with per-service
+value checks.  Tier-2 leads with the projected-pyramid math now in
+place: Latvia national (EPSG:3059 pyramid), Galicia 1 m (EPSG:25829
+pyramid).  Empty: Republic of Ireland (hillshade services only),
+Belgium (rendered view services only), Turkey/Middle East, Greece,
+Slovakia, Hungary, Slovenia, Portugal national, Africa.
 
 ## Unresolved after four rounds
 

@@ -1652,9 +1652,35 @@ class ArcgisLercTileStrategy:
             )
             return None
         level = int(float(definition.get("tile_level", 15)))
-        (west, south, east, north) = bounding_box_wgs84
-        (x_min, y_min) = _slippy_tile_of(north, west, level)
-        (x_max, y_max) = _slippy_tile_of(south, east, level)
+        # The pyramid grid: Web Mercator with the global origin by
+        # default (Rio, Hong Kong, Zagreb); services caching in a
+        # projected CRS (Estonia's EPSG:3301, Scotland's EPSG:27700)
+        # declare tile_epsg / tile_origin_x / tile_origin_y /
+        # tile_resolution (metres per pixel AT tile_level) instead.
+        tile_epsg = int(float(definition.get("tile_epsg", 3857)))
+        origin_x = _parse_float(
+            definition.get("tile_origin_x"),
+            -_WEB_MERCATOR_HALF_CIRCUMFERENCE,
+        )
+        origin_y = _parse_float(
+            definition.get("tile_origin_y"),
+            _WEB_MERCATOR_HALF_CIRCUMFERENCE,
+        )
+        resolution = _parse_float(
+            definition.get("tile_resolution"),
+            2.0
+            * _WEB_MERCATOR_HALF_CIRCUMFERENCE
+            / (2 ** level)
+            / 256.0,
+        )
+        tile_span = resolution * 256.0
+        (grid_x_min, grid_y_min, grid_x_max, grid_y_max) = (
+            transform_bounding_box_to_epsg(bounding_box_wgs84, tile_epsg)
+        )
+        x_min = int((grid_x_min - origin_x) // tile_span)
+        x_max = int((grid_x_max - origin_x) // tile_span)
+        y_min = int((origin_y - grid_y_max) // tile_span)
+        y_max = int((origin_y - grid_y_min) // tile_span)
         columns = x_max - x_min + 1
         rows = y_max - y_min + 1
         if columns * rows > self.MAXIMUM_TILES_PER_MOSAIC:
@@ -1740,7 +1766,6 @@ class ArcgisLercTileStrategy:
         finally:
             shutil.rmtree(blob_directory, ignore_errors=True)
             shutil.rmtree(decoded_directory, ignore_errors=True)
-        tile_size_m = 2.0 * _WEB_MERCATOR_HALF_CIRCUMFERENCE / (2 ** level)
         mosaic_path = destination_path + ".mosaic.tif"
         driver = gdal.GetDriverByName("GTiff")
         dataset = driver.Create(
@@ -1752,16 +1777,16 @@ class ArcgisLercTileStrategy:
         )
         dataset.SetGeoTransform(
             (
-                x_min * tile_size_m - _WEB_MERCATOR_HALF_CIRCUMFERENCE,
-                tile_size_m / 256.0,
+                origin_x + x_min * tile_span,
+                resolution,
                 0.0,
-                _WEB_MERCATOR_HALF_CIRCUMFERENCE - y_min * tile_size_m,
+                origin_y - y_min * tile_span,
                 0.0,
-                -tile_size_m / 256.0,
+                -resolution,
             )
         )
         spatial_reference = osr.SpatialReference()
-        spatial_reference.ImportFromEPSG(3857)
+        spatial_reference.ImportFromEPSG(tile_epsg)
         dataset.SetProjection(spatial_reference.ExportToWkt())
         band = dataset.GetRasterBand(1)
         band.SetNoDataValue(-32768.0)

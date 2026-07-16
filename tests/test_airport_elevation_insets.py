@@ -1987,3 +1987,56 @@ def test_arcgis_lerc_tiles_missing_tiles_are_no_coverage(
         )
         is None
     )
+
+
+@requires_gdal
+def test_arcgis_lerc_tiles_projected_pyramid_grid(tmp_path, monkeypatch):
+    # Estonia-style cache: a projected CRS with its own origin and
+    # per-level resolution instead of the global Web Mercator grid.
+    import types
+    import requests
+
+    blob = _lerc_blob_via_subprocess(tmp_path)
+    if blob is None:
+        pytest.skip("imagecodecs with LERC not available")
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    requested = []
+
+    def _get(url, timeout=None):
+        requested.append(url)
+        return types.SimpleNamespace(status_code=200, content=blob)
+
+    monkeypatch.setattr(
+        requests, "Session", lambda: types.SimpleNamespace(get=_get)
+    )
+    definition = {
+        "code": "TESTEE",
+        "access_strategy": "arcgis_lerc_tiles",
+        "tile_url_template": (
+            "https://tiles.test/ImageServer/tile/{level}/{row}/{col}"
+        ),
+        "tile_level": "12",
+        "tile_epsg": "3301",
+        "tile_origin_x": "40500.0",
+        "tile_origin_y": "7017000.0",
+        "tile_resolution": "0.9765625",
+        "native_resolution_m": "1",
+    }
+    destination = str(tmp_path / "EETN_testee.tif")
+    provenance = INSETS.fetch_inset(
+        definition, (24.955, 59.408, 24.960, 59.412), 1.0, destination
+    )
+    assert provenance is not None
+    # Tallinn in EPSG:3301 is roughly (542000, 6588000): with a 250 m
+    # tile span from origin (40500, 7017000) the columns sit near 2000
+    # and the rows near 1700 -- prove the projected grid math was used
+    # (the global-mercator indices would be vastly different).
+    first = requested[0]
+    column = int(first.rsplit("/", 1)[-1])
+    row = int(first.rsplit("/", 2)[-2])
+    assert 1900 < column < 2200
+    assert 1600 < row < 1900
+    dataset = gdal.Open(destination)
+    values = dataset.GetRasterBand(1).ReadAsArray()
+    valid = values[values > -32768]
+    assert valid.size and abs(float(valid.mean()) - 12.5) < 0.01
