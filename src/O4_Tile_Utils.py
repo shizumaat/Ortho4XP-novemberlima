@@ -199,9 +199,21 @@ def build_tile(tile):
     # tile (see docs/specs/texture-mode-spec.md, work package 2).
     imagery_needed = getattr(tile, "texture_mode", "full_ortho") != "default_xplane"
 
-    build_dsf_thread = threading.Thread(
-        target=DSF.build_dsf, args=[tile, download_queue]
-    )
+    # build_dsf runs in its own thread; a raise there (e.g. default_xplane
+    # mode with no Global Scenery DSF to read) must fail the tile loudly
+    # instead of dying silently and letting the activation step below report
+    # a misleading rename error.
+    dsf_build_error: list[str] = []
+
+    def _build_dsf_guarded() -> None:
+        try:
+            DSF.build_dsf(tile, download_queue)
+        except Exception as exc:
+            dsf_build_error.append(str(exc))
+            UI.vprint(0, "ERROR during DSF construction:", str(exc))
+            UI.red_flag = True
+
+    build_dsf_thread = threading.Thread(target=_build_dsf_guarded)
     producer_done_event = threading.Event()
 
     download_thread = threading.Thread(
@@ -245,6 +257,9 @@ def build_tile(tile):
                 UI.vprint(1, "DDS conversion process interrupted.")
             elif dico_conv_progress["done"] >= 1:
                 UI.vprint(1, " *DDS conversion of textures completed.")
+    if dsf_build_error:
+        UI.exit_message_and_bottom_line("")
+        return 0
     UI.vprint(1, " *Activating DSF file.")
     dsf_file_name = os.path.join(
         tile.build_dir,
