@@ -60,6 +60,14 @@ PREFS_FILE = FNAMES.resource_path(".qt_prefs.json")
 AIRPORT_CACHE = FNAMES.resource_path(".airport_index.tsv")
 MAX_CONSOLE_LINES = 5000
 
+# Build-area texture-mode selector: user-visible label -> tile config value.
+# Order is significant (it is the popup-menu item order).
+TEXTURE_MODE_CHOICES = (
+    ("Full Ortho", "full_ortho"),
+    ("Airport Ortho", "airport_ortho"),
+    ("Default X-Plane", "default_xplane"),
+)
+
 # ---------------------------------------------------------------------------
 # Whole-tile progress model: each pipeline step owns a weighted slice of the
 # tile's 0-100%, so the per-tile ring/bar climbs once and never restarts.
@@ -341,6 +349,22 @@ class MainWindow(QMainWindow):
             self.chk_skip_built,
         ):
             bg.addWidget(c)
+
+        # Texture mode: what the base mesh is textured with (per-tile config).
+        self.texture_row = QWidget()
+        trl = QHBoxLayout(self.texture_row)
+        trl.setContentsMargins(0, 0, 0, 0)
+        self.texture_label = QLabel("Textures:")
+        trl.addWidget(self.texture_label)
+        self.texture_combo = QComboBox()
+        for label, value in TEXTURE_MODE_CHOICES:
+            self.texture_combo.addItem(label, value)
+        self.texture_combo.currentIndexChanged.connect(
+            self._texture_mode_changed
+        )
+        trl.addWidget(self.texture_combo, 1)
+        bg.addWidget(self.texture_row)
+
         self.build_btn = QPushButton("▶ Build")
         self.build_btn.clicked.connect(self.start_build)
         bg.addWidget(self.build_btn)
@@ -676,6 +700,7 @@ class MainWindow(QMainWindow):
 
     def _active_changed(self, tile):
         self._selection_changed()
+        self._refresh_texture_mode(tile)
         if tile is None:
             self.info_group.setVisible(False)
             return
@@ -723,6 +748,49 @@ class MainWindow(QMainWindow):
             self.install_check.setToolTip(
                 "Set your X-Plane folder in Settings to install tiles."
             )
+
+    def _refresh_texture_mode(self, tile):
+        """Load the active tile's ``texture_mode`` into the build-area combo.
+
+        Reads the per-tile config via :mod:`O4_Settings_Model`; falls back to
+        the registry default (``full_ortho``) when the tile has no config or
+        the value is unknown.  Signals are blocked so the programmatic update
+        does not trigger a write back to disk.
+        """
+        import O4_Settings_Model as SM
+
+        value = "full_ortho"
+        if tile is not None:
+            raw = SM.read_tile_raw(tile[0], tile[1], self.output_dir())
+            if raw and raw.get("texture_mode"):
+                value = raw["texture_mode"]
+        index = self.texture_combo.findData(value)
+        if index < 0:
+            index = 0
+        self.texture_combo.blockSignals(True)
+        self.texture_combo.setCurrentIndex(index)
+        self.texture_combo.blockSignals(False)
+
+    def _texture_mode_changed(self, index):
+        """Persist the chosen texture mode to the active tile's config.
+
+        No-ops when no tile is active.  Writes only the ``texture_mode`` key;
+        :func:`O4_Settings_Model.write_tile` preserves every other tile var.
+        """
+        tile = self.map.active_tile()
+        if tile is None:
+            return
+        value = self.texture_combo.itemData(index)
+        if value is None:
+            return
+        import O4_Settings_Model as SM
+
+        try:
+            SM.write_tile(
+                tile[0], tile[1], self.output_dir(), {"texture_mode": value}
+            )
+        except OSError as exc:
+            print("Could not save texture mode:", exc)
 
     def _compute_size_async(self, info):
         try:

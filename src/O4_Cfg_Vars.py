@@ -27,7 +27,7 @@ cfg_app_vars = {
         "type": int,
         "default": 1,
         "values": (0, 1, 2, 3),
-        "hint": "Determines which temporary files are removed. Level 3 erases everything except the config and what is needed for X-Plane; Level 2 erases everything except what is needed to redo the current step only; Level 1 allows you to redo any prior step; Level 0 keeps every single file.",
+        "hint": "Which build files are deleted after a successful tile build. X-Plane itself only ever reads the .dsf, the terrain/ folder and the textures/ folder; everything else exists to speed up rebuilds. 0: keep every file (required for iterated DEM refinement). 1 (default): keep all intermediate files so any single build step can be redone on its own; only stray DSFTool dump leftovers are swept. 2: also delete the elevation and triangulation intermediates (Data .alt/.node/.poly), textures no terrain file references anymore, and the previous DSF generation (.dsf.bak) - redoing a step then means rebuilding from step 1. 3: keep only what X-Plane needs plus the tile config (additionally deletes the Data .mesh and .apt files).",
     },
     "overpass_server_choice": {
         "module": "OSM",
@@ -323,6 +323,17 @@ cfg_tile_vars = {
         "hint": 'Yet another tentative to draw masks with maximizing the use of the good imagery part. Requires to draw (JOSM) the "good imagery" threshold first, but it could be one order of magnitude faster to do compared to hand tweaking the masks and the imageries one by one.',
     },
     # DSF/Imagery
+    "texture_mode": {
+        "type": str,
+        "default": "full_ortho",
+        "values": ("full_ortho", "airport_ortho", "default_xplane"),
+        "hint": "What the base mesh is textured with. Full Ortho: orthophotos everywhere (classic). Airport Ortho: orthophotos on and around airports only, fading into X-Plane default terrain. Default X-Plane: no orthophotos; the custom mesh uses X-Plane default landclass terrain read from the installed Global Scenery.",
+    },
+    "airport_ortho_fade_width": {
+        "type": float,
+        "default": 1000.0,
+        "hint": "Airport Ortho mode: width in meters of the band beyond the airport boundary over which orthophoto fades into default terrain.",
+    },
     "default_website": {"type": str, "default": "", "hint": ""},
     "default_zl": {"type": int, "default": 16, "hint": ""},
     "zone_list": {"type": list, "default": [], "hint": ""},
@@ -489,6 +500,8 @@ list_mask_vars = [
 ]
 
 list_dsf_vars = [
+    "texture_mode",
+    "airport_ortho_fade_width",
     "cover_airports_with_highres",
     "cover_extent",
     "cover_zl",

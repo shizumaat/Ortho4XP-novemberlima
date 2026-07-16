@@ -1,9 +1,10 @@
 """Categorized settings window for the Ortho4XP Qt UI.
 
-VS Code-style: one scrolling page of category sections, a sidebar that jumps
-to them, live search over labels/keys/hints, a Global-defaults ↔ This-tile
-scope switch for tile-scoped settings, modified-value dots with right-click
-reset, and a Show-advanced toggle.
+A category sidebar that filters the page to the selected category, live
+search over labels/keys/hints (searching matches across every category and
+overrides the sidebar selection until cleared), a Global-defaults ↔
+This-tile scope switch for tile-scoped settings, modified-value dots with
+right-click reset, and a Show-advanced toggle.
 
 All file/value semantics live in O4_Settings_Model (headless, tested); this
 module is presentation and interaction only.
@@ -278,7 +279,7 @@ class SettingsWindow(QDialog):
         self.category_list.setFixedWidth(190)
         for _, title in SM.CATEGORIES:
             self.category_list.addItem(title)
-        self.category_list.currentRowChanged.connect(self._jump_to_category)
+        self.category_list.currentRowChanged.connect(self._category_changed)
         side.addWidget(self.category_list, 1)
         self.advanced_check = QCheckBox("Show advanced")
         self.advanced_check.toggled.connect(self._apply_filter)
@@ -293,6 +294,7 @@ class SettingsWindow(QDialog):
 
         self.rows = {}          # name -> _SettingRow
         self._headers = {}      # category key -> QLabel
+        self._lines = {}        # category key -> QFrame separator
         self._advanced_notes = {}
         for key, title in SM.CATEGORIES:
             header = QLabel("<b>%s</b>" % title)
@@ -304,6 +306,7 @@ class SettingsWindow(QDialog):
             line.setFrameShape(QFrame.HLine)
             line.setStyleSheet("color: palette(mid);")
             self.content_layout.addWidget(line)
+            self._lines[key] = line
             hidden_count = 0
             for setting in SM.settings_for(key):
                 row = _SettingRow(setting)
@@ -409,12 +412,21 @@ class SettingsWindow(QDialog):
     # Filtering / navigation
     # ------------------------------------------------------------------
     def _apply_filter(self, *_):
+        """Show only the sidebar-selected category's settings.
+
+        A non-empty search query overrides the category selection and
+        matches across every category (so search never comes up empty just
+        because another category is selected); clearing the query returns
+        to the selected-category view.
+        """
         query = self.search_edit.text().strip().lower()
         advanced = self.advanced_check.isChecked()
+        selected = self._selected_category_key()
         visible_by_cat = {key: 0 for key, _ in SM.CATEGORIES}
         for name, row in self.rows.items():
             s = row.setting
-            show = (advanced or not s.advanced) and (
+            in_category = query or selected is None or s.category == selected
+            show = bool(in_category) and (advanced or not s.advanced) and (
                 not query or row.matches(query)
             )
             row.setVisible(show)
@@ -422,20 +434,25 @@ class SettingsWindow(QDialog):
                 visible_by_cat[s.category] += 1
         for key, _ in SM.CATEGORIES:
             self._headers[key].setVisible(visible_by_cat[key] > 0)
+            self._lines[key].setVisible(visible_by_cat[key] > 0)
             note = self._advanced_notes.get(key)
             if note:
                 note.setVisible(
                     not advanced and not query and visible_by_cat[key] > 0
                 )
 
-    def _jump_to_category(self, index):
+    def _selected_category_key(self):
+        """Category key for the sidebar selection, or None if nothing is."""
+        index = self.category_list.currentRow()
+        if index < 0:
+            return None
+        return SM.CATEGORIES[index][0]
+
+    def _category_changed(self, index):
         if index < 0:
             return
-        key = SM.CATEGORIES[index][0]
-        header = self._headers.get(key)
-        if header:
-            self.scroll.ensureWidgetVisible(header, 0, 0)
-            self.scroll.verticalScrollBar().setValue(header.y() - 6)
+        self._apply_filter()
+        self.scroll.verticalScrollBar().setValue(0)
 
     # ------------------------------------------------------------------
     # Row actions

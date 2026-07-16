@@ -6,11 +6,13 @@ import os
 import pickle
 import shutil
 import struct
-from collections import defaultdict
+from collections import Counter, defaultdict
 from math import ceil, floor
 from PIL import Image, ImageDraw
 import subprocess
+import O4_Airport_Fade_Masks as FADE
 import O4_Bathymetry as BATHY
+import O4_Default_Terrain_Map as DEFTER
 import O4_File_Names as FNAMES
 import O4_Geo_Utils as GEO
 import O4_Mask_Utils as MASK
@@ -269,6 +271,7 @@ def create_terrain_file(
     provider_code,
     tri_type,
     is_overlay,
+    fade_mask_name=None,
 ):
 
     if not os.path.exists(os.path.join(tile.build_dir, "terrain")):
@@ -304,7 +307,22 @@ def create_terrain_file(
 
         f.write("BASE_TEX_NOWRAP ../textures/" + texture_file_name + "\n")
 
-        if tri_type in (1, 2) and (not is_overlay):  # XP12 water
+        if fade_mask_name is not None:
+            # airport_ortho overlay land terrain (texture-mode feature): the
+            # orthophoto is drawn above the physical default terrain and faded
+            # in through a grayscale border mask georeferenced exactly like the
+            # ortho tile (so the mask uses the ortho's texture coordinates).
+            f.write(
+                "LOAD_CENTER_BORDER "
+                + "{:.5f}".format(lat_med)
+                + " "
+                + "{:.5f}".format(lon_med)
+                + " "
+                + str(texture_approx_size)
+                + " 4096\n"
+            )
+            f.write("BORDER_TEX ../textures/" + fade_mask_name + "\n")
+        elif tri_type in (1, 2) and (not is_overlay):  # XP12 water
             #pass
             f.write("WATER_COLOR_MASK\n")
         elif (tri_type == 1) or (
@@ -350,7 +368,11 @@ def create_terrain_file(
         else:
             f.write("NO_ALPHA\n")
 
-        if (tri_type in (1, 2)) or (not tile.terrain_casts_shadows):
+        if (
+            (tri_type in (1, 2))
+            or (fade_mask_name is not None)
+            or (not tile.terrain_casts_shadows)
+        ):
             f.write("NO_SHADOW\n")
 
         return ter_file_name
@@ -385,6 +407,7 @@ def extract_elevation_and_bathymetry_data(lat, lon):
     )
     UI.vprint(2, "     Making a copy of the Global Scenery DSF in tmp dir")
     try:
+        os.makedirs(FNAMES.Tmp_dir, exist_ok=True)
         shutil.copy(global_scenery_dsf, tmp_file)
     except:
         UI.exit_message_and_bottom_line(
@@ -469,7 +492,44 @@ def extract_elevation_and_bathymetry_data(lat, lon):
 ################################################################################
 def build_dsf(tile, download_queue):
 
-    
+    # Texture mode dispatch (see docs/specs/texture-mode-spec.md).  Every
+    # branch below that reads this variable is a pure addition guarded by the
+    # mode check; the "full_ortho" path is left structurally untouched so its
+    # emitted bytes are identical to before this feature.
+    texture_mode = getattr(tile, "texture_mode", "full_ortho")
+    default_terrain_map = None
+    airport_geometry = None
+    # decision 9 (non-projected fallback) bookkeeping.
+    default_terrain_paths = []
+    projected_terrain_counter = Counter()
+    default_terrain_substitutions = 0
+    # Both default_xplane and airport_ortho lay a default-landclass physical
+    # base under every land triangle (decision 4); airport_ortho draws ortho
+    # overlays above it only where covers(...) holds.
+    if texture_mode in ("default_xplane", "airport_ortho"):
+        default_terrain_map = DEFTER.DefaultTerrainMap.from_tile(
+            tile.lat, tile.lon
+        )
+        if default_terrain_map is None:
+            # Fail loudly rather than silently falling back to orthophotos.
+            raise RuntimeError(
+                "texture_mode='"
+                + texture_mode
+                + "' requires the default Global "
+                "Scenery base-mesh DSF for tile "
+                + FNAMES.short_latlon(tile.lat, tile.lon)
+                + ", but none could be read under "
+                "O4_Overlay_Utils.custom_overlay_src ("
+                + repr(OVL.custom_overlay_src)
+                + ") or custom_overlay_src_alternate ("
+                + repr(OVL.custom_overlay_src_alternate)
+                + "). Set the X-Plane / Global Scenery directory in the "
+                "config window first."
+            )
+        default_terrain_paths = default_terrain_map.terrain_paths
+    if texture_mode == "airport_ortho":
+        airport_geometry = FADE.build_airport_ortho_geometry(tile)
+
     dico_customzl = zone_list_to_ortho_dico(tile)
 
     # 1 Read mesh file
@@ -595,9 +655,28 @@ def build_dsf(tile, download_queue):
     treated_textures = set()
     skipped_terrains_for_masking = set()
     dsf_pools = {}
-    # we need more pools for textured nodes than for nodes : land, UV masked
-    # water, and XP water
-    dsf_pool_nbr = 3 * pool_nbr
+    # We need more pools for textured nodes than for nodes.  Each of the
+    # pool_nbr geometric pools is mirrored once per texturing "band"; a node
+    # in geometric pool ``idx_pool`` lands in band ``b`` at dsf-pool index
+    # ``idx_pool + b * pool_nbr``.  The bands partition the dsf-pool index
+    # space as follows:
+    #   band 0  [0,          pool_nbr)   plane 7  land with ortho
+    #                                             (lon,lat,elev,nx,ny,s,t)
+    #   band 1  [pool_nbr, 2*pool_nbr)   plane 9  masked ortho / inland-water
+    #                                             overlay (UV1 + UV2)
+    #   band 2  [2*pool_nbr,3*pool_nbr)  plane 7  plain XP water
+    #                                             (lon,lat,elev,32768,32768,
+    #                                              fetch,bathy)
+    #   band 3  [3*pool_nbr,4*pool_nbr)  plane 5  default-terrain physical
+    #                                             (lon,lat,elev,nx,ny) -- only
+    #                                             allocated in default_xplane
+    #                                             mode, where it carries the
+    #                                             X-Plane default landclass
+    #                                             terrain (decision 9: no
+    #                                             texture coordinates, valid
+    #                                             for PROJECTED terrains).
+    default_terrain_band = texture_mode in ("default_xplane", "airport_ortho")
+    dsf_pool_nbr = (4 if default_terrain_band else 3) * pool_nbr
     for idx_dsfpool in range(dsf_pool_nbr):
         dsf_pools[idx_dsfpool] = array.array("H")
     dsf_pool_length = numpy.zeros(dsf_pool_nbr, "int")
@@ -617,6 +696,11 @@ def build_dsf(tile, download_queue):
         dsf_pool_plane[pool_nbr : 2 * pool_nbr] = 9
         # Regular XP water
         dsf_pool_plane[2 * pool_nbr : 3 * pool_nbr] = 7
+    else:
+        dsf_pool_plane = 7 * numpy.ones(dsf_pool_nbr, "int")
+    if default_terrain_band:
+        # 5-plane physical default-terrain band (see banding note above).
+        dsf_pool_plane[3 * pool_nbr : 4 * pool_nbr] = 5
     textured_nodes = {}
     len_textured_nodes = 0
     textured_tris = {}
@@ -638,7 +722,231 @@ def build_dsf(tile, download_queue):
     bTERT = bytes("terrain_Water\0", "ascii")
     textured_tris[0] = defaultdict(lambda: array.array("H"))
 
-    # Next, we build DSF mesh points (these take into accound texture 
+    # Fade masks are rasterised once per texture tile (airport_ortho mode).
+    fade_masks_written = set()
+
+    def _tri_centroid(n1, n2, n3):
+        """Absolute (lon, lat) centroid of a triangle, for mode routing."""
+        bary_lon = (
+            node_coords[5 * n1 + 0]
+            + node_coords[5 * n2 + 0]
+            + node_coords[5 * n3 + 0]
+        ) / 3
+        bary_lat = (
+            node_coords[5 * n1 + 1]
+            + node_coords[5 * n2 + 1]
+            + node_coords[5 * n3 + 1]
+        ) / 3
+        return (bary_lon, bary_lat)
+
+    def emit_physical_default_land(n1, n2, n3):
+        """Physical default-landclass patch for one land triangle (decisions
+        3, 4, 9).  Shared by default_xplane and airport_ortho; emits into the
+        5-plane band-3 pool with the library terrain path referenced by name
+        in ``bTERT`` (no ``.ter`` generated, no ortho download queued)."""
+        nonlocal bTERT, len_textured_nodes, total_cross_pool
+        nonlocal default_terrain_substitutions
+        (bary_lon, bary_lat) = _tri_centroid(n1, n2, n3)
+        src_index = default_terrain_map.terrain_index_at(bary_lon, bary_lat)
+        terrain_path = (
+            default_terrain_paths[src_index]
+            if 0 <= src_index < len(default_terrain_paths)
+            else ""
+        )
+        # Decision 9: projected terrains only.  A non-projected terrain
+        # (is_projected False; None counts as projected-assumed) is replaced by
+        # the running local-majority projected terrain, and the substitution is
+        # counted for the end-of-build summary warning.
+        projected = default_terrain_map.is_projected(src_index)
+        if projected is False:
+            default_terrain_substitutions += 1
+            if projected_terrain_counter:
+                terrain_path = projected_terrain_counter.most_common(1)[0][0]
+        else:
+            projected_terrain_counter[terrain_path] += 1
+        if terrain_path in dico_terrains:
+            terrain_idx = dico_terrains[terrain_path]
+        else:
+            terrain_idx = len(dico_terrains)
+            textured_tris[terrain_idx] = defaultdict(
+                lambda: array.array("H")
+            )
+            dico_terrains[terrain_path] = terrain_idx
+            # Library virtual path emitted verbatim, mirroring the
+            # terrain_Water seeding (no "terrain/" prefix, no .ter).
+            bTERT += bytes(terrain_path + "\0", "ascii")
+        tri_p = array.array("H")
+        for n in (n1, n3, n2):  # ordering for orientation !
+            idx_pool = idx_node_to_idx_pool[n]
+            node_hash = (
+                idx_pool,
+                *node_icoords[5 * n : 5 * n + 2],
+                terrain_idx,
+            )
+            if node_hash in textured_nodes:
+                (idx_dsfpool, pos_in_pool) = textured_nodes[node_hash]
+            else:
+                # band 3: (lon, lat, elev, nx, ny), no texture coords
+                idx_dsfpool = idx_pool + 3 * pool_nbr
+                dsf_pools[idx_dsfpool].extend(node_icoords[5 * n : 5 * n + 5])
+                len_textured_nodes += 1
+                pos_in_pool = dsf_pool_length[idx_dsfpool]
+                textured_nodes[node_hash] = (idx_dsfpool, pos_in_pool)
+                dsf_pool_length[idx_dsfpool] += 1
+            tri_p.extend((idx_dsfpool, pos_in_pool))
+        if (
+            tri_p[:2] == tri_p[2:4]
+            or tri_p[2:4] == tri_p[4:]
+            or tri_p[4:] == tri_p[:2]
+        ):
+            return
+        if tri_p[0] == tri_p[2] == tri_p[4]:
+            textured_tris[terrain_idx][tri_p[0]].extend(
+                (tri_p[1], tri_p[3], tri_p[5])
+            )
+        else:
+            total_cross_pool += 1
+            textured_tris[terrain_idx]["cross-pool"].extend(tri_p)
+
+    def emit_plain_water(n1, n2, n3):
+        """Plain terrain_Water patch (band-2 XP water) for one triangle.
+        Used for inland water outside ortho coverage in default_xplane /
+        airport_ortho (decision 8), mirroring the sea-pass water emission."""
+        nonlocal len_textured_nodes, total_cross_pool
+        tri_p = array.array("H")
+        for n in (n1, n3, n2):  # ordering for orientation !
+            node_hash = (n, 0)
+            if node_hash in textured_nodes:
+                (idx_dsfpool, pos_in_pool) = textured_nodes[node_hash]
+            else:
+                idx_dsfpool = idx_node_to_idx_pool[n] + 2 * pool_nbr
+                len_textured_nodes += 1
+                pos_in_pool = dsf_pool_length[idx_dsfpool]
+                textured_nodes[node_hash] = [idx_dsfpool, pos_in_pool]
+                dsf_pools[idx_dsfpool].extend(node_icoords[5 * n : 5 * n + 3])
+                dsf_pools[idx_dsfpool].extend((32768, 32768))
+                ratio_bathy = BATHY.set_depth_ratio(
+                    n, node_is_coast, node_bathy, tile
+                )
+                ratio_fetch = 1
+                dsf_pools[idx_dsfpool].extend(
+                    (int(65535 * ratio_fetch), int(65535 * ratio_bathy))
+                )
+                dsf_pool_length[idx_dsfpool] += 1
+            tri_p.extend((idx_dsfpool, pos_in_pool))
+        if tri_p[0] == tri_p[2] == tri_p[4]:
+            textured_tris[0][tri_p[0]].extend((tri_p[1], tri_p[3], tri_p[5]))
+        else:
+            total_cross_pool += 1
+            textured_tris[0]["cross-pool"].extend(tri_p)
+
+    def emit_airport_overlay_ortho(n1, n2, n3, bary_lon, bary_lat):
+        """Non-physical orthophoto overlay patch for one covered land triangle
+        (airport_ortho, decisions 4-6).  Mirrors the masked-sea overlay path:
+        9-plane band-1 pool with the second texture-coordinate pair equal to
+        the first, an overlay terrain (flag 2) whose ``.ter`` carries the fade
+        mask as ``BORDER_TEX``.  Ortho downloads are queued exactly as
+        full_ortho, so only airport-area textures download."""
+        nonlocal bTERT, len_textured_nodes, total_cross_pool
+        texture_attributes = dico_customzl[
+            GEO.wgs84_to_orthogrid(bary_lat, bary_lon, tile.mesh_zl)
+        ]
+        terrain_key = (texture_attributes, "airport_ortho_overlay")
+        if terrain_key in dico_terrains:
+            terrain_idx = dico_terrains[terrain_key]
+        else:
+            terrain_idx = len(dico_terrains)
+            textured_tris[terrain_idx] = defaultdict(
+                lambda: array.array("H")
+            )
+            dico_terrains[terrain_key] = terrain_idx
+            overlay_terrains.add(terrain_idx)
+            texture_file_name = FNAMES.dds_file_name_from_attributes(
+                *texture_attributes
+            )
+            # Queue the ortho download if the DDS is not already present.
+            if texture_attributes not in treated_textures:
+                target_tex = os.path.join(
+                    tile.build_dir, "textures", texture_file_name
+                )
+                if not os.path.isfile(target_tex):
+                    download_queue.put(texture_attributes)
+                else:
+                    UI.vprint(
+                        2,
+                        "   Texture file "
+                        + texture_file_name
+                        + " already present.",
+                    )
+                treated_textures.add(texture_attributes)
+            # Rasterise the fade mask once per texture tile (skip if cached).
+            fade_mask_name = FNAMES.airport_fade_mask_name(*texture_attributes)
+            fade_mask_path = os.path.join(
+                tile.build_dir, "textures", fade_mask_name
+            )
+            if texture_attributes not in fade_masks_written:
+                if not os.path.exists(fade_mask_path):
+                    airport_geometry.write_fade_mask(
+                        *texture_attributes, fade_mask_path
+                    )
+                fade_masks_written.add(texture_attributes)
+            terrain_file_name = create_terrain_file(
+                tile,
+                texture_file_name,
+                *texture_attributes,
+                0,
+                True,
+                fade_mask_name=fade_mask_name,
+            )
+            bTERT += bytes("terrain/" + terrain_file_name + "\0", "ascii")
+        tri_p = array.array("H")
+        for n in (n1, n3, n2):  # beware of ordering for orientation !
+            idx_pool = idx_node_to_idx_pool[n]
+            node_hash = (
+                idx_pool,
+                *node_icoords[5 * n : 5 * n + 2],
+                terrain_idx,
+            )
+            if node_hash in textured_nodes:
+                (idx_dsfpool, pos_in_pool) = textured_nodes[node_hash]
+            else:
+                (s, t) = GEO.st_coord(
+                    node_coords[5 * n + 1],
+                    node_coords[5 * n],
+                    *texture_attributes
+                )
+                # band 1: (lon, lat, elev, nx, ny, s, t, s, t) -- the border
+                # (fade) mask shares the ortho tile's texture coordinates.
+                idx_dsfpool = idx_pool + pool_nbr
+                dsf_pools[idx_dsfpool].extend(node_icoords[5 * n : 5 * n + 5])
+                dsf_pools[idx_dsfpool].extend(
+                    (
+                        int(round(s * 65535)),
+                        int(round(t * 65535)),
+                        int(round(s * 65535)),
+                        int(round(t * 65535)),
+                    )
+                )
+                len_textured_nodes += 1
+                pos_in_pool = dsf_pool_length[idx_dsfpool]
+                textured_nodes[node_hash] = (idx_dsfpool, pos_in_pool)
+                dsf_pool_length[idx_dsfpool] += 1
+            tri_p.extend((idx_dsfpool, pos_in_pool))
+        if (
+            tri_p[:2] == tri_p[2:4]
+            or tri_p[2:4] == tri_p[4:]
+            or tri_p[4:] == tri_p[:2]
+        ):
+            return
+        if tri_p[0] == tri_p[2] == tri_p[4]:
+            textured_tris[terrain_idx][tri_p[0]].extend(
+                (tri_p[1], tri_p[3], tri_p[5])
+            )
+        else:
+            total_cross_pool += 1
+            textured_tris[terrain_idx]["cross-pool"].extend(tri_p)
+
+    # Next, we build DSF mesh points (these take into accound texture
     # as well), point pools, etc.
 
     step = nbr_tris // 100 + 1
@@ -659,124 +967,140 @@ def build_dsf(tile, download_queue):
                 UI.vprint(1, "DSF construction interrupted.")
                 return 0
         done += 1
-        bary_lon = (
-            node_coords[5 * n1 + 0]
-            + node_coords[5 * n2 + 0]
-            + node_coords[5 * n3 + 0]
-        ) / 3
-        bary_lat = (
-            node_coords[5 * n1 + 1]
-            + node_coords[5 * n2 + 1]
-            + node_coords[5 * n3 + 1]
-        ) / 3
-        texture_attributes = dico_customzl[
-            GEO.wgs84_to_orthogrid(bary_lat, bary_lon, tile.mesh_zl)
-        ]
-        # The entries for the terrain and texture main dictionnaries
-        terrain_attributes = (texture_attributes, tri_type)
-        is_overlay = False
-        
-
-        # Do we need to build new terrain file(s) ?
-        if terrain_attributes in dico_terrains:
-            terrain_idx = dico_terrains[terrain_attributes]
-            is_overlay = terrain_idx in overlay_terrains
+        if texture_mode == "default_xplane":
+            # Decision 8: skip the sea-mask branch entirely; every sea
+            # triangle takes the plain terrain_Water path (terrain_idx 0,
+            # which routes into the "X-Plane water" emission block below).
+            terrain_idx = 0
+            is_overlay = False
+        elif texture_mode == "airport_ortho" and not airport_geometry.covers(
+            *_tri_centroid(n1, n2, n3)
+        ):
+            # Decision 8: outside airport ortho coverage sea is plain
+            # terrain_Water; covered coastal-airport sea falls through to the
+            # full_ortho masked-sea path below.
+            terrain_idx = 0
+            is_overlay = False
         else:
-            needs_new_terrain = False
-            # if not we need to check with masks values
-            if terrain_attributes not in skipped_terrains_for_masking:
-                mask_im = MASK.needs_mask(tile, *texture_attributes)
-                if mask_im:
-                    UI.vprint(2, "      Use of an alpha mask.")
-                    needs_new_terrain = True
-                else:
-                    skipped_terrains_for_masking.add(terrain_attributes)
-                    # clean up potential old masks in the tile dir
-                    try:
-                        os.remove(
-                            os.path.join(
+            bary_lon = (
+                node_coords[5 * n1 + 0]
+                + node_coords[5 * n2 + 0]
+                + node_coords[5 * n3 + 0]
+            ) / 3
+            bary_lat = (
+                node_coords[5 * n1 + 1]
+                + node_coords[5 * n2 + 1]
+                + node_coords[5 * n3 + 1]
+            ) / 3
+            texture_attributes = dico_customzl[
+                GEO.wgs84_to_orthogrid(bary_lat, bary_lon, tile.mesh_zl)
+            ]
+            # The entries for the terrain and texture main dictionnaries
+            terrain_attributes = (texture_attributes, tri_type)
+            is_overlay = False
+
+            # Do we need to build new terrain file(s) ?
+            if terrain_attributes in dico_terrains:
+                terrain_idx = dico_terrains[terrain_attributes]
+                is_overlay = terrain_idx in overlay_terrains
+            else:
+                needs_new_terrain = False
+                # if not we need to check with masks values
+                if terrain_attributes not in skipped_terrains_for_masking:
+                    mask_im = MASK.needs_mask(tile, *texture_attributes)
+                    if mask_im:
+                        UI.vprint(2, "      Use of an alpha mask.")
+                        needs_new_terrain = True
+                    else:
+                        skipped_terrains_for_masking.add(terrain_attributes)
+                        # clean up potential old masks in the tile dir
+                        try:
+                            os.remove(
+                                os.path.join(
+                                    tile.build_dir,
+                                    "textures",
+                                    FNAMES.mask_file(*texture_attributes),
+                                )
+                            )
+                        except:
+                            pass
+                if needs_new_terrain:
+                    terrain_idx = len(dico_terrains)
+                    textured_tris[terrain_idx] = defaultdict(
+                        lambda: array.array("H")
+                    )
+                    dico_terrains[terrain_attributes] = terrain_idx
+
+                    # Is it an overlay terrain or the new XP 12 phys water type?
+                    # XP11 style => overlay
+                    is_overlay = (tile.water_tech == "XP11 + bathy")
+                    # No alpha channel in DDS => overlay
+                    is_overlay |= not tile.imprint_masks_to_dds
+
+                    if is_overlay:
+                        overlay_terrains.add(terrain_idx)
+
+                    texture_file_name = FNAMES.dds_file_name_from_attributes(
+                        *texture_attributes
+                    )
+                    # do we need to (re)build a texture ?
+                    if texture_attributes not in treated_textures:
+                        target_tex = os.path.join(
+                                tile.build_dir, "textures", texture_file_name
+                                )
+                        rebuild = False
+                        if (not os.path.isfile(target_tex)):
+                            rebuild = True
+                        elif (tile.imprint_masks_to_dds):
+                            # Maybe target_tex was a DXT1, we need DXT5
+                            if (os.path.getsize(target_tex) < 20000000):
+                                rebuild = True
+                            # Maybe masks were updated after target_tex created
+                            target_mask = MASK.mask_name_for_texture(tile,
+                                              *texture_attributes)
+                            if (os.path.isfile(target_mask)):
+                                mask_last_modified = os.path.getmtime(target_mask)
+                                tex_last_modified = os.path.getmtime(target_tex)
+                                if (tex_last_modified < mask_last_modified):
+                                    rebuild = True
+                        else:
+                            # maybe target_tex was a DXT5, it should ne a DXT1
+                            if (os.path.getsize(target_tex) > 20000000):
+                                rebuild = True
+                            else:
+                                print(os.path.getsize(target_tex))
+
+                        if (rebuild or not tile.imprint_masks_to_dds):
+                            mask_im.save(os.path.join(
                                 tile.build_dir,
                                 "textures",
                                 FNAMES.mask_file(*texture_attributes),
                             )
                         )
-                    except:
-                        pass
-            if needs_new_terrain:
-                terrain_idx = len(dico_terrains)
-                textured_tris[terrain_idx] = defaultdict(
-                    lambda: array.array("H")
-                )
-                dico_terrains[terrain_attributes] = terrain_idx
-                
-                # Is it an overlay terrain or the new XP 12 phys water type ?
-                # XP11 style => overlay
-                is_overlay = (tile.water_tech == "XP11 + bathy") 
-                # No alpha channel in DDS => overlay
-                is_overlay |= not tile.imprint_masks_to_dds
-                
-                if is_overlay:
-                    overlay_terrains.add(terrain_idx)
-                
-                texture_file_name = FNAMES.dds_file_name_from_attributes(
-                    *texture_attributes
-                )
-                # do we need to (re)build a texture ?
-                if texture_attributes not in treated_textures:
-                    target_tex = os.path.join(
-                            tile.build_dir, "textures", texture_file_name
-                            )
-                    rebuild = False
-                    if (not os.path.isfile(target_tex)):
-                        rebuild = True
-                    elif (tile.imprint_masks_to_dds):
-                        # Maybe target_tex was a DXT1, we need DXT5
-                        if (os.path.getsize(target_tex) < 20000000):
-                            rebuild = True
-                        # Maybe masks were updated after target_tex was created
-                        target_mask = MASK.mask_name_for_texture(tile, 
-                                          *texture_attributes)
-                        if (os.path.isfile(target_mask)):
-                            mask_last_modified = os.path.getmtime(target_mask)
-                            tex_last_modified = os.path.getmtime(target_tex)
-                            if (tex_last_modified < mask_last_modified):
-                                rebuild = True
-                    else: 
-                        # maybe target_tex was a DXT5, it should ne a DXT1
-                        if (os.path.getsize(target_tex) > 20000000):
-                            rebuild = True
-                        else:
-                            print(os.path.getsize(target_tex))
-                    
-                    if (rebuild or not tile.imprint_masks_to_dds):
-                        mask_im.save(os.path.join(
-                            tile.build_dir,
-                            "textures",
-                            FNAMES.mask_file(*texture_attributes),
-                        )
-                    )
 
-                    if (rebuild):
-                            download_queue.put(texture_attributes)
-                    else:
-                        UI.vprint(
-                            2,
-                            "   Texture file "
-                            + texture_file_name
-                            + " already present.",
-                        )
-                    treated_textures.add(texture_attributes)
-                terrain_file_name = create_terrain_file(
-                    tile,
-                    texture_file_name,
-                    *texture_attributes,
-                    tri_type,
-                    is_overlay
-                )
-                bTERT += bytes("terrain/" + terrain_file_name + "\0", "ascii")
-            else:
-                terrain_idx = 0
-        
+                        if (rebuild):
+                                download_queue.put(texture_attributes)
+                        else:
+                            UI.vprint(
+                                2,
+                                "   Texture file "
+                                + texture_file_name
+                                + " already present.",
+                            )
+                        treated_textures.add(texture_attributes)
+                    terrain_file_name = create_terrain_file(
+                        tile,
+                        texture_file_name,
+                        *texture_attributes,
+                        tri_type,
+                        is_overlay
+                    )
+                    bTERT += bytes(
+                        "terrain/" + terrain_file_name + "\0", "ascii"
+                    )
+                else:
+                    terrain_idx = 0
+
         # We put the tri in the right terrain
         # First the ones associated to the dico_customzl
         if terrain_idx:
@@ -894,6 +1218,32 @@ def build_dsf(tile, download_queue):
                 UI.vprint(1, "DSF construction interrupted.")
                 return 0
         done += 1
+        if texture_mode == "default_xplane":
+            # Land: physical default landclass terrain at the centroid
+            # (decisions 3-4); inland water: plain terrain_Water (decision 8).
+            if not tri_type:
+                emit_physical_default_land(n1, n2, n3)
+            else:
+                emit_plain_water(n1, n2, n3)
+            continue
+        if texture_mode == "airport_ortho":
+            (bary_lon, bary_lat) = _tri_centroid(n1, n2, n3)
+            covered = airport_geometry.covers(bary_lon, bary_lat)
+            if not tri_type:
+                # Physical default-landclass base under every land triangle
+                # (decision 4); an ortho overlay is added on top only within
+                # the airport boundary + fade band (decisions 5-6).
+                emit_physical_default_land(n1, n2, n3)
+                if covered:
+                    emit_airport_overlay_ortho(
+                        n1, n2, n3, bary_lon, bary_lat
+                    )
+                continue
+            # Inland water: covered coastal-airport water keeps the full_ortho
+            # masked behavior (fall through); elsewhere plain terrain_Water.
+            if not covered:
+                emit_plain_water(n1, n2, n3)
+                continue
         bary_lon = (
             node_coords[5 * n1] + node_coords[5 * n2] + node_coords[5 * n3]
         ) / 3
@@ -1370,6 +1720,16 @@ def build_dsf(tile, download_queue):
         "bytes",
         "(" + UI.human_print(size_of_dsf) + ")",
     )
+    if default_terrain_substitutions:
+        # Decision 9: one-line summary if any non-projected default terrain
+        # had to be replaced by a projected neighbour.
+        UI.lvprint(
+            1,
+            "     WARNING: default_xplane mode substituted a projected "
+            "terrain for a non-projected one on "
+            + str(default_terrain_substitutions)
+            + " land triangle(s).",
+        )
     return 1
 
 

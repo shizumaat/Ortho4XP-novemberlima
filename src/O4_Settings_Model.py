@@ -74,7 +74,7 @@ _LAYOUT: list = [
         ("custom_overlay_src_alternate", "Alternate overlay source", "app", True),
         ("cifp_data_path", "CIFP/AIRAC data folder", "app", True),
         ("verbosity", "Console verbosity", "app", False),
-        ("cleaning_level", "Temporary file cleanup level", "app", True),
+        ("cleaning_level", "Build file cleanup level", "app", False),
     ]),
     ("network", "Network & Downloads", [
         ("max_download_slots", "Parallel orthophoto downloads", "app", False),
@@ -88,6 +88,8 @@ _LAYOUT: list = [
         ("skip_converts", "Skip DDS conversion", "app", True),
     ]),
     ("imagery", "Imagery & Zoom Levels", [
+        ("texture_mode", "Texture mode", "tile", False),
+        ("airport_ortho_fade_width", "Airport ortho fade width (m)", "tile", False),
         ("cover_airports_with_highres", "High-ZL airport coverage", "tile", False),
         ("cover_zl", "Airport coverage ZL", "tile", False),
         ("cover_extent", "Airport coverage extent (km)", "tile", False),
