@@ -1,0 +1,63 @@
+# Synthetic DSFTool --dsf2text excerpt for DefaultTerrainMap unit tests.
+# Hand-written; NOT produced by DSFTool.  Covers:
+#   * a three-entry TERRAIN_DEF table (index order matters);
+#   * a physical patch of independent triangles (primitive type 0);
+#   * a physical patch of a triangle strip (primitive type 1);
+#   * a physical patch of a triangle fan (primitive type 2);
+#   * an OVERLAY patch (flag 2) that must be ignored entirely.
+# Vertex columns after lon/lat (elev, nx, nz, s, t) are ignored by the map
+# but present so the grammar matches real dumps.
+
+PROPERTY sim/planet earth
+TERRAIN_DEF lib/g10/terrain10/grass_tmp_flat.ter
+TERRAIN_DEF lib/g10/terrain10/asphalt.ter
+TERRAIN_DEF lib/g10/terrain10/rock.ter
+
+# --- Physical patch: independent triangles, terrain 1 (asphalt) ---
+# Two triangles tiling the unit square lon[0,1] x lat[0,1].
+BEGIN_PATCH 1 -1 -1 1 5
+BEGIN_PRIMITIVE 0
+PATCH_VERTEX 0.0 0.0 10.0 0.0 1.0 0.0 0.0
+PATCH_VERTEX 1.0 0.0 10.0 0.0 1.0 1.0 0.0
+PATCH_VERTEX 0.0 1.0 10.0 0.0 1.0 0.0 1.0
+PATCH_VERTEX 1.0 0.0 10.0 0.0 1.0 1.0 0.0
+PATCH_VERTEX 1.0 1.0 10.0 0.0 1.0 1.0 1.0
+PATCH_VERTEX 0.0 1.0 10.0 0.0 1.0 0.0 1.0
+END_PRIMITIVE
+END_PATCH
+
+# --- Physical patch: triangle strip, terrain 2 (rock) ---
+# Square lon[1,2] x lat[0,1] as a 4-vertex strip.
+BEGIN_PATCH 2 -1 -1 1 5
+BEGIN_PRIMITIVE 1
+PATCH_VERTEX 1.0 0.0 10.0 0.0 1.0 0.0 0.0
+PATCH_VERTEX 1.0 1.0 10.0 0.0 1.0 0.0 1.0
+PATCH_VERTEX 2.0 0.0 10.0 0.0 1.0 1.0 0.0
+PATCH_VERTEX 2.0 1.0 10.0 0.0 1.0 1.0 1.0
+END_PRIMITIVE
+END_PATCH
+
+# --- Physical patch: triangle fan, terrain 0 (grass) ---
+# Fan pivoting on the centroid of square lon[0,1] x lat[1,2].
+BEGIN_PATCH 0 -1 -1 1 5
+BEGIN_PRIMITIVE 2
+PATCH_VERTEX 0.5 1.5 10.0 0.0 1.0 0.5 0.5
+PATCH_VERTEX 0.0 1.0 10.0 0.0 1.0 0.0 0.0
+PATCH_VERTEX 1.0 1.0 10.0 0.0 1.0 1.0 0.0
+PATCH_VERTEX 1.0 2.0 10.0 0.0 1.0 1.0 1.0
+PATCH_VERTEX 0.0 2.0 10.0 0.0 1.0 0.0 1.0
+END_PRIMITIVE
+END_PATCH
+
+# --- OVERLAY patch (flag 2): terrain 2, must be IGNORED ---
+# Independent triangles over square lon[5,6] x lat[5,6].
+BEGIN_PATCH 2 -1 -1 2 7
+BEGIN_PRIMITIVE 0
+PATCH_VERTEX 5.0 5.0 10.0 0.0 1.0 0.0 0.0 0.0 0.0
+PATCH_VERTEX 6.0 5.0 10.0 0.0 1.0 1.0 0.0 1.0 0.0
+PATCH_VERTEX 5.0 6.0 10.0 0.0 1.0 0.0 1.0 0.0 1.0
+PATCH_VERTEX 6.0 5.0 10.0 0.0 1.0 1.0 0.0 1.0 0.0
+PATCH_VERTEX 6.0 6.0 10.0 0.0 1.0 1.0 1.0 1.0 1.0
+PATCH_VERTEX 5.0 6.0 10.0 0.0 1.0 0.0 1.0 0.0 1.0
+END_PRIMITIVE
+END_PATCH

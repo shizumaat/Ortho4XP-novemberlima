@@ -351,14 +351,20 @@ def _interpolate_dsf_ring(
 _DSF_LINES_CACHE: dict[tuple[str, float], list[str]] = {}
 
 
-def _load_dsf_text(dsf_path: str,
-                   cache_dir: str | None = None) -> list[str] | None:
-    """Return the DSFTool ``--dsf2text`` lines for a DSF (memoized).
+def ensure_dsf_text_path(dsf_path: str,
+                         cache_dir: str | None = None) -> str | None:
+    """Return the path to the DSFTool ``--dsf2text`` output for a DSF,
+    running the conversion only when the cached ``<dsf>.text`` is
+    missing or stale.
 
-    Runs DSFTool only when the cached ``<dsf>.text`` is missing/stale,
-    and reads the text from disk only ONCE per DSF per process (shared
-    across every reader that walks the same DSF).  Returns None on any
-    failure (missing file/tool, conversion error).
+    Shared helper (extracted so ``O4_Default_Terrain_Map`` can stream
+    the same cached text dump line by line without loading it fully into
+    memory the way ``_load_dsf_text`` does).  The conversion is the
+    expensive step — DSFTool transparently decompresses 7z DSFs — and it
+    is keyed on the ``<dsf>.text`` mtime versus the source DSF mtime, so
+    a rebuilt DSF re-converts.  Returns None on any failure (missing
+    file/tool, conversion error) and prints the same warnings
+    ``_load_dsf_text`` historically printed.
     """
     if not dsf_path or not os.path.isfile(dsf_path):
         return None
@@ -366,10 +372,6 @@ def _load_dsf_text(dsf_path: str,
         mtime = os.path.getmtime(dsf_path)
     except OSError:
         return None
-    ckey = (os.path.abspath(dsf_path), mtime)
-    cached = _DSF_LINES_CACHE.get(ckey)
-    if cached is not None:
-        return cached
 
     tool = _dsftool_path()
     if tool is None:
@@ -412,6 +414,32 @@ def _load_dsf_text(dsf_path: str,
                 f"  [dsf-reader] WARN: DSFTool failed on "
                 f"{os.path.basename(dsf_path)}: {exc}")
             return None
+    return text_path
+
+
+def _load_dsf_text(dsf_path: str,
+                   cache_dir: str | None = None) -> list[str] | None:
+    """Return the DSFTool ``--dsf2text`` lines for a DSF (memoized).
+
+    Runs DSFTool only when the cached ``<dsf>.text`` is missing/stale,
+    and reads the text from disk only ONCE per DSF per process (shared
+    across every reader that walks the same DSF).  Returns None on any
+    failure (missing file/tool, conversion error).
+    """
+    if not dsf_path or not os.path.isfile(dsf_path):
+        return None
+    try:
+        mtime = os.path.getmtime(dsf_path)
+    except OSError:
+        return None
+    ckey = (os.path.abspath(dsf_path), mtime)
+    cached = _DSF_LINES_CACHE.get(ckey)
+    if cached is not None:
+        return cached
+
+    text_path = ensure_dsf_text_path(dsf_path, cache_dir)
+    if text_path is None:
+        return None
 
     try:
         with open(text_path, "r", encoding="utf-8",
