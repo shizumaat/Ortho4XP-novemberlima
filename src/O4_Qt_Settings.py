@@ -100,15 +100,13 @@ class _SettingRow(QWidget):
         lay.addLayout(top)
 
         if setting.hint:
-            short = setting.hint.split(". ")[0].strip()
-            if len(short) > 110:
-                short = short[:107] + "…"
-            elif not short.endswith("."):
-                short += "."
-            desc = QLabel(short)
+            # Full hint, word-wrapped — the sidebar filters the page down to
+            # one category at a time, so row height is no longer at a
+            # premium and truncated descriptions were routinely clipped
+            # mid-sentence.
+            desc = QLabel(setting.hint)
             desc.setWordWrap(True)
             desc.setStyleSheet("color: gray; font-size: 11px;")
-            desc.setToolTip(setting.hint)
             desc.setContentsMargins(16, 0, 0, 0)
             lay.addWidget(desc)
 
