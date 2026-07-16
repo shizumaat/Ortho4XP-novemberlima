@@ -27,7 +27,7 @@ cfg_app_vars = {
         "type": int,
         "default": 1,
         "values": (0, 1, 2, 3),
-        "hint": "Determines which temporary files are removed. Level 3 erases everything except the config and what is needed for X-Plane; Level 2 erases everything except what is needed to redo the current step only; Level 1 allows you to redo any prior step; Level 0 keeps every single file.",
+        "hint": "Which build files are deleted after a successful tile build. X-Plane itself only ever reads the .dsf, the terrain/ folder and the textures/ folder; everything else exists to speed up rebuilds. 0: keep every file (required for iterated DEM refinement). 1 (default): keep all intermediate files so any single build step can be redone on its own; only stray DSFTool dump leftovers are swept. 2: also delete the elevation and triangulation intermediates (Data .alt/.node/.poly), textures no terrain file references anymore, and the previous DSF generation (.dsf.bak) - redoing a step then means rebuilding from step 1. 3: keep only what X-Plane needs plus the tile config (additionally deletes the Data .mesh and .apt files).",
     },
     "overpass_server_choice": {
         "module": "OSM",

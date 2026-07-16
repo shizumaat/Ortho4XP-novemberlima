@@ -74,7 +74,7 @@ _LAYOUT: list = [
         ("custom_overlay_src_alternate", "Alternate overlay source", "app", True),
         ("cifp_data_path", "CIFP/AIRAC data folder", "app", True),
         ("verbosity", "Console verbosity", "app", False),
-        ("cleaning_level", "Temporary file cleanup level", "app", True),
+        ("cleaning_level", "Build file cleanup level", "app", False),
     ]),
     ("network", "Network & Downloads", [
         ("max_download_slots", "Parallel orthophoto downloads", "app", False),
