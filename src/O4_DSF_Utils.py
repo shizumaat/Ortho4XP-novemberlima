@@ -407,6 +407,7 @@ def extract_elevation_and_bathymetry_data(lat, lon):
     )
     UI.vprint(2, "     Making a copy of the Global Scenery DSF in tmp dir")
     try:
+        os.makedirs(FNAMES.Tmp_dir, exist_ok=True)
         shutil.copy(global_scenery_dsf, tmp_file)
     except:
         UI.exit_message_and_bottom_line(
