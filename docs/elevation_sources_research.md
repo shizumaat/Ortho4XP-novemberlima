@@ -45,9 +45,10 @@ means the endpoint answered an anonymous request on 2026-07-15.
 | `LITHUANIA1M` | Lithuania national DTM-LT 2020 | 1 m | `wcs_kvp` (ArcGIS exportImage) |
 | `ESTONIA1M` | Estonia national (EPSG:3301 projected pyramid) | 1 m | `arcgis_lerc_tiles` |
 | `HONGKONG5M` | Hong Kong (some elevated roads remain in the grid) | 5 m | `arcgis_lerc_tiles` |
-| `SCOTLAND30M` | Scotland mainland (EPSG:27700 pyramid; the 50 cm FLS regionals + srsp-open-data S3 are future finer adds) | 30 m | `arcgis_lerc_tiles` |
+| `SCOTLAND30M` | Scotland mainland fallback (EPSG:27700 pyramid) | 30 m | `arcgis_lerc_tiles` |
+| `SCOTLAND50CM` | Scotland lidar campaigns incl. Edinburgh + Glasgow (srsp-open-data S3, OS-grid-named tiles, finest campaign wins) | 0.5-1 m | `os_grid_bucket` |
 | `ZAGREB1M` | Zagreb city (the airport lies outside the data mask) | 1 m | `arcgis_lerc_tiles` |
-| `NORTHERNIRELAND1M` | Northern Ireland — DISABLED pending DAERA/Bluesky licence confirmation | ~1 m | `arcgis_lerc_tiles` |
+| `NORTHERNIRELAND1M` | Northern Ireland — DISABLED: cache serves empty stubs at every NI airport (licence is fine per the no-redistribution ruling; the DATA failed) | n/a | `arcgis_lerc_tiles` |
 | `SONNY1` (base tier, not inset) | Europe | 1 arc-second | `hgt_archive_drop` |
 
 ## Verified, not yet integrated — ranked by ease of integration

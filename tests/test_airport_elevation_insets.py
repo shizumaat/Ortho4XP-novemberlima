@@ -2040,3 +2040,30 @@ def test_arcgis_lerc_tiles_projected_pyramid_grid(tmp_path, monkeypatch):
     values = dataset.GetRasterBand(1).ReadAsArray()
     valid = values[values > -32768]
     assert valid.size and abs(float(valid.mean()) - 12.5) < 0.01
+
+
+# =====================================================================
+# Ordnance Survey grid-square arithmetic (Scotland's lidar bucket)
+# =====================================================================
+def test_ordnance_survey_square_extents():
+    # 100 km anchors: NS (Glasgow) and HY (Orkney).
+    assert INSETS._ordnance_survey_square_extent("NS16") == (
+        210000, 660000, 220000, 670000
+    )
+    assert INSETS._ordnance_survey_square_extent("HY20") == (
+        320000, 1000000, 330000, 1010000
+    )
+    # Quadrants halve to 5 km.
+    assert INSETS._ordnance_survey_square_extent("NS16NE") == (
+        215000, 665000, 220000, 670000
+    )
+    assert INSETS._ordnance_survey_square_extent("NS16SW") == (
+        210000, 660000, 215000, 665000
+    )
+    # Four digits address a 1 km square.
+    assert INSETS._ordnance_survey_square_extent("NR5712") == (
+        157000, 612000, 158000, 613000
+    )
+    # Garbage returns None.
+    assert INSETS._ordnance_survey_square_extent("1234") is None
+    assert INSETS._ordnance_survey_square_extent("NSXY") is None

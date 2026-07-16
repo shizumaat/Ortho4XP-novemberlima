@@ -109,6 +109,7 @@ def test_shipped_definitions_parse(shipped_registry):
         "ESTONIA1M",
         "SCOTLAND30M",
         "NORTHERNIRELAND1M",
+        "SCOTLAND50CM",
     }
     for code in (
         "VIEWFINDER1",
@@ -184,9 +185,14 @@ def test_shipped_definitions_parse(shipped_registry):
         )
     for code in ("CZECHIA2M", "LITHUANIA1M"):
         assert shipped_registry[code]["access_strategy"] == "wcs_kvp"
-    # Northern Ireland ships DISABLED until the DAERA/Bluesky licence
-    # is confirmed.
+    # Northern Ireland ships DISABLED: its tile cache serves empty
+    # stubs at every NI airport (data verification failed).
     assert shipped_registry["NORTHERNIRELAND1M"]["enabled"] is False
+    # Scotland's campaign lidar bucket (finest-wins overlap ordering).
+    assert (
+        shipped_registry["SCOTLAND50CM"]["access_strategy"]
+        == "os_grid_bucket"
+    )
     assert shipped_registry["SAXONYANHALT1M"]["access_strategy"] == "wcs"
     assert shipped_registry["HESSE1M"]["access_strategy"] == "wcs_kvp"
     # Saarland's open coverage has undocumented value semantics: OFF.
