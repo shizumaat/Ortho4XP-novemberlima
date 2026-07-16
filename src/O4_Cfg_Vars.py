@@ -20,14 +20,26 @@ cfg_app_vars = {
         "type": int,
         "default": 1,
         "values": (0, 1, 2, 3),
-        "hint": "Verbosity determines the amount of information about the whole process which is printed on screen.  Critical errors, if any, are reported in all states as well as in the Log. Values above 1 are probably only useful for for debug purposes.",
+        "value_labels": {
+            0: "Quiet - errors only",
+            1: "Normal progress",
+            2: "Detailed progress",
+            3: "Debug - everything",
+        },
+        "hint": "How much build information is printed to the console. Critical errors are always reported and logged regardless of this setting.",
     },
     "cleaning_level": {
         "module": "UI",
         "type": int,
         "default": 1,
         "values": (0, 1, 2, 3),
-        "hint": "Which build files are deleted after a successful tile build. X-Plane itself only ever reads the .dsf, the terrain/ folder and the textures/ folder; everything else exists to speed up rebuilds. 0: keep every file (required for iterated DEM refinement). 1 (default): keep all intermediate files so any single build step can be redone on its own; only stray DSFTool dump leftovers are swept. 2: also delete the elevation and triangulation intermediates (Data .alt/.node/.poly), textures no terrain file references anymore, and the previous DSF generation (.dsf.bak) - redoing a step then means rebuilding from step 1. 3: keep only what X-Plane needs plus the tile config (additionally deletes the Data .mesh and .apt files).",
+        "value_labels": {
+            0: "Keep every file (DEM iteration)",
+            1: "Keep files to redo any step",
+            2: "Lean - rebuilds restart from step 1",
+            3: "Minimal - X-Plane files + config only",
+        },
+        "hint": "Which build files are deleted after a successful tile build. X-Plane itself only reads the .dsf, terrain/ and textures/ folders - everything else exists to speed up partial rebuilds, so the higher levels trade rebuild convenience for disk space. Iterated DEM refinement requires keeping every file.",
     },
     "overpass_server_choice": {
         "module": "OSM",
@@ -132,6 +144,11 @@ cfg_tile_vars = {
         "type": str,
         "default": "ICAO",
         "values": ("None", "ICAO", "All"),
+        "value_labels": {
+            "None": "Off",
+            "ICAO": "Airports with ICAO codes",
+            "All": "All airports",
+        },
         "hint": 'Controls Ortho4XP auto-generation of runway slope patches from CIFP/AIRAC data. Auto-patches provide accurate threshold-anchored elevation profiles and are overridden by any manual patches. "ICAO" (default) only patches airports with a 4-letter ICAO code, "All" patches every airport found in CIFP, "None" disables auto-patching entirely.',
     },
     # Vector
@@ -184,6 +201,14 @@ cfg_tile_vars = {
         "type": int,
         "default": 1,
         "values": (0, 1, 2, 3, 4, 5),
+        "value_labels": {
+            0: "No roads",
+            1: "Major roads + railways",
+            2: "+ tertiary roads",
+            3: "+ residential streets",
+            4: "+ service roads",
+            5: "+ dirt tracks",
+        },
         "hint": 'Allows to level the mesh along roads and railways. Zero means nothing such is included; "1" looks for banking ways among motorways, primary and secondary roads and railway tracks; "2" adds tertiary roads; "3" brings residential and unclassified roads; "4" takes service roads, and 5 finishes with tracks. Purge the small_roads.osm cached data if you change your mind in between the levels 2-5.',
     },
     "road_banking_limit": {
@@ -225,6 +250,13 @@ cfg_tile_vars = {
         "type": int,
         "default": 19,
         "values": (16, 17, 18, 19, 20),
+        "value_labels": {
+            16: "ZL16 (up to ~2.4 m/pixel imagery)",
+            17: "ZL17 (up to ~1.2 m/pixel imagery)",
+            18: "ZL18 (up to ~0.6 m/pixel imagery)",
+            19: "ZL19 (up to ~0.3 m/pixel imagery)",
+            20: "ZL20 (up to ~0.15 m/pixel imagery)",
+        },
         "hint": "The mesh will be preprocessed to accept later any combination of imageries up to and including a zoomlevel equal to mesh_zl. Lower value could save a few tens of thousands triangles, but put a limitation on the maximum allowed imagery zoomlevel.",
     },
     # Mesh
@@ -267,6 +299,11 @@ cfg_tile_vars = {
         "type": str,
         "default": "zero",
         "values": ["zero", "mean", "none"],
+        "value_labels": {
+            "zero": "Flatten sea to zero elevation",
+            "mean": "Level each sea triangle (smooth)",
+            "none": "Keep DEM elevations (high-res DEM)",
+        },
         "hint": "Zero means that all nodes of sea triangles are set to zero elevation. With mean, some kind of smoothing occurs (triangles are levelled one at a time to their mean elevation), None (a value mostly appropriate for DEM resolution of 10m and less), positive altitudes of sea nodes are kept intact, only negative ones are brought back to zero, this avoids to create unrealistic vertical cliffs if the coastline vector data was lower res.",
     },
     "water_smoothing": {
@@ -284,6 +321,11 @@ cfg_tile_vars = {
         "type": int,
         "default": 14,
         "values": (14, 15, 16),
+        "value_labels": {
+            14: "ZL14 - softest, least VRAM",
+            15: "ZL15 - balanced",
+            16: "ZL16 - sharpest, most VRAM",
+        },
         "hint": "The zoomlevel at which the (sea) water masks are built. Masks are used for alpha channel, and this channel usually requires less resolution than the RGB ones, the reason for this (VRAM saving) parameter. If the coastline and elevation data are very detailed, it might be interesting to lift this parameter up so that the masks can reproduce this complexity.",
     },
     "masks_width": {
@@ -295,6 +337,11 @@ cfg_tile_vars = {
         "type": str,
         "default": "sand",
         "values": ["sand", "rocks", "3steps"],
+        "value_labels": {
+            "sand": "Sand - wide, soft beach fade",
+            "rocks": "Rocks - narrow, abrupt fade",
+            "3steps": "Three steps - beach, shallows, deep",
+        },
         "hint": 'A selection of three tentative masking algorithms (still looking for the Holy Grail...). The first two (sand and rocks) requires masks_width to be a single value; the third one (3steps) requires a list of the form [a,b,c] for masks width: "a" is the length in meters of a first transition from plain imagery at the shoreline towards ratio_water transparency, "b" is the second extent zone where transparency level is kept constant equal to ratio_water, and "c" is the last extent where the masks eventually fade to nothing. The transition with rocks is more abrupt than with sand.',
     },
     "use_masks_for_inland": {
@@ -327,6 +374,11 @@ cfg_tile_vars = {
         "type": str,
         "default": "full_ortho",
         "values": ("full_ortho", "airport_ortho", "default_xplane"),
+        "value_labels": {
+            "full_ortho": "Full Ortho",
+            "airport_ortho": "Airport Ortho",
+            "default_xplane": "Default X-Plane",
+        },
         "hint": "What the base mesh is textured with. Full Ortho: orthophotos everywhere (classic). Airport Ortho: orthophotos on and around airports only, fading into X-Plane default terrain. Default X-Plane: no orthophotos; the custom mesh uses X-Plane default landclass terrain read from the installed Global Scenery.",
     },
     "airport_ortho_fade_width": {
@@ -341,6 +393,12 @@ cfg_tile_vars = {
         "type": str,
         "default": "False",
         "values": ("False", "True", "ICAO", "Existing"),
+        "value_labels": {
+            "False": "Off",
+            "True": "All airports",
+            "ICAO": "Airports with ICAO codes",
+            "Existing": "Reuse already-downloaded textures",
+        },
         "hint": 'When set, textures above airports will be upgraded to a higher zoomlevel, the imagery being the same as the one they would otherwise receive. Can be limited to airports with an ICAO code for tiles with so many airports. Exceptional: use "Existing" to (try to) derive custom zl zones from the textures directory of an existing tile.',
         "short_name": "high_zl_airports",
     },

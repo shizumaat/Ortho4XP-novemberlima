@@ -40,6 +40,10 @@ class Setting:
     :param default: default value rendered as a string.
     :param values: allowed values as strings, ``()`` when free-form.
     :param hint: full hint text from the registry (``""`` for prefs).
+    :param value_labels: ``((value, label), ...)`` pairs giving a
+        human-readable menu title per allowed value; ``()`` when the raw
+        values are shown as-is. Stored values are never affected — labels
+        are display-only.
     """
 
     name: str
@@ -51,6 +55,14 @@ class Setting:
     default: str
     values: tuple
     hint: str
+    value_labels: tuple = ()
+
+    def label_for(self, value: str) -> str:
+        """Menu title for *value* (the raw value when unlabeled)."""
+        for raw, label in self.value_labels:
+            if raw == value:
+                return label
+        return value
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +85,7 @@ _LAYOUT: list = [
         ("custom_overlay_src", "Overlay source scenery folder", "app", False),
         ("custom_overlay_src_alternate", "Alternate overlay source", "app", True),
         ("cifp_data_path", "CIFP/AIRAC data folder", "app", True),
-        ("verbosity", "Console verbosity", "app", False),
+        ("verbosity", "Console output", "app", False),
         ("cleaning_level", "Build file cleanup level", "app", False),
     ]),
     ("network", "Network & Downloads", [
@@ -90,7 +102,7 @@ _LAYOUT: list = [
     ("imagery", "Imagery & Zoom Levels", [
         ("texture_mode", "Texture mode", "tile", False),
         ("airport_ortho_fade_width", "Airport ortho fade width (m)", "tile", False),
-        ("cover_airports_with_highres", "High-ZL airport coverage", "tile", False),
+        ("cover_airports_with_highres", "Airport imagery upgrade", "tile", False),
         ("cover_zl", "Airport coverage ZL", "tile", False),
         ("cover_extent", "Airport coverage extent (km)", "tile", False),
         ("sea_texture_blur", "Sea texture blur (m)", "tile", True),
@@ -106,10 +118,10 @@ _LAYOUT: list = [
         ("coast_curv_ext", "Coastline curvature extent (km)", "tile", False),
         ("limit_tris", "Max triangles (millions)", "tile", False),
         ("min_angle", "Min triangle angle (°)", "tile", True),
-        ("sea_smoothing_mode", "Sea smoothing mode", "tile", True),
+        ("sea_smoothing_mode", "Sea surface smoothing", "tile", True),
         ("water_smoothing", "Inland water smoothing passes", "tile", True),
         ("iterate", "Iterative refinement step", "tile", True),
-        ("mesh_zl", "Max imagery ZL supported by mesh", "tile", True),
+        ("mesh_zl", "Max imagery zoom the mesh allows", "tile", True),
     ]),
     ("vector", "Roads & Vector Data", [
         ("road_level", "Road detail level", "tile", False),
@@ -126,9 +138,9 @@ _LAYOUT: list = [
         ("water_tech", "Water rendering tech", "tile", False),
         ("ratio_water", "Water transparency ratio", "tile", False),
         ("ratio_bathy", "Bathymetry multiplier", "tile", False),
-        ("mask_zl", "Mask zoom level", "tile", False),
+        ("mask_zl", "Water mask resolution", "tile", False),
         ("masks_width", "Mask width (m)", "tile", False),
-        ("masking_mode", "Masking algorithm", "tile", False),
+        ("masking_mode", "Coastline mask style", "tile", False),
         ("use_masks_for_inland", "Mask inland water", "tile", True),
         ("imprint_masks_to_dds", "Imprint masks into DDS", "tile", True),
         ("distance_masks_too", "Build distance masks", "tile", True),
@@ -179,6 +191,11 @@ def _build_registry() -> tuple:
                 default=str(spec["default"]),
                 values=tuple(str(v) for v in raw_values),
                 hint=spec.get("hint", ""),
+                value_labels=tuple(
+                    (str(value), title)
+                    for value, title
+                    in spec.get("value_labels", {}).items()
+                ),
             ))
     return ordered, categories
 
@@ -241,7 +258,7 @@ def _parse_cfg(path: str) -> dict:
 
 def _default_global_cfg() -> str:
     """Path to the default global config file."""
-    return FNAMES.resource_path("Ortho4XP.cfg")
+    return FNAMES.data_path("Ortho4XP.cfg")
 
 
 def _write_atomic_with_backup(path: str, data: dict) -> None:

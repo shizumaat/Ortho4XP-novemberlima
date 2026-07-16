@@ -834,6 +834,138 @@ def _load_object_geometry(physical_path: str):
     return geometry
 
 
+def airport_mod_cache_dir(pack_root: str) -> str | None:
+    """Directory for Ortho4XP-only sidecar caches of one scenery pack.
+
+    USER RULING (Noah, 2026-07-15): cache files used only by Ortho4XP
+    must NOT clutter airport scenery pack folders — they live under the
+    Ortho4XP data root at ``Airport_mod_cache/<pack folder name>/``.
+    (Backups such as ``.anchor_bak`` explicitly STAY in-pack next to the
+    files they back up; this helper is for caches only.)
+
+    The directory is NOT created here — writers ``os.makedirs(...,
+    exist_ok=True)`` right before writing, readers just probe with
+    ``isfile``.  In a source checkout ``O4_File_Names.data_path`` follows
+    the current working directory at call time (load-bearing legacy
+    behavior elsewhere — never cache this result at import time); in the
+    packaged app it is the user-chosen data root.
+
+    Returns ``None`` when ``pack_root`` is falsy or not a directory."""
+    if not pack_root or not os.path.isdir(pack_root):
+        return None
+    import O4_File_Names as _FNAMES
+    pack_name = os.path.basename(os.path.abspath(pack_root))
+    return _FNAMES.data_path(os.path.join("Airport_mod_cache", pack_name))
+
+
+# ── Pack-sidecar footprint cache (mirrors the object-terrain
+# classification cache in ``object_terrain_assembly``) ────────────────
+#
+# Bump when the partition / footprint logic changes shape in a way that
+# would make an old cached ring set wrong — invalidates every footprint
+# sidecar.
+_OBJECT_FOOTPRINT_CACHE_VERSION = 1
+
+# Sidecar file name prefix; the full name carries the DSF stem
+# (``o4_object_footprints_<dsf-stem>.cache``) so two DSFs of one pack
+# never collide.  Lives under ``airport_mod_cache_dir`` — NOT in the
+# pack (user ruling 2026-07-15, no Ortho4XP clutter in scenery packs).
+_OBJECT_FOOTPRINT_SIDECAR_PREFIX = "o4_object_footprints"
+
+# Pre-ruling in-pack sidecar name, removed on sight (legacy cleanup).
+_OBJECT_FOOTPRINT_LEGACY_SIDECAR_NAME = "o4_object_footprints.cache"
+
+
+def _object_footprint_sidecar(
+    dsf_path: str,
+    pack_root: str | None,
+    contact_epsilon_metres: float,
+    minimum_reach_metres: float,
+) -> tuple[str | None, str | None]:
+    """Sidecar path + input fingerprint for the pack footprint cache.
+
+    The return value of :func:`read_dsf_object_buildings` is a pure
+    function of everything hashed here, so a fingerprint match makes the
+    cached ring set exactly reproducible.  The fingerprint (sha1, same
+    style as ``object_terrain_assembly._classification_sidecar``) covers:
+
+    * the overlay DSF (basename, size, mtime) — the placement list is
+      read from it;
+    * every ``.obj`` under the pack root (relative path, size, mtime) —
+      the geometry that is parsed and partitioned; a Phase 2 y-bake that
+      rewrites a live ``.obj`` invalidates automatically.  ``.anchor_bak``
+      backups are not ``.obj`` files and stay out of it (same rule and
+      rationale as the classification fingerprint);
+    * the two config constants that drive partitioning,
+      ``DSF_OBJECT_CONTACT_EPSILON_M`` and ``DSF_OBJECT_MIN_REACH_M``
+      (their float values enter the digest);
+    * :data:`_OBJECT_FOOTPRINT_CACHE_VERSION`.
+
+    ACCEPTED RISK (identical to the classification cache): out-of-pack,
+    ``library.txt``-resolved ``.obj`` resources are NOT fingerprinted —
+    only files physically under the pack root are walked — so an edit to
+    a shared library object elsewhere in the X-Plane install will not
+    invalidate this cache.  Pack-local resources (the common case for the
+    co-baked terminal ``.obj`` files this reader targets) are covered.
+
+    The sidecar lives under :func:`airport_mod_cache_dir`, never in the
+    pack (user ruling 2026-07-15); any pre-ruling in-pack sidecar found
+    at the pack root is removed here so the pack stays clean.
+
+    Returns ``(None, None)`` when no pack root is known (nowhere to key a
+    sidecar on) or fingerprinting fails."""
+    cache_directory = airport_mod_cache_dir(pack_root)
+    if cache_directory is None:
+        return None, None
+    # Legacy cleanup (the point of the ruling): the old in-pack sidecar
+    # would keep cluttering the pack — remove exactly that one filename
+    # at the pack root, swallowing every OSError.
+    try:
+        os.remove(os.path.join(pack_root,
+                               _OBJECT_FOOTPRINT_LEGACY_SIDECAR_NAME))
+    except OSError:
+        pass
+    import hashlib
+    digest = hashlib.sha1()
+    try:
+        digest.update(str(_OBJECT_FOOTPRINT_CACHE_VERSION).encode())
+        dsf_stat = os.stat(dsf_path)
+        digest.update(
+            f"{os.path.basename(dsf_path)}:{dsf_stat.st_size}"
+            f":{dsf_stat.st_mtime}".encode()
+        )
+        object_entries = []
+        for directory, _subdirectories, file_names in os.walk(pack_root):
+            for file_name in file_names:
+                if not file_name.lower().endswith(".obj"):
+                    continue
+                full_path = os.path.join(directory, file_name)
+                try:
+                    file_stat = os.stat(full_path)
+                except OSError:
+                    continue
+                object_entries.append(
+                    f"{os.path.relpath(full_path, pack_root)}"
+                    f":{file_stat.st_size}:{file_stat.st_mtime}"
+                )
+        for entry in sorted(object_entries):
+            digest.update(entry.encode())
+        digest.update(
+            f"epsilon:{float(contact_epsilon_metres)!r}"
+            f":reach:{float(minimum_reach_metres)!r}".encode()
+        )
+    except OSError:
+        return None, None
+    dsf_stem = os.path.splitext(os.path.basename(dsf_path))[0]
+    return (
+        os.path.join(
+            cache_directory,
+            f"{_OBJECT_FOOTPRINT_SIDECAR_PREFIX}_{dsf_stem}.cache",
+        ),
+        digest.hexdigest(),
+    )
+
+
 def read_dsf_object_buildings(
     dsf_path: str,
     cache_dir: str | None = None,
@@ -869,6 +1001,18 @@ def read_dsf_object_buildings(
     uses; ``read_dsf_buildings`` never needed ``_pack_root_for_dsf``
     but pack-local resources such as
     ``Terminals/Hangar/Charlotte_Airport_007_ALB.obj`` do.
+
+    The whole result is cached in a sidecar under the data root's
+    ``Airport_mod_cache/<pack>/``
+    (``o4_object_footprints_<dsf-stem>.cache``, user ruling 2026-07-15:
+    never inside the pack) keyed on a fingerprint of the DSF,
+    every pack-local ``.obj``, and the two partition config constants —
+    the O(n^2) contact-graph partition re-runs only when an input
+    actually changes (see :func:`_object_footprint_sidecar` for the
+    fingerprint, including the accepted out-of-pack library-object risk).
+    ``O4_OBJECT_FOOTPRINT_CACHE=0`` disables the cache entirely (no read,
+    no write); with no resolvable pack root the reader behaves as it did
+    before the cache existed.
     """
     # Function-local config imports so tests can monkeypatch the values
     # (the module-level idiom at the top of this file freezes them —
@@ -880,6 +1024,36 @@ def read_dsf_object_buildings(
     from . import obj8_reader as _OBJ8
     from . import object_anchor as _ANCHOR
     from . import object_footprints as _FOOTPRINTS
+
+    # ── Pack-sidecar footprint cache (default ON) ──  A hit skips ALL
+    # ``.obj`` parsing and the contact-graph partition and returns the
+    # cached ring set.  ``O4_OBJECT_FOOTPRINT_CACHE=0`` disables it.
+    sidecar_path: str | None = None
+    fingerprint: str | None = None
+    if os.environ.get("O4_OBJECT_FOOTPRINT_CACHE", "1") == "1":
+        import pickle
+        sidecar_path, fingerprint = _object_footprint_sidecar(
+            dsf_path, _pack_root_for_dsf(dsf_path),
+            DSF_OBJECT_CONTACT_EPSILON_M, DSF_OBJECT_MIN_REACH_M,
+        )
+        if sidecar_path and fingerprint and os.path.isfile(sidecar_path):
+            try:
+                with open(sidecar_path, "rb") as sidecar_file:
+                    payload = pickle.load(sidecar_file)
+                if payload.get("fingerprint") == fingerprint:
+                    UI.vprint(
+                        1,
+                        "   [dsf-object] footprints read from the pack "
+                        "sidecar cache (fingerprint match)",
+                    )
+                    return payload["result"]
+                UI.vprint(
+                    1,
+                    "   [dsf-object] footprint pack sidecar cache STALE "
+                    "(pack edited since it was written) - recomputing",
+                )
+            except Exception:
+                pass
 
     lines = _load_dsf_text(dsf_path, cache_dir)
     if not lines:
@@ -982,6 +1156,27 @@ def read_dsf_object_buildings(
                 structure, pool_geometry_by_resource, pool.placements)
             if ring is not None and len(ring) >= 3:
                 out.append((ring, [], "object"))
+
+    # Persist the finished ring set for the next build of this unchanged
+    # pack.  A write failure must never break a build (out of space, a
+    # read-only pack) — swallow it and let the next run recompute.
+    if sidecar_path is not None and fingerprint is not None:
+        import pickle
+        try:
+            os.makedirs(os.path.dirname(sidecar_path), exist_ok=True)
+            with open(sidecar_path, "wb") as sidecar_file:
+                pickle.dump(
+                    {"fingerprint": fingerprint, "result": out},
+                    sidecar_file,
+                )
+            UI.vprint(
+                1,
+                "   [dsf-object] footprints written to the pack sidecar "
+                f"cache ({os.path.basename(sidecar_path)})",
+            )
+        except Exception:
+            pass
+
     return out
 
 

@@ -71,6 +71,30 @@ def test_search_matches_across_all_categories(window):
     assert _visible_categories(window) <= {first_key}
 
 
+def test_enumerated_menus_show_labels_but_store_raw_values(window):
+    """Combos display value_labels titles; stored values stay raw."""
+    row = window.rows["cleaning_level"]
+    combo = row.control
+    texts = [combo.itemText(i) for i in range(combo.count())]
+    assert texts == [
+        "Keep every file (DEM iteration)",
+        "Keep files to redo any step",
+        "Lean - rebuilds restart from step 1",
+        "Minimal - X-Plane files + config only",
+    ]
+    row.set_value("2")
+    assert row.value() == "2"
+    assert combo.currentText() == "Lean - rebuilds restart from step 1"
+    # Unlabeled enumerated settings still show and store the raw value.
+    tech = window.rows["water_tech"]
+    tech.set_value("XP12")
+    assert tech.value() == "XP12"
+    # Labels are searchable.
+    window.search_edit.setText("dem iteration")
+    assert not window.rows["cleaning_level"].isHidden()
+    window.search_edit.setText("")
+
+
 def test_cleaning_level_is_a_regular_setting(window):
     setting = next(s for s in SM.settings() if s.name == "cleaning_level")
     assert setting.advanced is False

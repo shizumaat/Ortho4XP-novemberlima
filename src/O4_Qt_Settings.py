@@ -79,9 +79,12 @@ class _SettingRow(QWidget):
             self.control = QCheckBox()
             self.control.toggled.connect(self._emit_changed)
         elif setting.values:
+            # Menu shows the human-readable title; the raw config value
+            # rides along as item data so storage never sees the label.
             self.control = QComboBox()
-            self.control.addItems(list(setting.values))
-            self.control.currentTextChanged.connect(self._emit_changed)
+            for raw in setting.values:
+                self.control.addItem(setting.label_for(raw), raw)
+            self.control.currentIndexChanged.connect(self._emit_changed)
         else:
             self.control = QLineEdit()
             self.control.setFixedWidth(
@@ -112,7 +115,12 @@ class _SettingRow(QWidget):
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._context_menu)
         self._search_blob = (
-            "%s %s %s" % (setting.label, setting.name, setting.hint)
+            "%s %s %s %s" % (
+                setting.label,
+                setting.name,
+                setting.hint,
+                " ".join(title for _, title in setting.value_labels),
+            )
         ).lower()
 
     # -- value plumbing -------------------------------------------------
@@ -120,7 +128,7 @@ class _SettingRow(QWidget):
         if isinstance(self.control, QCheckBox):
             return "True" if self.control.isChecked() else "False"
         if isinstance(self.control, QComboBox):
-            return self.control.currentText()
+            return self.control.currentData()
         return self.control.text().strip()
 
     def set_value(self, text):
@@ -128,7 +136,9 @@ class _SettingRow(QWidget):
         if isinstance(self.control, QCheckBox):
             self.control.setChecked(str(text).strip() in ("True", "true", "1"))
         elif isinstance(self.control, QComboBox):
-            self.control.setCurrentText(str(text))
+            index = self.control.findData(str(text))
+            if index >= 0:
+                self.control.setCurrentIndex(index)
         else:
             self.control.setText(str(text))
         self.control.blockSignals(False)
