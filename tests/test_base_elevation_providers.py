@@ -193,6 +193,11 @@ def test_shipped_definitions_parse(shipped_registry):
         shipped_registry["SCOTLAND50CM"]["access_strategy"]
         == "os_grid_bucket"
     )
+    # The coverage box must reach Shetland: tile +59-002 (Sumburgh,
+    # Fair Isle) regressed to the 90 m base when it stopped at 58.7.
+    assert INSETS._coverage_bbox_intersects(
+        shipped_registry["SCOTLAND50CM"], (-2.0, 59.0, -1.0, 60.0)
+    )
     assert shipped_registry["SAXONYANHALT1M"]["access_strategy"] == "wcs"
     assert shipped_registry["HESSE1M"]["access_strategy"] == "wcs_kvp"
     # Saarland's open coverage has undocumented value semantics: OFF.

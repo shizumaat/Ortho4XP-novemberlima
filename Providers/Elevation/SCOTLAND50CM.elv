@@ -23,8 +23,9 @@ bucket_prefixes=lidar/phase-1/dtm/,lidar/phase-2/dtm/,lidar/phase-3/dtm/,lidar/p
 # phases 1-2.
 native_resolution_m=0.5
 
-# Scotland.
-coverage_bbox=-7.7,54.6,-0.7,58.7
+# Scotland INCLUDING Orkney, Fair Isle and Shetland (the bucket's
+# HU/HY/HP squares -- phase 2 covers Shetland at 1 m).
+coverage_bbox=-7.7,54.6,-0.6,61.0
 
 vertical_datum=ODN
 license=Open Government Licence v3
