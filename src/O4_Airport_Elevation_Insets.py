@@ -1566,6 +1566,245 @@ class XyzTextTileStrategy:
 
 
 # =====================================================================
+# Strategy 12: arcgis_lerc_tiles (tiles-only ArcGIS elevation services)
+# =====================================================================
+@register_access_strategy("arcgis_lerc_tiles")
+class ArcgisLercTileStrategy:
+    """Tiles-only ArcGIS elevation services (LERC blobs in Web Mercator).
+
+    Some open city terrain models (Rio de Janeiro's lidar) are hosted
+    as ArcGIS image services whose ``exportImage`` is disabled: the
+    only data channel is a pre-rendered tile pyramid of single-band
+    float LERC blobs on the STANDARD global Web Mercator grid, so a
+    tile's (row, column) at a level are ordinary slippy-map
+    coordinates.  Fetch computes the covering tiles at ``tile_level``,
+    downloads the blobs, decodes them ALL in one subprocess (the
+    imagecodecs LERC decoder and the osgeo libraries abort a shared
+    process -- the same isolation the New Zealand provider uses),
+    assembles an EPSG:3857 mosaic and warps it through the shared
+    core.  Missing tiles (outside the service's data mask) are simply
+    absent from the mosaic.
+    """
+
+    MAXIMUM_TILES_PER_MOSAIC = 1024
+
+    # argv: <blob_directory> <output_directory>; decodes every *.lerc
+    # file to a .npy beside-named file, marking invalid samples -32768.
+    _LERC_BLOB_DECODE_SNIPPET = (
+        "import os, sys\n"
+        "import numpy\n"
+        "import imagecodecs\n"
+        "for name in os.listdir(sys.argv[1]):\n"
+        "    if not name.endswith('.lerc'):\n"
+        "        continue\n"
+        "    blob = open(os.path.join(sys.argv[1], name), 'rb').read()\n"
+        "    mask = None\n"
+        "    try:\n"
+        "        decoded = imagecodecs.lerc_decode(blob, masks=True)\n"
+        "        if isinstance(decoded, tuple):\n"
+        "            (values, mask) = decoded\n"
+        "        else:\n"
+        "            values = decoded\n"
+        "    except TypeError:\n"
+        "        values = imagecodecs.lerc_decode(blob)\n"
+        "    values = numpy.asarray(values, dtype=numpy.float32)\n"
+        "    values = values.reshape(values.shape[-2], values.shape[-1])\n"
+        "    if mask is not None:\n"
+        "        mask = numpy.asarray(mask, dtype=bool).reshape(values.shape)\n"
+        "        values[~mask] = -32768.0\n"
+        "    # ArcGIS elevation tiles carry a one-sample shared edge\n"
+        "    # (257x257 for a 256 grid): crop to the tile proper.\n"
+        "    values = values[:256, :256]\n"
+        "    numpy.save(\n"
+        "        os.path.join(sys.argv[2], name[:-5] + '.npy'), values\n"
+        "    )\n"
+    )
+
+    def discover(self, definition, bounding_box_wgs84):
+        if not _coverage_bbox_intersects(definition, bounding_box_wgs84):
+            return None
+        return [{"template": definition.get("tile_url_template")}]
+
+    def fetch(
+        self,
+        definition,
+        bounding_box_wgs84,
+        target_resolution_m,
+        destination_path,
+    ):
+        import shutil
+        import subprocess
+        import sys
+
+        import requests
+
+        if not has_gdal:
+            return None
+        if not _coverage_bbox_intersects(definition, bounding_box_wgs84):
+            return None
+        if getattr(sys, "frozen", False):
+            UI.vprint(
+                1,
+                "   WARNING: LERC-tile elevation sources are not "
+                "available in the packaged application - skipping "
+                + str(definition.get("code"))
+                + ".",
+            )
+            return None
+        level = int(float(definition.get("tile_level", 15)))
+        (west, south, east, north) = bounding_box_wgs84
+        (x_min, y_min) = _slippy_tile_of(north, west, level)
+        (x_max, y_max) = _slippy_tile_of(south, east, level)
+        columns = x_max - x_min + 1
+        rows = y_max - y_min + 1
+        if columns * rows > self.MAXIMUM_TILES_PER_MOSAIC:
+            UI.vprint(
+                1,
+                "   WARNING: LERC tile mosaic of",
+                columns * rows,
+                "tiles exceeds the cap - skipping this source.",
+            )
+            return None
+        template = definition["tile_url_template"]
+        os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+        blob_directory = destination_path + ".lercblobs"
+        decoded_directory = destination_path + ".lercnpy"
+        os.makedirs(blob_directory, exist_ok=True)
+        os.makedirs(decoded_directory, exist_ok=True)
+        session = requests.Session()
+        fetched = []
+        try:
+            for tile_y in range(y_min, y_max + 1):
+                for tile_x in range(x_min, x_max + 1):
+                    url = (
+                        template.replace("{level}", str(level))
+                        .replace("{row}", str(tile_y))
+                        .replace("{col}", str(tile_x))
+                    )
+                    try:
+                        response = session.get(url, timeout=60)
+                    except Exception:
+                        continue
+                    if (
+                        response.status_code != 200
+                        or not response.content
+                    ):
+                        continue
+                    name = "%d_%d" % (tile_x, tile_y)
+                    with open(
+                        os.path.join(blob_directory, name + ".lerc"), "wb"
+                    ) as handle:
+                        handle.write(response.content)
+                    fetched.append((tile_x, tile_y, name))
+            if not fetched:
+                return None
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    self._LERC_BLOB_DECODE_SNIPPET,
+                    blob_directory,
+                    decoded_directory,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            if completed.returncode != 0:
+                UI.vprint(
+                    1,
+                    "   WARNING: LERC decode failed:",
+                    completed.stderr.strip()[-200:],
+                )
+                return None
+            values = numpy.full(
+                (rows * 256, columns * 256), -32768.0, dtype=numpy.float32
+            )
+            decoded_any = False
+            for (tile_x, tile_y, name) in fetched:
+                npy_path = os.path.join(decoded_directory, name + ".npy")
+                try:
+                    tile_values = numpy.load(npy_path)
+                except (OSError, ValueError):
+                    continue
+                if tile_values.shape != (256, 256):
+                    continue
+                row0 = (tile_y - y_min) * 256
+                column0 = (tile_x - x_min) * 256
+                values[row0 : row0 + 256, column0 : column0 + 256] = (
+                    tile_values
+                )
+                decoded_any = True
+            if not decoded_any:
+                return None
+        finally:
+            shutil.rmtree(blob_directory, ignore_errors=True)
+            shutil.rmtree(decoded_directory, ignore_errors=True)
+        tile_size_m = 2.0 * _WEB_MERCATOR_HALF_CIRCUMFERENCE / (2 ** level)
+        mosaic_path = destination_path + ".mosaic.tif"
+        driver = gdal.GetDriverByName("GTiff")
+        dataset = driver.Create(
+            mosaic_path,
+            values.shape[1],
+            values.shape[0],
+            1,
+            gdal.GDT_Float32,
+        )
+        dataset.SetGeoTransform(
+            (
+                x_min * tile_size_m - _WEB_MERCATOR_HALF_CIRCUMFERENCE,
+                tile_size_m / 256.0,
+                0.0,
+                _WEB_MERCATOR_HALF_CIRCUMFERENCE - y_min * tile_size_m,
+                0.0,
+                -tile_size_m / 256.0,
+            )
+        )
+        spatial_reference = osr.SpatialReference()
+        spatial_reference.ImportFromEPSG(3857)
+        dataset.SetProjection(spatial_reference.ExportToWkt())
+        band = dataset.GetRasterBand(1)
+        band.SetNoDataValue(-32768.0)
+        band.WriteArray(values)
+        band.FlushCache()
+        dataset = None
+        warped = warp_vsicurl_sources_to_geotiff(
+            [mosaic_path],
+            bounding_box_wgs84,
+            target_resolution_m,
+            destination_path,
+        )
+        try:
+            os.remove(mosaic_path)
+        except OSError:
+            pass
+        if not warped:
+            return None
+        if not _geotiff_has_valid_data(destination_path):
+            try:
+                os.remove(destination_path)
+            except OSError:
+                pass
+            return None
+        return {
+            "provider": definition.get("code"),
+            "access_strategy": definition.get("access_strategy"),
+            "source_urls": [definition.get("tile_url_template")],
+            "native_resolution_m": definition.get("native_resolution_m"),
+            "license": definition.get("license"),
+            "attribution": definition.get("attribution"),
+            "vertical_datum": definition.get("vertical_datum"),
+            "datum_note": (
+                "Elevations are in the source vertical datum; lidar is "
+                "treated as truth and is NOT shifted toward the base DEM."
+            ),
+            "fetch_date": datetime.date.today().isoformat(),
+            "bounding_box_wgs84": list(bounding_box_wgs84),
+            "resolution_m": target_resolution_m,
+        }
+
+
+# =====================================================================
 # Strategy 6: direct_cog (fixed Cloud-Optimized GeoTIFF URLs -> warp)
 # =====================================================================
 @register_access_strategy("direct_cog")

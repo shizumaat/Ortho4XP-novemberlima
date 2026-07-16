@@ -101,6 +101,7 @@ def test_shipped_definitions_parse(shipped_registry):
         "ESPIRITOSANTO2M",
         "CURITIBA50CM",
         "PERNAMBUCO1M",
+        "RIODEJANEIRO5M",
     }
     for code in (
         "VIEWFINDER1",
@@ -164,6 +165,10 @@ def test_shipped_definitions_parse(shipped_registry):
     assert (
         shipped_registry["PERNAMBUCO1M"]["access_strategy"]
         == "xyz_archive_drop"
+    )
+    assert (
+        shipped_registry["RIODEJANEIRO5M"]["access_strategy"]
+        == "arcgis_lerc_tiles"
     )
     assert shipped_registry["SAXONYANHALT1M"]["access_strategy"] == "wcs"
     assert shipped_registry["HESSE1M"]["access_strategy"] == "wcs_kvp"

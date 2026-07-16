@@ -1877,3 +1877,113 @@ def test_geojson_tile_index_caches_and_fetches(tmp_path, monkeypatch):
     assert (
         strategy.discover(definition, (-58.0, -34.0, -57.9, -33.9)) is None
     )
+
+
+# =====================================================================
+# The arcgis_lerc_tiles strategy (Rio's tiles-only image service)
+# =====================================================================
+# imagecodecs' LERC codec and the osgeo libraries abort a shared
+# process (the reason the strategy decodes in a subprocess) -- so the
+# TEST must generate its LERC fixture in a subprocess as well.
+def _lerc_blob_via_subprocess(tmp_path):
+    import subprocess
+    import sys
+
+    blob_path = str(tmp_path / "fixture.lerc")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys\n"
+                "import numpy\n"
+                "import imagecodecs\n"
+                "values = numpy.full((257, 257), 12.5,"
+                " dtype=numpy.float32)\n"
+                "open(sys.argv[1], 'wb').write("
+                "imagecodecs.lerc_encode(values))\n"
+            ),
+            blob_path,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if completed.returncode != 0:
+        return None
+    with open(blob_path, "rb") as handle:
+        return handle.read()
+
+
+@requires_gdal
+def test_arcgis_lerc_tiles_decodes_and_serves(tmp_path, monkeypatch):
+    import types
+    import requests
+
+    blob = _lerc_blob_via_subprocess(tmp_path)
+    if blob is None:
+        pytest.skip("imagecodecs with LERC not available")
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    monkeypatch.setattr(
+        requests,
+        "Session",
+        lambda: types.SimpleNamespace(
+            get=lambda url, timeout=None: types.SimpleNamespace(
+                status_code=200, content=blob
+            )
+        ),
+    )
+    definition = {
+        "code": "TESTRIO",
+        "access_strategy": "arcgis_lerc_tiles",
+        "tile_url_template": (
+            "https://tiles.test/ImageServer/tile/{level}/{row}/{col}"
+        ),
+        "tile_level": "15",
+        "native_resolution_m": "5",
+        "vertical_datum": "Imbituba",
+    }
+    destination = str(tmp_path / "SBGL_testrio.tif")
+    provenance = INSETS.fetch_inset(
+        definition, (-43.255, -22.820, -43.245, -22.812), 5.0, destination
+    )
+    assert provenance is not None
+    dataset = gdal.Open(destination)
+    values = dataset.GetRasterBand(1).ReadAsArray()
+    valid = values[values > -32768]
+    assert valid.size and abs(float(valid.mean()) - 12.5) < 0.01
+
+
+def test_arcgis_lerc_tiles_missing_tiles_are_no_coverage(
+    tmp_path, monkeypatch
+):
+    import types
+    import requests
+
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    monkeypatch.setattr(
+        requests,
+        "Session",
+        lambda: types.SimpleNamespace(
+            get=lambda url, timeout=None: types.SimpleNamespace(
+                status_code=404, content=b""
+            )
+        ),
+    )
+    definition = {
+        "code": "TESTRIO",
+        "access_strategy": "arcgis_lerc_tiles",
+        "tile_url_template": (
+            "https://tiles.test/ImageServer/tile/{level}/{row}/{col}"
+        ),
+        "tile_level": "15",
+    }
+    assert (
+        INSETS.fetch_inset(
+            definition,
+            (-43.255, -22.820, -43.245, -22.812),
+            5.0,
+            str(tmp_path / "SBXX_testrio.tif"),
+        )
+        is None
+    )

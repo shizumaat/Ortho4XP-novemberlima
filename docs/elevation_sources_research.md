@@ -40,6 +40,7 @@ means the endpoint answered an anonymous request on 2026-07-15.
 | `ESPIRITOSANTO2M` | Espirito Santo, Brazil (covers Vitoria) | 2 m | `tile_grid_http` |
 | `CURITIBA50CM` | Curitiba municipality, Brazil (covers Bacacheri, NOT Afonso Pena) | 0.5 m | `wcs_kvp` (ArcGIS exportImage) |
 | `PERNAMBUCO1M` | Pernambuco, Brazil (covers Recife; CAPTCHA-gated portal → drop folder) | 1 m | `xyz_archive_drop` |
+| `RIODEJANEIRO5M` | Rio de Janeiro municipality (Galeao + Santos Dumont) | 5 m | `arcgis_lerc_tiles` (tiles-only pyramid, 257-sample shared-edge LERC blobs, subprocess decode) |
 | `SONNY1` (base tier, not inset) | Europe | 1 arc-second | `hgt_archive_drop` |
 
 ## Verified, not yet integrated — ranked by ease of integration
@@ -187,9 +188,8 @@ open: Chile (12.5 m radar DSM only), Peru, Panama, Guatemala,
 Dominican Republic, Paraguay, Bolivia, Sao Paulo state beyond the
 capital (Guarulhos and Campinas have no open coverage), Porto Alegre
 (state lidar only now being procured post-flood — recheck SEMA-RS),
-Salvador, Fortaleza, Belo Horizonte.  Rio de Janeiro's city service
-was confirmed to cover Galeao, but its raster endpoint is tiles-only
-(exportImage disabled) and remains unintegrated.
+Salvador, Fortaleza, Belo Horizonte.  Rio de Janeiro's tiles-only
+service is now SHIPPED via the arcgis_lerc_tiles strategy.
 
 ## Unresolved after four rounds
 
