@@ -27,6 +27,8 @@ available_sources = (
     'NED 1/3" (from USGS) - USA',
     "ALOS",
     "ALOS 3W30 (from OpenTopography) - NOW REQUIRES MANUAL DOWNLOAD",
+    "SONNY1",
+    'Sonny LiDAR 1" (manual download from sonny.4lima.de) - Europe',
 )
 
 global_sources = ("View", "SRTM", "ALOS")

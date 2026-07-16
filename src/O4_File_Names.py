@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 from math import floor
 
@@ -7,33 +8,168 @@ import O4_UI_Utils as UI
 g2xpl_16_prefix = ""
 g2xpl_16_suffix = ""
 
+
+def is_frozen_app():
+    """True when running from a PyInstaller bundle (the packaged app)."""
+    return getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
+
+
 def resource_path(relative_path):
-    """Get absolute path to resource."""
-    # Required for using pyinstaller
-    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    """Absolute path to a READ-ONLY bundled resource (Providers, Extents,
+    Filters, Utils, ...): inside the PyInstaller bundle when frozen, the
+    checkout directory otherwise. Never use this for anything the app
+    writes — writes inside a macOS .app bundle break its code signature,
+    and a quarantined bundle may be mounted read-only."""
+    if is_frozen_app():
         base_path = os.path.join(sys._MEIPASS, 'Ortho4XP_Data')
     else:
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
-Preview_dir = resource_path("Previews")
+
+# ---------------------------------------------------------------------------
+# Writable data root: where downloads, caches, built tiles and config live.
+#
+# Running from a source checkout, this is the checkout directory itself, so
+# nothing changes for developers. The packaged app instead asks the user on
+# first launch and remembers the answer in a small per-user pointer file
+# (the data itself lives wherever the user chose, possibly a big external
+# drive; only the pointer lives under the home directory).
+# ---------------------------------------------------------------------------
+
+data_root_pointer_file = os.path.join(
+    os.path.expanduser("~"), ".ortho4xp", "data_root.txt"
+)
+
+
+def default_data_root():
+    """Default offered by the packaged app's first-launch folder chooser."""
+    if sys.platform == "darwin":
+        # "Next to the app" is unreliable on macOS (Gatekeeper translocation
+        # runs freshly downloaded apps from a randomized read-only mount).
+        return os.path.join(os.path.expanduser("~"), "Ortho4XP")
+    # Windows / Linux: portable layout — data folders next to the executable.
+    return os.path.dirname(os.path.abspath(sys.executable))
+
+
+def read_data_root_pointer():
+    """The remembered data-root choice, or None if never chosen."""
+    try:
+        with open(data_root_pointer_file, "r", encoding="utf-8") as f:
+            path = f.read().strip()
+        return path or None
+    except OSError:
+        return None
+
+
+def write_data_root_pointer(path):
+    """Remember the user's data-root choice for future launches."""
+    os.makedirs(os.path.dirname(data_root_pointer_file), exist_ok=True)
+    with open(data_root_pointer_file, "w", encoding="utf-8") as f:
+        f.write(os.path.abspath(path) + "\n")
+
+
+def resolve_data_root():
+    """Precedence: ORTHO4XP_DATA_ROOT environment variable, then (packaged
+    app only) the remembered first-launch choice, then the default."""
+    env_root = os.environ.get("ORTHO4XP_DATA_ROOT")
+    if env_root:
+        return os.path.abspath(env_root)
+    if is_frozen_app():
+        pointed = read_data_root_pointer()
+        if pointed:
+            return pointed
+        return default_data_root()
+    return os.path.abspath(".")
+
+
+# Explicit choice made at runtime (the packaged app's first-launch chooser);
+# None means "resolve on each use", which keeps the legacy source-checkout
+# behavior of following the current working directory at call time.
+_data_root_override = None
+
+
+def current_data_root():
+    if _data_root_override is not None:
+        return _data_root_override
+    return resolve_data_root()
+
+
+def data_path(relative_path):
+    """Absolute path for WRITABLE app data (downloads, tiles, caches,
+    config, logs). Everything lands under the user-chosen data root."""
+    return os.path.join(current_data_root(), relative_path)
+
+
+# Read-only, shipped with the app.
 Provider_dir = resource_path("Providers")
 Extent_dir = resource_path("Extents")
 Filter_dir = resource_path("Filters")
-OSM_dir = resource_path("OSM_data")
-Mask_dir = resource_path("Masks")
-Imagery_dir = resource_path("Orthophotos")
-Elevation_dir = resource_path("Elevation_data")
-Geotiff_dir = resource_path("Geotiffs")
-Patch_dir = resource_path("Patches")
 Utils_dir = resource_path("Utils")
-Tile_dir = resource_path("Tiles")
-Tmp_dir = resource_path("tmp")
-Overlay_dir = resource_path("yOrtho4XP_Overlays")
+
+# Writable, live under the data root (values assigned by _apply_data_root).
+# Extents/Filters/Providers are read-only EXCEPT the generated layer-mask
+# cache, which gets its own writable home below.
+Auto_extent_dir = ""
+Preview_dir = ""
+OSM_dir = ""
+Mask_dir = ""
+Imagery_dir = ""
+Elevation_dir = ""
+Geotiff_dir = ""
+Patch_dir = ""
+Tile_dir = ""
+Tmp_dir = ""
+Overlay_dir = ""
 # DSFTool text dumps of default Global Scenery DSFs (used by the
-# default-landclass texture modes).  Kept under the Ortho4XP root so we
-# never write cache files into the X-Plane install or a scenery pack.
-Default_dsf_cache_dir = resource_path("Default_DSF_cache")
+# default-landclass texture modes).  Writable cache — lives under the data
+# root so we never write into the X-Plane install or a scenery pack.
+Default_dsf_cache_dir = ""
+
+
+def _apply_data_root():
+    global Auto_extent_dir, Preview_dir, OSM_dir, Mask_dir, Imagery_dir
+    global Elevation_dir, Geotiff_dir, Patch_dir, Tile_dir, Tmp_dir
+    global Overlay_dir, Default_dsf_cache_dir
+    Auto_extent_dir = data_path(os.path.join("Extents", "Auto"))
+    Preview_dir = data_path("Previews")
+    OSM_dir = data_path("OSM_data")
+    Mask_dir = data_path("Masks")
+    Imagery_dir = data_path("Orthophotos")
+    Elevation_dir = data_path("Elevation_data")
+    Geotiff_dir = data_path("Geotiffs")
+    Patch_dir = data_path("Patches")
+    Tile_dir = data_path("Tiles")
+    Tmp_dir = data_path("tmp")
+    Overlay_dir = data_path("yOrtho4XP_Overlays")
+    Default_dsf_cache_dir = data_path("Default_DSF_cache")
+
+
+_apply_data_root()
+
+
+def set_data_root(path):
+    """Point all writable directories at a new data root.
+
+    Must be called before any module that captures these paths at import
+    time (O4_Config_Utils, the GUIs) is imported — the packaged app's
+    first-launch chooser runs before those imports for exactly this reason.
+    """
+    global _data_root_override
+    _data_root_override = os.path.abspath(path)
+    _apply_data_root()
+
+
+def seed_shipped_patches():
+    """Copy the patches shipped with the app into a data root that has no
+    Patches folder yet. A data root that already has one — e.g. the user
+    selected their existing Ortho4XP folder — is left completely untouched."""
+    shipped = resource_path("Patches")
+    if os.path.normpath(shipped) == os.path.normpath(Patch_dir):
+        return
+    if os.path.isdir(Patch_dir) or not os.path.isdir(shipped):
+        return
+    shutil.copytree(shipped, Patch_dir)
 
 ##############################################################################
 def short_latlon(lat, lon):
@@ -320,6 +456,8 @@ def elevation_data(source, lat, lon):
         return base_file_name(lat, lon) + "_NED13.tif"
     elif source == "NED1":
         return base_file_name(lat, lon) + "_NED1.tif"
+    elif source == "SONNY1":
+        return base_file_name(lat, lon) + "_SONNY1.hgt"
 ##############################################################################
 
 ##############################################################################

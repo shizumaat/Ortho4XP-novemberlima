@@ -23,7 +23,7 @@ from __future__ import annotations
 import glob
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterator, Optional
 
 import O4_File_Names as FNAMES
 
@@ -40,6 +40,7 @@ class TileInfo:
     provider: str = ""        # default_website from cfg, "" if unknown
     zl: Optional[int] = None  # default_zl from cfg
     has_zones: bool = False   # non-trivial zone_list in cfg
+    custom_dem: str = ""      # pinned elevation source from cfg, "" if unset
     mesh_date: Optional[float] = None     # unix mtime of newest dsf/mesh
     imagery_date: Optional[float] = None  # unix mtime of newest texture
     size_bytes: Optional[int] = None      # None until compute_size()
@@ -62,19 +63,24 @@ def _cfg_candidates(build_dir: str, lat: int, lon: int) -> list[str]:
     ]
 
 
-def _parse_cfg(cfg_path: str) -> tuple[str, Optional[int], bool]:
-    """Parse the three keys of interest from a tile config file.
+def _parse_cfg(
+    cfg_path: str,
+) -> tuple[str, Optional[int], bool, str]:
+    """Parse the four keys of interest from a tile config file.
 
-    Returns ``(provider, zl, has_zones)``.  ``provider`` is ``""`` when the
-    ``default_website`` line is absent, ``zl`` is ``None`` when
-    ``default_zl`` is missing or non-integer, and ``has_zones`` mirrors the
-    legacy ``len(line[10:]) > 3`` test on the ``zone_list`` line.
+    Returns ``(provider, zl, has_zones, custom_dem)``.  ``provider`` is
+    ``""`` when the ``default_website`` line is absent, ``zl`` is ``None``
+    when ``default_zl`` is missing or non-integer, ``has_zones`` mirrors
+    the legacy ``len(line[10:]) > 3`` test on the ``zone_list`` line, and
+    ``custom_dem`` is the tile's pinned elevation source (``""`` when
+    unset) for the info pane's elevation row.
 
     Only these keys are inspected; the file is never executed.
     """
     provider = ""
     zl: Optional[int] = None
     has_zones = False
+    custom_dem = ""
     try:
         with open(cfg_path, "r") as f:
             for line in f.readlines():
@@ -85,12 +91,13 @@ def _parse_cfg(cfg_path: str) -> tuple[str, Optional[int], bool]:
                         zl = int(line.strip().split("=", 1)[1])
                     except (ValueError, IndexError):
                         zl = None
+                elif line[:10] == "custom_dem":
+                    custom_dem = line.strip().split("=", 1)[1].strip()
                 elif line[:9] == "zone_list" and len(line[10:]) > 3:
                     has_zones = True
-                    break
     except OSError:
         pass
-    return provider, zl, has_zones
+    return provider, zl, has_zones, custom_dem
 
 
 def _mesh_date(build_dir: str) -> Optional[float]:
@@ -147,9 +154,9 @@ def _build_tile_info(
     if not dsf_present and cfg_path is None:
         return None
 
-    provider, zl, has_zones = ("", None, False)
+    provider, zl, has_zones, custom_dem = ("", None, False, "")
     if cfg_path is not None:
-        provider, zl, has_zones = _parse_cfg(cfg_path)
+        provider, zl, has_zones, custom_dem = _parse_cfg(cfg_path)
 
     return TileInfo(
         lat=lat,
@@ -160,15 +167,27 @@ def _build_tile_info(
         provider=provider,
         zl=zl,
         has_zones=has_zones,
+        custom_dem=custom_dem,
         mesh_date=_mesh_date(build_dir),
         imagery_date=_imagery_date(build_dir),
         size_bytes=None,
     )
 
 
-def _scan_per_tile(working_dir: str) -> dict[tuple[int, int], TileInfo]:
-    """Scan a parent directory of per-tile ``*XP_*`` build directories."""
-    tiles: dict[tuple[int, int], TileInfo] = {}
+def iter_scan_tiles(
+    working_dir: str,
+) -> "Iterator[tuple[int, int, Optional[tuple[int, int]], Optional[TileInfo]]]":
+    """Incremental form of :func:`scan_tiles` (per-tile mode) for live UIs.
+
+    Yields ``(done, total, key, info)`` after EVERY directory entry
+    examined — ``done`` counts entries processed so far, ``total`` is the
+    entry count, and ``key``/``info`` carry the ``(lat, lon)`` and
+    :class:`TileInfo` when that entry produced a new tile (``None``/``None``
+    otherwise), so a consumer can both drive a progress bar and surface
+    tiles as they are read.  Acceptance, "sorted, first wins" duplicate
+    handling, and symlink traversal are identical to
+    ``scan_tiles(working_dir)`` — that function is this generator drained.
+    """
     try:
         # sorted: "first wins" for duplicate lat/lon must be deterministic
         # across filesystems (raw listdir order is creation-dependent on
@@ -176,25 +195,37 @@ def _scan_per_tile(working_dir: str) -> dict[tuple[int, int], TileInfo]:
         # sorted-first winner).
         names = sorted(os.listdir(working_dir))
     except OSError:
-        return tiles
-    for dir_name in names:
-        if "XP_" not in dir_name:
-            continue
-        try:
-            lat = int(dir_name.split("XP_")[1][:3])
-            lon = int(dir_name.split("XP_")[1][3:7])
-        except (ValueError, IndexError):
-            continue
-        # Enlarged directory-name acceptance can yield more than one dir for
-        # the same (lat, lon); keep the first encountered, like the legacy.
-        if (lat, lon) in tiles:
-            continue
-        build_dir = os.path.join(working_dir, dir_name)
-        if not os.path.isdir(build_dir):
-            continue
-        info = _build_tile_info(build_dir, lat, lon, dir_name)
-        if info is not None:
-            tiles[(lat, lon)] = info
+        return
+    total = len(names)
+    seen: set[tuple[int, int]] = set()
+    for done, dir_name in enumerate(names, start=1):
+        key: Optional[tuple[int, int]] = None
+        info: Optional[TileInfo] = None
+        if "XP_" in dir_name:
+            try:
+                lat = int(dir_name.split("XP_")[1][:3])
+                lon = int(dir_name.split("XP_")[1][3:7])
+            except (ValueError, IndexError):
+                lat = None
+            # Enlarged directory-name acceptance can yield more than one dir
+            # for the same (lat, lon); keep the first encountered, like the
+            # legacy.
+            if lat is not None and (lat, lon) not in seen:
+                build_dir = os.path.join(working_dir, dir_name)
+                if os.path.isdir(build_dir):
+                    built = _build_tile_info(build_dir, lat, lon, dir_name)
+                    if built is not None:
+                        seen.add((lat, lon))
+                        key, info = (lat, lon), built
+        yield done, total, key, info
+
+
+def _scan_per_tile(working_dir: str) -> dict[tuple[int, int], TileInfo]:
+    """Scan a parent directory of per-tile ``*XP_*`` build directories."""
+    tiles: dict[tuple[int, int], TileInfo] = {}
+    for _done, _total, key, info in iter_scan_tiles(working_dir):
+        if key is not None:
+            tiles[key] = info
     return tiles
 
 

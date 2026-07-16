@@ -104,7 +104,34 @@ window read → `gdal.Warp`). The strategy registry is a plain dict so
 Phase C additions (`wcs`, `stac`, `tile_rest` — for the national lidar
 services in the research report) are one class + one dict entry each,
 with NO change to discovery/fetch orchestration, caching, or composite
-assembly. `Providers/O4_Custom_Elevation.py` (mirroring
+assembly. Shipped so far: `stac` (Phase C2, `HRDEM.elv`; also
+`SWISSALTI3D.elv`, whose filename-keyed multi-resolution assets drove
+the finest-GeoTIFF fallback in `_select_stac_dtm_assets`, and
+`FINLAND2M.elv` via the keyless CSC Paituli mirror), `wcs`
+(2026-07-15, `ENGLAND1M.elv` + `NORWAY1M.elv` + `SPAIN5M.elv` +
+`POLAND1M.elv` — GDAL's WCS driver negotiates the protocol version
+per endpoint, and an all-nodata post-warp check turns
+inside-the-box-but-outside-the-data airports into cached no-coverage
+negatives), `direct_cog` (`WALES1M.elv`, one fixed country-wide
+Cloud-Optimized GeoTIFF), `static_stac` (`NEWZEALAND1M.elv` —
+walks a catalog.json tree on object storage, memoising every bounding
+box in one per-provider index file under `Elevation_data/`; its
+LERC-compressed tiles are downloaded whole and decoded in a
+subprocess through tifffile/imagecodecs, because the imagecodecs LERC
+decoder and the osgeo shared libraries abort the process when loaded
+together), `xyz_text_tiles` (`JAPAN5M.elv` — GSI's slippy-map text
+tiles mosaicked in EPSG:3857, 5 m lidar over the nationwide 10 m
+composite), and `xyz_archive_drop` (`TAIWAN20M.elv` —
+browser-downloaded county archives of TWD97 XYZ sheets, converted
+once to indexed GeoTIFFs under the drop folder; the tgos.tw file host
+blocks non-browser clients, so the download stays manual).
+2026-07-16 additions: `wfs_tile_index` (`FRANCE50CM.elv` — the
+Geoplateforme's WFS tile catalog carries ready-made GeoTIFF URLs),
+`tile_grid_http` (nine German Länder — deterministic kilometre tiles
+in the UTM CRS, with optional directory indexes for year-stamped
+names, grid anchor offsets, per-tile zips, download mode with
+headers), and `wcs_kvp` (Hesse — spelled-out GetCoverage for servers
+that defeat GDAL's WCS driver). `Providers/O4_Custom_Elevation.py` (mirroring
 `O4_Custom_URL.py`) is the escape hatch for sources that defy the
 declarative fields; absent file = no-op.
 

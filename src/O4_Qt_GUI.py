@@ -53,11 +53,13 @@ import O4_Airport_Index as APT
 import O4_Scenery_Links as LINKS
 import O4_Tile_Info as TINFO
 import O4_Qt_Map as QTMAP
+from o4_engine import EngineSession
+from o4_engine import events as EV
 import O4_Qt_Settings as QTSET
 import O4_Qt_Wizard as QTWIZ
 
-PREFS_FILE = FNAMES.resource_path(".qt_prefs.json")
-AIRPORT_CACHE = FNAMES.resource_path(".airport_index.tsv")
+PREFS_FILE = FNAMES.data_path(".qt_prefs.json")
+AIRPORT_CACHE = FNAMES.data_path(".airport_index.tsv")
 MAX_CONSOLE_LINES = 5000
 
 # Build-area texture-mode selector: user-visible label -> tile config value.
@@ -67,59 +69,6 @@ TEXTURE_MODE_CHOICES = (
     ("Airport Ortho", "airport_ortho"),
     ("Default X-Plane", "default_xplane"),
 )
-
-# ---------------------------------------------------------------------------
-# Whole-tile progress model: each pipeline step owns a weighted slice of the
-# tile's 0-100%, so the per-tile ring/bar climbs once and never restarts.
-# ---------------------------------------------------------------------------
-STEP_WEIGHTS = {
-    "vector": 0.10,
-    "mesh": 0.15,
-    "masks": 0.10,
-    "imagery": 0.60,
-    "overlays": 0.05,
-}
-STEP_LABELS = {
-    "vector": "vector data",
-    "mesh": "triangulating",
-    "masks": "water masks",
-    "imagery": "imagery & DSF",
-    "overlays": "overlays",
-}
-
-
-def plan_steps(do_vector, do_imagery, do_overlays):
-    """Ordered (key, base_fraction, slice_fraction) plan for the selected
-    steps, with slices normalized so a full tile is exactly 1.0."""
-    keys = []
-    if do_vector:
-        keys += ["vector", "mesh", "masks"]
-    if do_imagery:
-        keys.append("imagery")
-    if do_overlays:
-        keys.append("overlays")
-    total = sum(STEP_WEIGHTS[k] for k in keys)
-    plan, base = [], 0.0
-    for k in keys:
-        weight = STEP_WEIGHTS[k] / total
-        plan.append((k, base, weight))
-        base += weight
-    return plan
-
-
-def step_progress(step_key, bars):
-    """Progress (0-100) inside one step from the three legacy progress
-    bars, or None when the step reports no usable percentage (mesh
-    triangulation, overlay extraction)."""
-    if step_key in ("vector", "masks"):
-        return bars.get(1, 0)
-    if step_key == "imagery":
-        return (
-            0.55 * bars.get(2, 0)
-            + 0.25 * bars.get(3, 0)
-            + 0.20 * bars.get(1, 0)
-        )
-    return None
 
 
 def load_prefs():
@@ -159,31 +108,15 @@ class _StdoutTee:
             pass
 
 
-class _ProgressVar:
-    """Mimics a Tk IntVar's .set() — the UI.progress_bar contract."""
+class _EngineBridge(QObject):
+    """Marshals engine-session events onto the GUI thread.
 
-    def __init__(self, nbr, signal):
-        self._nbr = nbr
-        self._signal = signal
+    The session invokes subscriber callbacks on its worker threads;
+    cross-thread Signal emission is the one supported hand-off (QTimer
+    from a plain worker thread silently never fires)."""
 
-    def set(self, value):
-        self._signal.emit(self._nbr, int(value))
-
-
-class _UiAdapter(QObject):
-    """Stands in for the Tk window as UI.gui (progress channel only)."""
-
-    progress = Signal(int, int)
-
-    def __init__(self):
-        super().__init__()
-        self.pgrbv = {n: _ProgressVar(n, self.progress) for n in (1, 2, 3)}
-
-
-class _BuildSignals(QObject):
-    tile_state = Signal(int, int, str, str, int)  # lat, lon, state, label, pct
-    step_started = Signal(int, int, str, float, float)  # lat, lon, key, base, slice
-    finished = Signal(int, int)  # done_count, error_count
+    event = Signal(object)
+    size_computed = Signal()
 
 
 def gui_provider_codes():
@@ -212,26 +145,37 @@ class MainWindow(QMainWindow):
         self._stop_requested = False
 
         # --- pipeline adapters -----------------------------------------
-        self._adapter = _UiAdapter()
-        self._adapter.progress.connect(self._on_progress_bar)
-        UI.gui = self._adapter
         UI.verbosity = int(self.prefs.get("verbosity", 1))
+        # Console feed: pipeline prints (worker threads included) are teed
+        # into a queue and drained onto the console drawer by a GUI-thread
+        # timer.  This stays view-side plumbing even under the engine
+        # session — stdout is process-global, and the JSON-lines transport
+        # has its own stdout discipline instead.
         self._console_queue = queue.Queue()
         sys.stdout = _StdoutTee(sys.stdout, self._console_queue)
         self._console_timer = QTimer(self)
         self._console_timer.setInterval(120)
         self._console_timer.timeout.connect(self._drain_console)
         self._console_timer.start()
-        self._build_signals = _BuildSignals()
-        self._build_signals.tile_state.connect(self._on_tile_state)
-        self._build_signals.step_started.connect(self._on_step_started)
-        self._build_signals.finished.connect(self._on_build_finished)
-        self._bar_values = {1: 0, 2: 0, 3: 0}
-        self._cur_step = None  # (tile, key, base, slice) while building
+        self._session = EngineSession()
+        self._bridge = _EngineBridge()
+        self._bridge.event.connect(self._on_engine_event)
+        self._session.subscribe(self._bridge.event.emit)
+        self._event_handlers = {
+            EV.ScanProgress: self._on_scan_progress,
+            EV.ScanBatch: self._on_scan_batch,
+            EV.ScanDone: self._on_scan_done,
+            EV.StepProgress: self._on_step_progress,
+            EV.TileState: self._on_tile_state,
+            EV.RunEta: self._on_run_eta,
+            EV.RunDone: self._on_run_done,
+        }
+        self._scan_built = {}
+        self._scan_installed = set()
+        self._last_run_eta = None
         self._build_t0 = None
         self._done_count = 0
         self._ntiles = 0
-        self._tile_frac = 0.0
 
         self._make_widgets()
         self._make_menus()
@@ -253,6 +197,10 @@ class MainWindow(QMainWindow):
     def _make_widgets(self):
         toolbar = QToolBar()
         toolbar.setMovable(False)
+        # Breathing room: keep controls off the window edges and apart.
+        toolbar.setStyleSheet(
+            "QToolBar { padding: 6px 10px; spacing: 6px; }"
+        )
         self.addToolBar(toolbar)
 
         self.search_edit = QLineEdit()
@@ -317,6 +265,28 @@ class MainWindow(QMainWindow):
         ig.addRow("Mesh built:", self.info_mesh)
         self.info_imagery = QLabel("—")
         ig.addRow("Imagery updated:", self.info_imagery)
+        self.info_elevation = QLabel("—")
+        self.info_elevation.setWordWrap(True)
+        ig.addRow("Elevation:", self.info_elevation)
+        self.info_airport_lidar = QLabel("—")
+        self.info_airport_lidar.setWordWrap(True)
+        ig.addRow("Airport lidar:", self.info_airport_lidar)
+        # Manual-setup affordance (VIEW): shown by the controller when
+        # the model reports manual-download sources that could serve
+        # the active tile but are not set up yet.
+        self.manual_elevation_btn = QPushButton(
+            "ⓘ Better elevation data available…"
+        )
+        self.manual_elevation_btn.setFlat(True)
+        self.manual_elevation_btn.setStyleSheet(
+            "QPushButton { text-align: left; color: palette(link); }"
+        )
+        self.manual_elevation_btn.clicked.connect(
+            self._show_manual_elevation_dialog
+        )
+        self.manual_elevation_btn.setVisible(False)
+        ig.addRow(self.manual_elevation_btn)
+        self._manual_elevation_entries = []
         self.info_size = QLabel("—")
         ig.addRow("Size on disk:", self.info_size)
         self.install_check = QCheckBox("Installed in X-Plane")
@@ -649,30 +619,40 @@ class MainWindow(QMainWindow):
     # Selection / tile info
     # ------------------------------------------------------------------
     def refresh_tiles(self):
-        wd = self.working_dir()
+        import O4_Config_Utils as CFG
 
-        def work():
-            import O4_Config_Utils as CFG
+        # Fresh accumulators per scan: the display keeps showing the old
+        # overlay until ScanDone swaps the authoritative result in, so
+        # deleted tiles vanish exactly when the scan completes (the same
+        # contract the one-shot scan had).
+        self._scan_built = {}
+        self._scan_installed = set()
+        self._session.scan(self.working_dir(), CFG.custom_scenery_dir)
 
-            built = {}
-            installed = set()
-            try:
-                if os.path.isdir(wd):
-                    built = TINFO.scan_tiles(wd)
-            except Exception as exc:
-                print("Tile scan failed:", exc)
-            try:
-                if CFG.custom_scenery_dir:
-                    installed = set(
-                        LINKS.installed_tiles(CFG.custom_scenery_dir)
-                    )
-            except Exception as exc:
-                print("Custom Scenery scan failed:", exc)
-            self._built = built
-            self._installed = installed
-            QTimer.singleShot(0, self._push_overlays)
+    # ------------------------------------------------------------------
+    # Engine event dispatch (the view renders; the session computes)
+    # ------------------------------------------------------------------
+    def _on_engine_event(self, event):
+        handler = self._event_handlers.get(type(event))
+        if handler is not None:
+            handler(event)
 
-        threading.Thread(target=work, daemon=True).start()
+    def _on_scan_progress(self, event):
+        self.map.set_scan_status(event.phase, event.done, event.total)
+
+    def _on_scan_batch(self, event):
+        self._scan_built.update(event.built)
+        self._scan_installed.update(event.installed)
+        self._built.update(event.built)
+        self._installed.update(event.installed)
+        self.map.set_built(self._built)
+        self.map.set_installed(self._installed)
+
+    def _on_scan_done(self, event):
+        self._built = dict(self._scan_built)
+        self._installed = set(self._scan_installed)
+        self.map.clear_scan_status()
+        self._push_overlays()
 
     def _push_overlays(self):
         self.map.set_built(self._built)
@@ -690,10 +670,24 @@ class MainWindow(QMainWindow):
             except ValueError:
                 zl = 16
             est = n * 3.0 * 4 ** (zl - 16)
-            self.build_summary.setText(
-                "%d tile%s selected · rough est. %.1f GB"
-                % (n, "s" if n > 1 else "", est)
+            summary_text = "%d tile%s selected · rough est. %.1f GB" % (
+                n,
+                "s" if n > 1 else "",
+                est,
             )
+            try:
+                import O4_Airport_Elevation_Insets as ELEVATION_PROVIDERS
+
+                covered = ELEVATION_PROVIDERS.tiles_with_inset_coverage(sel)
+                if covered and n == 1:
+                    summary_text += " · airport lidar available"
+                elif covered and len(covered) == n:
+                    summary_text += " · airport lidar on all"
+                elif covered:
+                    summary_text += " · airport lidar on %d" % len(covered)
+            except Exception:
+                pass
+            self.build_summary.setText(summary_text)
         self.selection_label.setText("%d selected" % n if n else "")
         self.build_btn.setText("▶ Build %d tile%s" % (n, "s" if n > 1 else "")
                                if n else "▶ Build")
@@ -711,6 +705,37 @@ class MainWindow(QMainWindow):
         )
         info = self._built.get(tile)
         import O4_Config_Utils as CFG
+
+        # The elevation rows populate for built AND unbuilt tiles: what
+        # data a build WOULD use matters most before building.
+        try:
+            (base_text, lidar_text) = _elevation_row_texts(
+                lat, lon, info.custom_dem if info else ""
+            )
+        except Exception:
+            (base_text, lidar_text) = ("?", "?")
+        self.info_elevation.setText(base_text)
+        self.info_airport_lidar.setText(lidar_text)
+        # Manual-setup affordance (CONTROLLER): ask the model which
+        # manual-download sources could serve this tile and are not set
+        # up yet; the view only renders what it is handed.
+        try:
+            import O4_Airport_Elevation_Insets as ELEVATION_PROVIDERS
+
+            self._manual_elevation_entries = [
+                entry
+                for entry in (
+                    ELEVATION_PROVIDERS.manual_elevation_setup_for_tile(
+                        lat, lon
+                    )
+                )
+                if not entry["already_dropped"]
+            ]
+        except Exception:
+            self._manual_elevation_entries = []
+        self.manual_elevation_btn.setVisible(
+            bool(self._manual_elevation_entries)
+        )
 
         if info is None:
             for w in (
@@ -742,12 +767,33 @@ class MainWindow(QMainWindow):
         else:
             self.info_size.setText(_fmt_size(info.size_bytes))
         can_link = bool(CFG.custom_scenery_dir)
-        self.install_check.setEnabled(can_link and not self._building)
         self.install_check.setChecked(tile in self._installed)
+        physical = False
+        if can_link:
+            try:
+                physical = (
+                    LINKS.link_status(
+                        lat, lon, info.build_dir, CFG.custom_scenery_dir
+                    )
+                    is LINKS.LinkStatus.PHYSICAL
+                )
+            except OSError:
+                pass
+        self.install_check.setEnabled(
+            can_link and not self._building and not physical
+        )
         if not can_link:
             self.install_check.setToolTip(
                 "Set your X-Plane folder in Settings to install tiles."
             )
+        elif physical:
+            self.install_check.setToolTip(
+                "This tile's folder lives directly in Custom Scenery, so it "
+                "is always installed. To manage it as a link, move the "
+                "folder elsewhere first."
+            )
+        else:
+            self.install_check.setToolTip("")
 
     def _refresh_texture_mode(self, tile):
         """Load the active tile's ``texture_mode`` into the build-area combo.
@@ -797,9 +843,83 @@ class MainWindow(QMainWindow):
             TINFO.compute_size(info)
         except Exception:
             return
-        QTimer.singleShot(0, lambda: self._active_changed(
-            self.map.active_tile()
-        ))
+        self._bridge.size_computed.emit()
+
+    def _show_manual_elevation_dialog(self):
+        """Render the model's manual-setup entries (VIEW only).
+
+        One section per provider: what it is, a clickable download
+        page, the numbered steps, and the drop folder with an opener --
+        every string comes from the model entry verbatim.
+        """
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        entries = self._manual_elevation_entries
+        if not entries:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Better elevation data for this tile")
+        layout = QVBoxLayout(dialog)
+        introduction = QLabel(
+            "These sources cover this tile but must be downloaded once "
+            "by hand (their file hosts do not allow automatic "
+            "downloads). After the files are in place, every build "
+            "uses them automatically."
+        )
+        introduction.setWordWrap(True)
+        layout.addWidget(introduction)
+        for entry in entries:
+            group = QGroupBox(
+                "%s — %s %s"
+                % (
+                    entry["code"],
+                    entry["native_resolution"],
+                    "tile-wide" if entry["role"] == "base" else
+                    "airport lidar",
+                )
+            )
+            group_layout = QVBoxLayout(group)
+            link = QLabel(
+                '1. Download from <a href="%s">%s</a>'
+                % (entry["download_page"], entry["download_page"])
+            )
+            link.setOpenExternalLinks(True)
+            link.setWordWrap(True)
+            group_layout.addWidget(link)
+            for (number, step) in enumerate(entry["steps"][1:], start=2):
+                step_label = QLabel("%d. %s" % (number, step))
+                step_label.setWordWrap(True)
+                group_layout.addWidget(step_label)
+            folder_row = QHBoxLayout()
+            folder_label = QLabel(entry["drop_directory"])
+            folder_label.setWordWrap(True)
+            folder_label.setTextInteractionFlags(
+                Qt.TextSelectableByMouse
+            )
+            folder_row.addWidget(folder_label, 1)
+            open_button = QPushButton("Open folder")
+
+            def _open_drop_folder(_checked=False, path=entry["drop_directory"]):
+                os.makedirs(path, exist_ok=True)
+                QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+            open_button.clicked.connect(_open_drop_folder)
+            folder_row.addWidget(open_button)
+            group_layout.addLayout(folder_row)
+            if entry.get("license"):
+                license_label = QLabel(
+                    "Licence: %s" % entry["license"]
+                )
+                license_label.setWordWrap(True)
+                license_label.setStyleSheet("color: palette(mid);")
+                group_layout.addWidget(license_label)
+            layout.addWidget(group)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button, alignment=Qt.AlignRight)
+        dialog.resize(560, min(220 + 200 * len(entries), 640))
+        dialog.exec()
 
     def _toggle_install(self, checked):
         import O4_Config_Utils as CFG
@@ -897,7 +1017,6 @@ class MainWindow(QMainWindow):
 
         self._building = True
         self._stop_requested = False
-        UI.red_flag = False
         self.stop_btn.setEnabled(True)
         self.stop_btn.setText("■ Stop")
         self.install_check.setEnabled(False)
@@ -911,15 +1030,15 @@ class MainWindow(QMainWindow):
         if not self.console.isVisible():
             self.toggle_console()
 
-        provider = self.imagery_combo.currentText()
-        zl = int(self.zl_combo.currentText())
-        custom_build_dir = self.output_dir()
-        plan = plan_steps(do_vector, do_imagery, do_overlays)
-        threading.Thread(
-            target=self._build_worker,
-            args=(todo, provider, zl, custom_build_dir, plan),
-            daemon=True,
-        ).start()
+        self._session.build(
+            todo,
+            provider=self.imagery_combo.currentText(),
+            zoomlevel=int(self.zl_combo.currentText()),
+            custom_build_dir=self.output_dir(),
+            do_vector=do_vector,
+            do_imagery=do_imagery,
+            do_overlays=do_overlays,
+        )
 
     def _setup_progress_page(self, todo):
         """Morph the Build box into the per-tile progress list."""
@@ -950,7 +1069,6 @@ class MainWindow(QMainWindow):
             self._tile_rows[tile] = (bar, status, row)
         self._done_count = 0
         self._ntiles = len(todo)
-        self._tile_frac = 0.0
         self._build_t0 = __import__("time").time()
         self.progress_title.setText(
             "<b>Building %d tile%s</b>"
@@ -961,84 +1079,22 @@ class MainWindow(QMainWindow):
         self._elapsed_timer.start()
         self.build_stack.setCurrentIndex(1)
 
-    def _build_worker(self, todo, provider, zl, custom_build_dir, plan):
-        # Heavy pipeline imports stay off the GUI startup path.
-        import O4_Config_Utils as CFG
-        import O4_Vector_Map as VMAP
-        import O4_Mesh_Utils as MESH
-        import O4_Mask_Utils as MASK
-        import O4_Tile_Utils as TILE
-        import O4_Overlay_Utils as OVL
-
-        step_fn = {
-            "vector": VMAP.build_poly_file,
-            "mesh": MESH.build_mesh,
-            "masks": MASK.build_masks,
-            "imagery": TILE.build_tile,
-            "overlays": lambda t: OVL.build_overlay(t.lat, t.lon),
-        }
-        done = errors = 0
-        emit_state = self._build_signals.tile_state.emit
-        emit_step = self._build_signals.step_started.emit
-        for (lat, lon) in todo:
-            if UI.red_flag:
-                break
-            try:
-                tile = CFG.Tile(lat, lon, custom_build_dir)
-                if not tile.read_from_config():
-                    tile.default_website = provider
-                    tile.default_zl = zl
-                UI.reset_total_elapsed()
-                if any(k != "overlays" for k, _, _ in plan):
-                    tile.make_dirs()
-                failed = False
-                for key, base, width in plan:
-                    if UI.red_flag:
-                        break
-                    emit_step(lat, lon, key, base, width)
-                    result = step_fn[key](tile)
-                    if result == 0 and UI.red_flag:
-                        break
-                    if result == 0:
-                        failed = True
-                if UI.red_flag:
-                    emit_state(lat, lon, "queued", "stopped", 0)
-                    break
-                if failed:
-                    errors += 1
-                    emit_state(lat, lon, "error", "failed", 0)
-                else:
-                    done += 1
-                    emit_state(lat, lon, "done", "", 100)
-            except Exception:
-                traceback.print_exc()
-                errors += 1
-                emit_state(lat, lon, "error", "failed", 0)
-        self._build_signals.finished.emit(done, errors)
-
-    def _on_step_started(self, lat, lon, key, base, width):
-        tile = (lat, lon)
-        self._cur_step = (tile, key, base, width)
-        self._bar_values = {1: 0, 2: 0, 3: 0}
-        label = STEP_LABELS.get(key, key)
-        pct = base * 100
-        self._tile_frac = base
-        # Steps without a usable percentage show a spinner on the map but
-        # hold the whole-tile value already earned.
-        state = (
-            "indeterminate" if step_progress(key, {}) is None else "active"
-        )
-        self._progress_states[tile] = (state, label, pct)
+    def _on_step_progress(self, event):
+        tile = (event.lat, event.lon)
+        state = "indeterminate" if event.indeterminate else "active"
+        self._progress_states[tile] = (state, event.label, event.percent)
         self.map.set_progress(self._progress_states)
-        self._update_tile_row(tile, pct, label)
+        self._update_tile_row(tile, event.percent, event.label)
+        self.setWindowTitle(
+            "Ortho4XP — building %s · %s · %d%%"
+            % (FNAMES.short_latlon(*tile), event.label, event.percent)
+        )
 
-    def _on_tile_state(self, lat, lon, state, label, pct):
-        tile = (lat, lon)
-        if state in ("done", "error"):
-            self._cur_step = None
-            self._tile_frac = 0.0
-            if state == "done":
-                self._done_count += 1
+    def _on_tile_state(self, event):
+        tile = (event.lat, event.lon)
+        state, label, pct = event.state, event.label, event.percent
+        if state == "done":
+            self._done_count += 1
         self._progress_states[tile] = (state, label, pct)
         self.map.set_progress(self._progress_states)
         if tile in self._tile_rows:
@@ -1055,24 +1111,8 @@ class MainWindow(QMainWindow):
         if state == "done":
             self.refresh_tiles()
 
-    def _on_progress_bar(self, nbr, value):
-        self._bar_values[nbr] = value
-        if self._cur_step is None or not self._building:
-            return
-        tile, key, base, width = self._cur_step
-        sp = step_progress(key, self._bar_values)
-        if sp is None:
-            return
-        pct = min(100.0, (base + width * min(sp, 100) / 100.0) * 100)
-        self._tile_frac = pct / 100.0
-        label = STEP_LABELS.get(key, key)
-        self._progress_states[tile] = ("active", label, pct)
-        self.map.set_progress(self._progress_states)
-        self._update_tile_row(tile, pct, label)
-        self.setWindowTitle(
-            "Ortho4XP — building %s · %s · %d%%"
-            % (FNAMES.short_latlon(*tile), label, pct)
-        )
+    def _on_run_eta(self, event):
+        self._last_run_eta = event
 
     def _update_tile_row(self, tile, pct, label):
         if tile in self._tile_rows:
@@ -1087,22 +1127,20 @@ class MainWindow(QMainWindow):
             return
         elapsed = _time.time() - self._build_t0
         self.elapsed_label.setText("Elapsed %s" % _fmt_duration(elapsed))
-        frac = (
-            (self._done_count + self._tile_frac) / self._ntiles
-            if self._ntiles
-            else 0
-        )
-        if frac > 0.02:
-            remaining = elapsed * (1 - frac) / frac
+        # The engine session owns the estimate (learned per-step model +
+        # live in-step rate + the auto-patch model); the view only renders.
+        eta = self._last_run_eta
+        if eta is not None and eta.remaining_seconds is not None:
             self.eta_label.setText(
-                "Remaining ≈ %s" % _fmt_duration(remaining)
+                "Remaining ≈ %s" % _fmt_duration(eta.remaining_seconds)
             )
         else:
             self.eta_label.setText("Remaining —")
 
-    def _on_build_finished(self, done, errors):
+    def _on_run_done(self, event):
+        done, errors = event.done_count, event.error_count
         self._building = False
-        self._cur_step = None
+        self._last_run_eta = None
         self._elapsed_timer.stop()
         self.stop_btn.setEnabled(False)
         self.stop_btn.setText("■ Stop")
@@ -1127,7 +1165,7 @@ class MainWindow(QMainWindow):
 
     def request_stop(self):
         self._stop_requested = True
-        UI.red_flag = True
+        self._session.cancel()
         self.stop_btn.setText("Stopping after current step…")
         self.stop_btn.setEnabled(False)
 
@@ -1190,6 +1228,73 @@ def _fmt_date(mtime):
     import datetime
 
     return datetime.datetime.fromtimestamp(mtime).strftime("%d %b %Y %H:%M")
+
+
+def _fmt_arc_seconds(resolution_arc_seconds):
+    """Human text for a base-source posting, e.g. '1 arc-second (~30 m)'."""
+    if not resolution_arc_seconds:
+        return "unknown resolution"
+    value = float(resolution_arc_seconds)
+    if value < 1.0:
+        text = "1/%d arc-second" % round(1.0 / value)
+    elif value == int(value):
+        text = "%d arc-second" % int(value)
+    else:
+        text = "%.2f arc-second" % value
+    return "%s (~%d m)" % (text, round(value * 30))
+
+
+def _elevation_row_texts(lat, lon, tile_custom_dem=""):
+    """The (base, airport lidar) strings for the tile-info elevation rows.
+
+    Everything behind this is offline (registry, local files, the
+    cached inset index) — see summarize_tile_elevation_sources — so it
+    runs on every selection change without stalling the UI.
+    """
+    import O4_DEM_Utils as DEM
+    import O4_Airport_Elevation_Insets as ELEVATION_PROVIDERS
+
+    summary = ELEVATION_PROVIDERS.summarize_tile_elevation_sources(
+        lat, lon, DEM.base_elevation_source
+    )
+    if tile_custom_dem:
+        # The tile config pins its own source; the first ";"-token is
+        # the base, the rest are local insets.
+        base_text = "custom: " + (
+            os.path.basename(tile_custom_dem.split(";")[0])
+            or tile_custom_dem
+        )
+    else:
+        base_text = "%s, %s" % (
+            summary["base_code"],
+            _fmt_arc_seconds(summary["base_resolution_arc_seconds"]),
+        )
+        if summary["base_is_fallback"]:
+            base_text += " (default)"
+    if summary["fetched_airports"] is not None:
+        pieces = []
+        if summary["fetched_airports"]:
+            pieces.append(
+                "%d airport%s fetched"
+                % (
+                    summary["fetched_airports"],
+                    "s" if summary["fetched_airports"] > 1 else "",
+                )
+            )
+        if summary["no_coverage_airports"]:
+            pieces.append(
+                "%d without coverage" % summary["no_coverage_airports"]
+            )
+        lidar_text = " · ".join(pieces) if pieces else "no airports found"
+    elif summary["inset_providers"]:
+        lidar_text = "available: " + ", ".join(
+            "%s (%s m)"
+            % (code, ("%g" % resolution) if resolution else "?")
+            for (code, resolution) in summary["inset_providers"]
+        )
+    else:
+        lidar_text = "none for this region"
+    return (base_text, lidar_text)
 
 
 def _fmt_duration(seconds):

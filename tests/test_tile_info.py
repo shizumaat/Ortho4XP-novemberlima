@@ -274,3 +274,83 @@ def test_tile_info_none_when_missing(tmp_path):
     wd = str(tmp_path)
     assert TI.tile_info(43, 3, wd) is None
     assert TI.tile_info(43, 3, wd, grouped=True) is None
+
+
+##############################################################################
+# Symlinked tiles (X-Plane Custom Scenery folders commonly hold links to
+# tile folders on external drives — the scanner must follow them)
+##############################################################################
+def test_scan_follows_symlinked_tile_dirs(tmp_path):
+    """A ``zOrtho4XP_*`` entry that is a symlink to a build directory on
+    another volume must be reported exactly like a plain directory."""
+    real_store = tmp_path / "external_drive" / "Ortho4XP"
+    bd = _tile_build_dir(str(real_store), 43, 3)
+    _make_dsf(bd, 43, 3)
+    _make_cfg(bd, 43, 3, website="BI", zl=17)
+
+    wd = tmp_path / "Custom Scenery"
+    wd.mkdir()
+    os.symlink(bd, str(wd / "zOrtho4XP_+43+003"))
+
+    tiles = TI.scan_tiles(str(wd))
+    assert set(tiles) == {(43, 3)}
+    info = tiles[(43, 3)]
+    assert info.dsf_present is True
+    assert info.zl == 17
+
+
+def test_scan_skips_broken_symlink(tmp_path):
+    wd = tmp_path / "Custom Scenery"
+    wd.mkdir()
+    os.symlink(str(tmp_path / "gone"), str(wd / "zOrtho4XP_+43+003"))
+    assert TI.scan_tiles(str(wd)) == {}
+
+
+# ---------------------------------------------------------------------------
+# Incremental scan (iter_scan_tiles) — drives the live map progress overlay
+# ---------------------------------------------------------------------------
+def test_iter_scan_matches_scan_and_reports_progress(tmp_path):
+    wd = str(tmp_path)
+    for lat, lon in ((43, 3), (44, 3), (-13, -77)):
+        bd = _tile_build_dir(wd, lat, lon)
+        _make_dsf(bd, lat, lon)
+        _make_cfg(bd, lat, lon)
+    (tmp_path / "not_a_tile.txt").write_text("junk")
+    (tmp_path / "SomeOtherFolder").mkdir()
+
+    steps = list(TI.iter_scan_tiles(wd))
+    total_entries = len(os.listdir(wd))
+    # One yield per directory entry, done counting 1..total.
+    assert [d for (d, _t, _k, _i) in steps] == list(
+        range(1, total_entries + 1))
+    assert all(t == total_entries for (_d, t, _k, _i) in steps)
+    # Drained generator == the one-shot scan (same keys AND same infos).
+    streamed = {k: i for (_d, _t, k, i) in steps if k is not None}
+    full = TI.scan_tiles(wd)
+    assert set(streamed) == set(full) == {(43, 3), (44, 3), (-13, -77)}
+    for key in full:
+        assert streamed[key].build_dir == full[key].build_dir
+        assert streamed[key].dir_name == full[key].dir_name
+
+
+def test_iter_scan_duplicate_latlon_first_wins(tmp_path):
+    wd = str(tmp_path)
+    first = os.path.join(wd, "aOrtho4XP_+43+003")
+    second = os.path.join(wd, "zOrtho4XP_+43+003")
+    for bd in (first, second):
+        os.makedirs(bd)
+        _make_dsf(bd, 43, 3)
+        _make_cfg(bd, 43, 3)
+
+    yielded = [
+        (k, i) for (_d, _t, k, i) in TI.iter_scan_tiles(wd) if k is not None
+    ]
+    # The duplicate (lat, lon) is yielded exactly once, from the
+    # sorted-first directory — the same winner scan_tiles picks.
+    assert len(yielded) == 1
+    assert yielded[0][0] == (43, 3)
+    assert yielded[0][1].dir_name == "aOrtho4XP_+43+003"
+
+
+def test_iter_scan_missing_dir_yields_nothing(tmp_path):
+    assert list(TI.iter_scan_tiles(str(tmp_path / "absent"))) == []

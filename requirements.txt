@@ -8,6 +8,8 @@ shapely==2.1.2
 scikit-fmm==2025.6.23
 scipy==1.17.1        # Voronoi medial axis + smoothing splines (pav_skeleton)
 networkx==3.6.1      # skeleton graph pruning/chain collapse (pav_skeleton)
+tifffile==2026.3.3   # LERC-compressed elevation tiles (New Zealand lidar)
+imagecodecs==2026.3.6  # LERC codec backing tifffile (GDAL builds lack it)
 gdal==3.12.3; platform_system == 'Darwin'
 gdal==3.12.2; platform_system == 'Windows'
 gdal==3.9.0; platform_system == 'Linux'

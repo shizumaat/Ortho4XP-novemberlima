@@ -1054,3 +1054,826 @@ def test_supplement_removed_when_nothing_qualifies(tmp_path, monkeypatch):
     os.utime(tif_path, None)
     assert INSETS.ensure_inset_water_supplement(36, -87) is None
     assert not os.path.isfile(FNAMES.inset_water(36, -87))
+
+
+# =====================================================================
+# The wcs access strategy (OGC Web Coverage Service national coverages)
+# =====================================================================
+def _wcs_definition(**overrides):
+    definition = {
+        "code": "TESTWCS",
+        "access_strategy": "wcs",
+        "wcs_service_url": "https://example.test/wcs",
+        "wcs_version": "2.0.1",
+        "wcs_coverage": "national__DTM_1m",
+        "native_resolution_m": "1",
+        "license": "test licence",
+        "attribution": "test agency",
+        "vertical_datum": "TESTDATUM",
+    }
+    definition.update(overrides)
+    return definition
+
+
+def test_wcs_dataset_name_construction():
+    strategy = INSETS.ACCESS_STRATEGIES["wcs"]()
+    assert strategy.dataset_name(_wcs_definition()) == (
+        "WCS:https://example.test/wcs"
+        "?version=2.0.1&coverage=national__DTM_1m"
+    )
+    # A service URL already carrying a query string continues with '&'
+    # (the MapServer style, e.g. the Geonorge endpoints).
+    assert strategy.dataset_name(
+        _wcs_definition(wcs_service_url="https://example.test/wcs?map=dtm")
+    ) == (
+        "WCS:https://example.test/wcs?map=dtm"
+        "&version=2.0.1&coverage=national__DTM_1m"
+    )
+
+
+def test_wcs_discover_honours_coverage_bbox():
+    strategy = INSETS.ACCESS_STRATEGIES["wcs"]()
+    definition = _wcs_definition(coverage_bbox=(-6.5, 49.8, 1.9, 55.9))
+    heathrow = (-0.49, 51.44, -0.41, 51.49)
+    doha = (51.55, 25.24, 51.65, 25.29)
+    assert strategy.discover(definition, heathrow) == [
+        {
+            "dataset": "WCS:https://example.test/wcs"
+            "?version=2.0.1&coverage=national__DTM_1m"
+        }
+    ]
+    assert strategy.discover(definition, doha) is None
+
+
+@requires_gdal
+def test_wcs_fetch_writes_inset_and_provenance(tmp_path, monkeypatch):
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    warp_calls = {}
+
+    def _fake_warp(inputs, bounding_box, resolution, destination):
+        warp_calls["inputs"] = list(inputs)
+        (west, south, east, north) = bounding_box
+        _write_constant_geotiff(
+            destination, west, south, east, north, 42.0
+        )
+        return True
+
+    monkeypatch.setattr(
+        INSETS, "warp_vsicurl_sources_to_geotiff", _fake_warp
+    )
+    definition = _wcs_definition()
+    destination = str(tmp_path / "EGLL_testwcs.tif")
+    provenance = INSETS.fetch_inset(
+        definition, (-0.49, 51.44, -0.41, 51.49), 1.0, destination
+    )
+    assert provenance is not None
+    assert os.path.isfile(destination)
+    assert warp_calls["inputs"] == [
+        "WCS:https://example.test/wcs"
+        "?version=2.0.1&coverage=national__DTM_1m"
+    ]
+    assert provenance["provider"] == "TESTWCS"
+    assert provenance["access_strategy"] == "wcs"
+    assert provenance["wcs_coverage"] == "national__DTM_1m"
+    assert provenance["vertical_datum"] == "TESTDATUM"
+
+
+@requires_gdal
+def test_wcs_all_nodata_window_is_no_coverage(tmp_path, monkeypatch):
+    # An airport inside the coverage_bbox but outside the national data
+    # extent warps to all nodata: the strategy must delete the file and
+    # report no coverage (so the orchestration caches the negative).
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+
+    def _fake_warp(inputs, bounding_box, resolution, destination):
+        (west, south, east, north) = bounding_box
+        _write_constant_geotiff(
+            destination, west, south, east, north, -32768.0
+        )
+        return True
+
+    monkeypatch.setattr(
+        INSETS, "warp_vsicurl_sources_to_geotiff", _fake_warp
+    )
+    destination = str(tmp_path / "EGXX_testwcs.tif")
+    provenance = INSETS.fetch_inset(
+        _wcs_definition(), (-3.0, 52.0, -2.9, 52.1), 1.0, destination
+    )
+    assert provenance is None
+    assert not os.path.exists(destination)
+
+
+@requires_gdal
+def test_wcs_failed_warp_is_no_coverage(tmp_path, monkeypatch):
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    monkeypatch.setattr(
+        INSETS,
+        "warp_vsicurl_sources_to_geotiff",
+        lambda *arguments: False,
+    )
+    destination = str(tmp_path / "EGLL_testwcs.tif")
+    assert (
+        INSETS.fetch_inset(
+            _wcs_definition(), (-0.49, 51.44, -0.41, 51.49), 1.0, destination
+        )
+        is None
+    )
+
+
+# =====================================================================
+# STAC asset selection: filename-keyed multi-resolution assets
+# =====================================================================
+def test_stac_asset_selection_picks_finest_geotiff():
+    # swisstopo-shaped item: no "dtm" asset key, two GeoTIFF assets of
+    # the same tile at different ground sample distances, keyed by file
+    # name and carrying their own eo:gsd.  The 2 m asset deliberately
+    # comes FIRST so dictionary order alone would pick the wrong one.
+    items = [
+        {
+            "id": "swissalti3d_2020_2683-1257",
+            "properties": {},
+            "assets": {
+                "tile_2_2056.tif": {
+                    "href": "https://example.test/tile_2.tif",
+                    "type": (
+                        "image/tiff; application=geotiff; "
+                        "profile=cloud-optimized"
+                    ),
+                    "eo:gsd": 2.0,
+                },
+                "tile_0.5_2056.tif": {
+                    "href": "https://example.test/tile_05.tif",
+                    "type": (
+                        "image/tiff; application=geotiff; "
+                        "profile=cloud-optimized"
+                    ),
+                    "eo:gsd": 0.5,
+                },
+                "tile_0.5_2056.xyz.zip": {
+                    "href": "https://example.test/tile_05.xyz.zip",
+                    "type": "application/x.ascii-xyz+zip",
+                    "eo:gsd": 0.5,
+                },
+            },
+        }
+    ]
+    chosen = INSETS._select_stac_dtm_assets(items, prefer_asset_keys=[])
+    assert chosen == [("https://example.test/tile_05.tif", 0.5)]
+
+
+def test_stac_asset_selection_prefers_named_dtm_key():
+    # The HRDEM shape is untouched: an explicit "dtm" key wins even when
+    # a finer GeoTIFF asset exists under another key.
+    items = [
+        {
+            "id": "hrdem-item",
+            "properties": {"gsd": 1.0},
+            "assets": {
+                "dsm-finer": {
+                    "href": "https://example.test/dsm.tif",
+                    "type": "image/tiff; application=geotiff",
+                    "eo:gsd": 0.5,
+                },
+                "dtm": {
+                    "href": "https://example.test/dtm.tif",
+                    "type": "image/tiff; application=geotiff",
+                },
+            },
+        }
+    ]
+    chosen = INSETS._select_stac_dtm_assets(items, prefer_asset_keys=["dtm"])
+    assert chosen == [("https://example.test/dtm.tif", 1.0)]
+
+
+# =====================================================================
+# The direct_cog strategy (fixed country-wide GeoTIFF URLs)
+# =====================================================================
+@requires_gdal
+def test_direct_cog_fetch_and_bbox_gate(tmp_path, monkeypatch):
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    warp_calls = {}
+
+    def _fake_warp(inputs, bounding_box, resolution, destination):
+        warp_calls["inputs"] = list(inputs)
+        (west, south, east, north) = bounding_box
+        _write_constant_geotiff(destination, west, south, east, north, 60.0)
+        return True
+
+    monkeypatch.setattr(
+        INSETS, "warp_vsicurl_sources_to_geotiff", _fake_warp
+    )
+    definition = {
+        "code": "TESTCOG",
+        "access_strategy": "direct_cog",
+        "cog_urls": "https://example.test/a.tif, s3://bucket/b.tif",
+        "coverage_bbox": (-5.5, 51.3, -2.6, 53.5),
+        "vertical_datum": "ODN",
+    }
+    cardiff = (-3.35, 51.39, -3.33, 51.40)
+    doha = (51.55, 25.24, 51.65, 25.29)
+    strategy = INSETS.ACCESS_STRATEGIES["direct_cog"]()
+    assert strategy.discover(definition, doha) is None
+    destination = str(tmp_path / "EGFF_testcog.tif")
+    provenance = INSETS.fetch_inset(definition, cardiff, 1.0, destination)
+    assert provenance is not None
+    # Both URL forms map onto GDAL virtual paths, order preserved.
+    assert warp_calls["inputs"] == [
+        "/vsicurl/https://example.test/a.tif",
+        "/vsis3/bucket/b.tif",
+    ]
+
+
+# =====================================================================
+# The static_stac strategy (catalog walking + persistent index)
+# =====================================================================
+_STATIC_ROOT = "https://static.test/catalog.json"
+_STATIC_TREE = {
+    _STATIC_ROOT: {
+        "links": [
+            {"rel": "child", "href": "./north/dem_1m/collection.json"},
+            {"rel": "child", "href": "./north/dsm_1m/collection.json"},
+            {"rel": "child", "href": "./south/dem_1m/collection.json"},
+        ]
+    },
+    "https://static.test/north/dem_1m/collection.json": {
+        "extent": {"spatial": {"bbox": [[174.0, -37.2, 175.0, -36.0]]}},
+        "links": [
+            {"rel": "item", "href": "./tile_a.json"},
+            {"rel": "item", "href": "./tile_b.json"},
+        ],
+    },
+    "https://static.test/south/dem_1m/collection.json": {
+        "extent": {"spatial": {"bbox": [[167.0, -47.0, 169.0, -44.0]]}},
+        "links": [{"rel": "item", "href": "./far.json"}],
+    },
+    "https://static.test/north/dem_1m/tile_a.json": {
+        "bbox": [174.7, -37.1, 174.9, -36.9],
+        "assets": {
+            "visual": {
+                "href": "./tile_a.tiff",
+                "type": "image/tiff; application=geotiff",
+            }
+        },
+    },
+    "https://static.test/north/dem_1m/tile_b.json": {
+        "bbox": [174.0, -36.5, 174.2, -36.3],
+        "assets": {
+            "visual": {
+                "href": "./tile_b.tiff",
+                "type": "image/tiff; application=geotiff",
+            }
+        },
+    },
+}
+
+
+def _static_stac_definition():
+    return {
+        "code": "TESTSTATIC",
+        "access_strategy": "static_stac",
+        "catalog_url": _STATIC_ROOT,
+        "collection_filter": "/dem_1m/",
+        "dtm_asset_keys": "",
+        "coverage_bbox": (166.0, -48.0, 179.0, -34.0),
+    }
+
+
+def test_static_stac_walks_and_memoises(tmp_path, monkeypatch):
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    fetch_log = []
+
+    def _fake_fetch_json(self, session, url):
+        fetch_log.append(url)
+        return _STATIC_TREE.get(url)
+
+    monkeypatch.setattr(
+        INSETS.StaticStacCatalogStrategy, "_fetch_json", _fake_fetch_json
+    )
+    strategy = INSETS.ACCESS_STRATEGIES["static_stac"]()
+    definition = _static_stac_definition()
+    auckland = (174.78, -37.01, 174.80, -36.99)
+    sources = strategy.discover(definition, auckland)
+    assert sources == [
+        {
+            "bbox": [174.7, -37.1, 174.9, -36.9],
+            "href": "https://static.test/north/dem_1m/tile_a.tiff",
+            "resolution": None,
+        }
+    ]
+    # The dsm_1m sibling was filtered out; the south survey's items were
+    # never fetched (its collection box misses the request).
+    assert (
+        "https://static.test/north/dsm_1m/collection.json" not in fetch_log
+    )
+    assert "https://static.test/south/dem_1m/far.json" not in fetch_log
+    assert os.path.isfile(strategy.index_path(definition))
+    # Second discovery answers ENTIRELY from the persisted index.
+    def _forbidden(self, session, url):
+        raise AssertionError("catalog re-walked despite the index")
+
+    monkeypatch.setattr(
+        INSETS.StaticStacCatalogStrategy, "_fetch_json", _forbidden
+    )
+    strategy_two = INSETS.ACCESS_STRATEGIES["static_stac"]()
+    assert strategy_two.discover(definition, auckland) == sources
+
+
+# =====================================================================
+# The xyz_text_tiles strategy (Japan GSI slippy text tiles)
+# =====================================================================
+class _FakeTileSession:
+    """Serves synthetic 256x256 elevation text tiles per URL prefix."""
+
+    def __init__(self, responses):
+        # responses: {url_substring: (status, body)} — first match wins.
+        self._responses = responses
+
+    def get(self, url, timeout=None):
+        import types
+
+        for (token, (status, body)) in self._responses.items():
+            if token in url:
+                return types.SimpleNamespace(status_code=status, text=body)
+        return types.SimpleNamespace(status_code=404, text="")
+
+
+def _text_tile(value):
+    row = ",".join([str(value)] * 256)
+    return "\n".join([row] * 256)
+
+
+def _xyz_definition(**overrides):
+    definition = {
+        "code": "TESTXYZ",
+        "access_strategy": "xyz_text_tiles",
+        "tile_url_template": "https://tiles.test/primary/{zoom}/{x}/{y}.txt",
+        "tile_zoom": "15",
+        "fallback_url_template": (
+            "https://tiles.test/fallback/{zoom}/{x}/{y}.txt"
+        ),
+        "fallback_zoom": "14",
+        "native_resolution_m": "5",
+        "vertical_datum": "TESTDATUM",
+    }
+    definition.update(overrides)
+    return definition
+
+
+@requires_gdal
+def test_xyz_tiles_primary_layer_serves(tmp_path, monkeypatch):
+    import requests
+
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    monkeypatch.setattr(
+        requests,
+        "Session",
+        lambda: _FakeTileSession({"/primary/": (200, _text_tile(42.5))}),
+    )
+    destination = str(tmp_path / "RJXX_testxyz.tif")
+    provenance = INSETS.fetch_inset(
+        _xyz_definition(), (139.77, 35.545, 139.79, 35.56), 5.0, destination
+    )
+    assert provenance is not None
+    dataset = gdal.Open(destination)
+    values = dataset.GetRasterBand(1).ReadAsArray()
+    valid = values[values > -32768]
+    assert valid.size and abs(float(valid.mean()) - 42.5) < 0.01
+
+
+@requires_gdal
+def test_xyz_tiles_fall_back_to_composite(tmp_path, monkeypatch):
+    import requests
+
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    # The 5 m layer has no tiles here; the nationwide composite does.
+    monkeypatch.setattr(
+        requests,
+        "Session",
+        lambda: _FakeTileSession(
+            {
+                "/primary/": (404, ""),
+                "/fallback/": (200, _text_tile(7.25)),
+            }
+        ),
+    )
+    destination = str(tmp_path / "RJYY_testxyz.tif")
+    provenance = INSETS.fetch_inset(
+        _xyz_definition(), (139.77, 35.545, 139.79, 35.56), 5.0, destination
+    )
+    assert provenance is not None
+    dataset = gdal.Open(destination)
+    values = dataset.GetRasterBand(1).ReadAsArray()
+    valid = values[values > -32768]
+    assert valid.size and abs(float(valid.mean()) - 7.25) < 0.01
+    # Nothing anywhere: honest no-coverage.
+    monkeypatch.setattr(
+        requests, "Session", lambda: _FakeTileSession({})
+    )
+    assert (
+        INSETS.fetch_inset(
+            _xyz_definition(),
+            (139.77, 35.545, 139.79, 35.56),
+            5.0,
+            str(tmp_path / "RJZZ_testxyz.tif"),
+        )
+        is None
+    )
+
+
+# =====================================================================
+# The xyz_archive_drop strategy (Taiwan manual archives)
+# =====================================================================
+@requires_gdal
+def test_xyz_archive_drop_converts_and_serves(tmp_path, monkeypatch):
+    import zipfile
+
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    definition = {
+        "code": "TESTTWN",
+        "access_strategy": "xyz_archive_drop",
+        "drop_directory_name": "Taiwan_test_drop",
+        "source_epsg": "3826",
+        "xyz_column_order": "YXZ",
+        "native_resolution_m": "20",
+        "vertical_datum": "TWVD2001",
+    }
+    # A sheet of N,E,H points (northing first) on a 20 m TWD97 grid
+    # covering the requested WGS84 window.
+    bbox = (121.226, 25.076, 121.238, 25.084)
+    strategy = INSETS.ACCESS_STRATEGIES["xyz_archive_drop"]()
+    (x_min, y_min, x_max, y_max) = strategy._bounding_box_in_source_crs(
+        definition, bbox
+    )
+    x0 = (int(x_min) // 20 - 4) * 20
+    y0 = (int(y_min) // 20 - 4) * 20
+    columns = int((x_max - x0) / 20) + 8
+    rows = int((y_max - y0) / 20) + 8
+    lines = []
+    for row in range(rows):
+        for column in range(columns):
+            lines.append(
+                "%d,%d,%s" % (y0 + row * 20, x0 + column * 20, "77.0")
+            )
+    drop_directory = strategy.drop_directory(definition)
+    os.makedirs(drop_directory)
+    with zipfile.ZipFile(
+        os.path.join(drop_directory, "county.zip"), "w"
+    ) as archive:
+        archive.writestr("sheets/94191001dem.grd", "\n".join(lines))
+        archive.writestr("sheets/94191001dem.hdr", "metadata, skipped")
+    destination = str(tmp_path / "RCXX_testtwn.tif")
+    provenance = INSETS.fetch_inset(definition, bbox, 20.0, destination)
+    assert provenance is not None
+    dataset = gdal.Open(destination)
+    values = dataset.GetRasterBand(1).ReadAsArray()
+    valid = values[values > -32768]
+    assert valid.size and abs(float(valid.mean()) - 77.0) < 0.01
+    # The conversion is memoised: the sheet GeoTIFF and index exist.
+    assert os.path.isfile(strategy.index_path(definition))
+    # A second airport far away on the sheet's county still resolves
+    # without re-conversion, and an uncovered window is no-coverage.
+    assert (
+        INSETS.fetch_inset(
+            definition,
+            (121.5, 25.2, 121.51, 25.21),
+            20.0,
+            str(tmp_path / "RCYY_testtwn.tif"),
+        )
+        is None
+    )
+
+
+def test_xyz_archive_drop_instructions_when_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    definition = {
+        "code": "TESTTWN",
+        "access_strategy": "xyz_archive_drop",
+        "drop_directory_name": "Taiwan_test_drop",
+        "source_epsg": "3826",
+    }
+    strategy = INSETS.ACCESS_STRATEGIES["xyz_archive_drop"]()
+    assert strategy.discover(definition, (121.2, 25.0, 121.3, 25.1)) is None
+
+
+# =====================================================================
+# The wfs_tile_index strategy (France LiDAR HD)
+# =====================================================================
+@requires_gdal
+def test_wfs_tile_index_discovers_and_fetches(tmp_path, monkeypatch):
+    import types
+    import requests
+
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    # A real (tiny) GeoTIFF is served as the tile payload.
+    tile_path = str(tmp_path / "payload.tif")
+    _write_constant_geotiff(tile_path, 1.35, 43.62, 1.38, 43.64, 150.0)
+    with open(tile_path, "rb") as handle:
+        tile_bytes = handle.read()
+    calls = []
+
+    def _fake_get(url, timeout=None):
+        calls.append(url)
+        if "GetFeature" in url:
+            assert "43.62" in url  # latitude-first bbox
+            return types.SimpleNamespace(
+                status_code=200,
+                json=lambda: {
+                    "features": [
+                        {
+                            "properties": {
+                                "name": "LHD_TEST_TILE",
+                                "url": "https://tiles.test/one.tif",
+                            }
+                        }
+                    ]
+                },
+            )
+        return types.SimpleNamespace(status_code=200, content=tile_bytes)
+
+    monkeypatch.setattr(requests, "get", _fake_get)
+    definition = {
+        "code": "TESTWFS",
+        "access_strategy": "wfs_tile_index",
+        "wfs_service_url": "https://wfs.test/ows",
+        "wfs_type_name": "TEST:dalle",
+        "native_resolution_m": "0.5",
+        "vertical_datum": "NGF-IGN69",
+    }
+    destination = str(tmp_path / "LFXX_testwfs.tif")
+    provenance = INSETS.fetch_inset(
+        definition, (1.358, 43.625, 1.372, 43.635), 1.0, destination
+    )
+    assert provenance is not None
+    assert provenance["source_urls"] == ["LHD_TEST_TILE"]
+    dataset = gdal.Open(destination)
+    values = dataset.GetRasterBand(1).ReadAsArray()
+    valid = values[values > -32768]
+    assert valid.size and abs(float(valid.mean()) - 150.0) < 0.01
+
+
+def test_wfs_tile_index_empty_featureset_is_no_coverage(monkeypatch):
+    import types
+    import requests
+
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda url, timeout=None: types.SimpleNamespace(
+            status_code=200, json=lambda: {"features": []}
+        ),
+    )
+    strategy = INSETS.ACCESS_STRATEGIES["wfs_tile_index"]()
+    definition = {
+        "code": "TESTWFS",
+        "access_strategy": "wfs_tile_index",
+        "wfs_service_url": "https://wfs.test/ows",
+        "wfs_type_name": "TEST:dalle",
+    }
+    assert strategy.discover(definition, (1.0, 43.0, 1.1, 43.1)) is None
+
+
+# =====================================================================
+# The wcs_kvp strategy (Hesse-style spelled-out GetCoverage)
+# =====================================================================
+@requires_gdal
+def test_wcs_kvp_instantiates_bbox_and_fetches(tmp_path, monkeypatch):
+    import requests
+
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    payload_path = str(tmp_path / "payload.tif")
+    _write_constant_geotiff(payload_path, 8.56, 50.02, 8.59, 50.04, 105.0)
+    with open(payload_path, "rb") as handle:
+        payload = handle.read()
+    seen = {}
+
+    def _fake_get(url, timeout=None, headers=None):
+        import types
+
+        seen["url"] = url
+        return types.SimpleNamespace(status_code=200, content=payload)
+
+    monkeypatch.setattr(requests, "get", _fake_get)
+    definition = {
+        "code": "TESTKVP",
+        "access_strategy": "wcs_kvp",
+        "wcs_getcoverage_template": (
+            "https://wcs.test/ows?REQUEST=GetCoverage"
+            "&SUBSET=E({xmin},{xmax})&SUBSET=N({ymin},{ymax})"
+        ),
+        "source_epsg": "25832",
+        "vertical_datum": "DHHN2016",
+    }
+    destination = str(tmp_path / "EDDF_testkvp.tif")
+    provenance = INSETS.fetch_inset(
+        definition, (8.565, 50.028, 8.580, 50.037), 1.0, destination
+    )
+    assert provenance is not None
+    # The placeholders were filled with padded EPSG:25832 metres.
+    assert "SUBSET=E(4" in seen["url"] and "SUBSET=N(55" in seen["url"]
+    dataset = gdal.Open(destination)
+    values = dataset.GetRasterBand(1).ReadAsArray()
+    valid = values[values > -32768]
+    assert valid.size and abs(float(valid.mean()) - 105.0) < 0.01
+
+
+# =====================================================================
+# tile_grid_http refinements (offsets, HTML index)
+# =====================================================================
+@requires_gdal
+def test_tile_grid_odd_easting_offset(monkeypatch):
+    # Baden-Wuerttemberg's 2 km tiles anchor at ODD easting km.
+    strategy = INSETS.ACCESS_STRATEGIES["tile_grid_http"]()
+    definition = {
+        "code": "TESTBW",
+        "access_strategy": "tile_grid_http",
+        "tile_url_template": "https://bw.test/dgm1_32_{easting_km}_{northing_km}_2_bw.zip",
+        "tile_size_km": "2",
+        "grid_easting_offset_km": "1",
+        "source_epsg": "25832",
+        "probe_mode": "none",
+    }
+    sources = strategy.discover(definition, (9.215, 48.687, 9.228, 48.695))
+    names = [entry["url"].rsplit("/", 1)[-1] for entry in sources]
+    # Stuttgart (516200, 5392900): odd-anchored easting 515, even 5392.
+    assert "dgm1_32_515_5392_2_bw.zip" in names
+    for name in names:
+        easting = int(name.split("_")[2])
+        northing = int(name.split("_")[3])
+        assert easting % 2 == 1 and northing % 2 == 0
+
+
+def test_tile_grid_html_index_resolution(tmp_path, monkeypatch):
+    import types
+    import requests
+
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    listing = (
+        '<html><a href="dgm1_32_375_5534_1_rp_2023.tif">x</a>'
+        '<a href="dgm1_32_375_5535_1_rp_2021.tif">y</a></html>'
+    )
+
+    def _fake_get(url, timeout=None, headers=None):
+        response = types.SimpleNamespace(status_code=200, text=listing)
+        response.json = lambda: (_ for _ in ()).throw(ValueError())
+        return response
+
+    monkeypatch.setattr(requests, "get", _fake_get)
+    strategy = INSETS.ACCESS_STRATEGIES["tile_grid_http"]()
+    definition = {
+        "code": "TESTRLP",
+        "access_strategy": "tile_grid_http",
+        "tile_url_template": "https://rlp.test/tif/{file_name}",
+        "index_url": "https://rlp.test/tif/",
+        "tile_size_km": "1",
+        "source_epsg": "25832",
+    }
+    names = strategy._tile_names_from_index(definition)
+    assert "dgm1_32_375_5534_1_rp_2023.tif" in names
+    # Cached: a second call must not need the network.
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("re-fetched")),
+    )
+    assert strategy._tile_names_from_index(definition) == names
+
+
+# =====================================================================
+# xyz_archive_drop: loose (non-zip) dropped files (Hamburg)
+# =====================================================================
+@requires_gdal
+def test_xyz_archive_drop_converts_loose_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    definition = {
+        "code": "TESTHH",
+        "access_strategy": "xyz_archive_drop",
+        "drop_directory_name": "Hamburg_test_drop",
+        "source_epsg": "25832",
+        "xyz_column_order": "AUTO",
+        "native_resolution_m": "1",
+    }
+    strategy = INSETS.ACCESS_STRATEGIES["xyz_archive_drop"]()
+    bbox = (9.985, 53.628, 9.995, 53.635)
+    (x_min, y_min, x_max, y_max) = strategy._bounding_box_in_source_crs(
+        definition, bbox
+    )
+    x0 = (int(x_min) // 10 - 4) * 10
+    y0 = (int(y_min) // 10 - 4) * 10
+    columns = int((x_max - x0) / 10) + 8
+    rows = int((y_max - y0) / 10) + 8
+    lines = [
+        "%d %d 11.5" % (x0 + column * 10, y0 + row * 10)
+        for row in range(rows)
+        for column in range(columns)
+    ]
+    drop_directory = strategy.drop_directory(definition)
+    os.makedirs(drop_directory)
+    with open(os.path.join(drop_directory, "dgm1_city.xyz"), "w") as f:
+        f.write("\n".join(lines))
+    destination = str(tmp_path / "EDDH_testhh.tif")
+    provenance = INSETS.fetch_inset(definition, bbox, 10.0, destination)
+    assert provenance is not None
+    dataset = gdal.Open(destination)
+    values = dataset.GetRasterBand(1).ReadAsArray()
+    valid = values[values > -32768]
+    assert valid.size and abs(float(valid.mean()) - 11.5) < 0.01
+
+
+# =====================================================================
+# Warp sentinel sanitization (undeclared float-max nodata, PDOK case)
+# =====================================================================
+@requires_gdal
+def test_warp_sanitizes_undeclared_sentinel_values(tmp_path):
+    import numpy as numpy_module
+
+    source_path = str(tmp_path / "sentinel_source.tif")
+    driver = gdal.GetDriverByName("GTiff")
+    dataset = driver.Create(source_path, 40, 40, 1, gdal.GDT_Float32)
+    dataset.SetGeoTransform((4.75, 0.001, 0, 52.32, 0, -0.001))
+    reference = osr.SpatialReference()
+    reference.ImportFromEPSG(4326)
+    dataset.SetProjection(reference.ExportToWkt())
+    values = numpy_module.full((40, 40), -3.5, dtype=numpy_module.float32)
+    values[:10, :] = 3.4028235e38  # float-max fill, NO nodata declared
+    dataset.GetRasterBand(1).WriteArray(values)
+    dataset = None
+    destination = str(tmp_path / "sanitized.tif")
+    assert INSETS.warp_vsicurl_sources_to_geotiff(
+        [source_path], (4.75, 52.28, 4.79, 52.32), 100.0, destination
+    )
+    # Hold the dataset reference: chaining Open().GetRasterBand() lets
+    # the dataset be garbage-collected mid-expression and orphans the
+    # band (the classic GDAL Python pitfall).
+    dataset = gdal.Open(destination)
+    result = dataset.GetRasterBand(1).ReadAsArray()
+    valid = result[result > -32768]
+    assert valid.size and float(valid.max()) < 12000.0
+    assert float(result.min()) == -32768.0  # the garbage became nodata
+
+
+# =====================================================================
+# The geojson_tile_index strategy (Uruguay's national catalog)
+# =====================================================================
+@requires_gdal
+def test_geojson_tile_index_caches_and_fetches(tmp_path, monkeypatch):
+    import types
+    import requests
+
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    catalog = {
+        "features": [
+            {
+                "properties": {"MDT_geoT": "https://tiles.test/J29C3.tif"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[
+                        [-56.06, -34.86], [-56.00, -34.86],
+                        [-56.00, -34.82], [-56.06, -34.82],
+                        [-56.06, -34.86],
+                    ]],
+                },
+            },
+            {
+                "properties": {"MDT_geoT": "https://tiles.test/FAR.tif"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[
+                        [-54.0, -33.0], [-53.9, -33.0],
+                        [-53.9, -32.9], [-54.0, -32.9], [-54.0, -33.0],
+                    ]],
+                },
+            },
+        ]
+    }
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda url, timeout=None: types.SimpleNamespace(
+            status_code=200, json=lambda: catalog
+        ),
+    )
+    definition = {
+        "code": "TESTUY",
+        "access_strategy": "geojson_tile_index",
+        "index_url": "https://catalog.test/grid.geojson",
+        "url_property": "MDT_geoT",
+    }
+    strategy = INSETS.ACCESS_STRATEGIES["geojson_tile_index"]()
+    montevideo = (-56.038, -34.845, -56.022, -34.833)
+    sources = strategy.discover(definition, montevideo)
+    assert [entry["url"] for entry in sources] == [
+        "https://tiles.test/J29C3.tif"
+    ]
+    # Memoised: a second discovery never touches the network.
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("re-fetch")),
+    )
+    assert strategy.discover(definition, montevideo) == sources
+    assert (
+        strategy.discover(definition, (-58.0, -34.0, -57.9, -33.9)) is None
+    )
