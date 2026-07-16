@@ -19,9 +19,13 @@ import sys
 
 import pytest
 
+from shapely.geometry import MultiPolygon, Polygon
+
+import O4_Airport_Fade_Masks as FADE
 import O4_DSF_Utils as DSF
 import O4_Default_Terrain_Map as DTM
 import O4_File_Names as FNAMES
+import O4_Geo_Utils as GEO
 
 # Make tools/ importable for the decode helper.
 _TOOLS = os.path.normpath(
@@ -110,6 +114,7 @@ def _make_tile(build_dir, texture_mode):
     tile.overlay_lod = 40000
     tile.mask_zl = 14
     tile.texture_mode = texture_mode
+    tile.airport_ortho_fade_width = 1000.0
     tile.grouped = False
     return tile
 
@@ -360,3 +365,95 @@ def test_default_xplane_hard_errors_without_map(
     with pytest.raises(RuntimeError) as excinfo:
         DSF.build_dsf(tile, queue.Queue())
     assert "custom_overlay_src" in str(excinfo.value)
+
+
+# ── test 6: airport_ortho physical base + ortho overlay (work package 3) ─
+
+def _covered_land_geometry():
+    """Airport geometry covering the land square (lon/lat local [0.05,0.35])
+    but not the disjoint sea triangle (local ~0.7, 0.75)."""
+    square = MultiPolygon([Polygon([
+        (0.05, 0.05), (0.35, 0.05), (0.35, 0.35), (0.05, 0.35)])])
+    return FADE.AirportOrthoGeometry(
+        square, 1000.0, tile_lon=10, tile_lat=50, ref_lat=50.5)
+
+
+def _covered_land_download_set(tile):
+    """The exact texture tiles the two covered land-triangle centroids map to
+    (recomputed from the writer's own ortho dico), for the download-queue
+    assertion."""
+    dico = DSF.zone_list_to_ortho_dico(tile)
+    expected = set()
+    for (i, j, k, attr) in _LAND_AND_SEA_TRIS:
+        if attr != 0:
+            continue
+        verts = [_LAND_AND_SEA_VERTS[idx - 1] for idx in (i, j, k)]
+        bary_lon = sum(v[0] for v in verts) / 3
+        bary_lat = sum(v[1] for v in verts) / 3
+        expected.add(
+            dico[GEO.wgs84_to_orthogrid(bary_lat, bary_lon, tile.mesh_zl)])
+    return expected
+
+
+@_DSFTOOL
+def test_airport_ortho_physical_base_and_overlay(
+        tmp_path, monkeypatch, stub_elevation):
+    build_dir = _prepare_build_dir(tmp_path)
+    _write_mesh(build_dir, _LAND_AND_SEA_VERTS, _LAND_AND_SEA_TRIS)
+
+    terrain_map = _split_terrain_map()
+    monkeypatch.setattr(
+        DTM.DefaultTerrainMap, "from_tile",
+        classmethod(lambda cls, lat, lon: terrain_map))
+    geometry = _covered_land_geometry()
+    monkeypatch.setattr(
+        DSF.FADE, "build_airport_ortho_geometry", lambda tile: geometry)
+
+    tile = _make_tile(build_dir, "airport_ortho")
+    expected_downloads = _covered_land_download_set(tile)
+
+    download_queue = queue.Queue()
+    rc = DSF.build_dsf(tile, download_queue)
+    assert rc == 1
+
+    # The download queue holds exactly the covered-land texture tiles and
+    # nothing else (the sea triangle is uncovered -> no ortho download).
+    queued = set()
+    while not download_queue.empty():
+        queued.add(download_queue.get())
+    assert queued == expected_downloads
+    assert queued, "airport_ortho queued no ortho downloads for covered land"
+
+    # A fade-mask PNG was written for each covered texture tile.
+    for attributes in expected_downloads:
+        mask_name = FNAMES.airport_fade_mask_name(*attributes)
+        assert os.path.isfile(
+            os.path.join(build_dir, "textures", mask_name)), (
+            f"fade mask {mask_name} not written")
+
+    dump = DECODE.decode_dsf(_emitted_dsf(build_dir))
+
+    # Physical base: default-landclass library terrains, flag 1, 5-plane.
+    physical_land = [
+        p for p in dump.patches if p.terrain_path.startswith("lib/g10/")]
+    assert physical_land, "no physical default-terrain land patches emitted"
+    for patch in physical_land:
+        assert patch.flags == 1, f"physical land not flag 1: {patch}"
+        assert patch.plane_count == 5, f"physical land not 5-plane: {patch}"
+
+    # Overlay ortho: generated ``terrain/..._overlay.ter``, flag 2, 9-plane.
+    overlay_ortho = [
+        p for p in dump.patches
+        if p.terrain_path.startswith("terrain/")
+        and p.terrain_path.endswith("_overlay.ter")]
+    assert overlay_ortho, "no ortho overlay patches emitted over the airport"
+    for patch in overlay_ortho:
+        assert patch.flags == 2, f"ortho overlay not flag 2: {patch}"
+        assert patch.plane_count == 9, f"ortho overlay not 9-plane: {patch}"
+
+    # The uncovered sea triangle took the plain terrain_Water path.
+    water = [p for p in dump.patches if p.terrain_path == "terrain_Water"]
+    assert water, "sea triangle did not route to terrain_Water"
+    for patch in water:
+        assert patch.flags == 1
+        assert patch.plane_count == 7

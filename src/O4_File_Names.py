@@ -408,6 +408,26 @@ def mask_file(til_x_left, til_y_top, zoomlevel, provider_code):
     )
 
 
+def airport_fade_mask_name(til_x_left, til_y_top, zoomlevel, provider_code):
+    """Grayscale fade mask accompanying an orthophoto texture tile in
+    ``airport_ortho`` texture mode (see ``docs/specs/texture-mode-spec.md``).
+
+    Georeferenced identically to the DDS
+    (``dds_file_name_from_attributes``) it fades; the ``_airport_fade`` suffix
+    keeps it distinct from the sea/distance masks (``mask_file`` /
+    ``distance_mask``), which share the same texture directory.
+    """
+    return (
+        str(til_y_top)
+        + "_"
+        + str(til_x_left)
+        + "_"
+        + provider_code
+        + str(zoomlevel)
+        + "_airport_fade.png"
+    )
+
+
 ##############################################################################
 
 ##############################################################################
