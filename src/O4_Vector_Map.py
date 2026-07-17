@@ -60,7 +60,27 @@ WATER_QUERIES = [
     'way["waterway"="riverbank"]',
     'way["waterway"="dock"]',
 ]
-WATER_TAGS_OF_INTEREST = ["name"]
+# "tidal" and "water" feed the SEA_EQUIV routing of tidal ponds and
+# lagoons (see water_polygon_is_tidal); bump WATER_CACHE_TAG_SCHEMA
+# when this list grows so pre-existing caches re-download with the
+# new tags.
+WATER_TAGS_OF_INTEREST = ["name", "tidal", "water"]
+WATER_CACHE_TAG_SCHEMA = "2026-07-17"
+
+
+def water_polygon_is_tidal(osmid, dicosmtags):
+    """Whether an OpenStreetMap water polygon belongs to the tidal regime.
+
+    True for polygons tagged ``tidal=yes`` (the Ria Formosa salinas
+    around LPFR) or mapped as coastal lagoons (``water=lagoon``).  These
+    are routed to the SEA_EQUIV water class so they share the sea's
+    depth-graded masks and per-vertex depth ratios; the classic inland
+    treatment (constant ``ratio_water`` alpha, depth ratio pinned to the
+    deep default) makes a tidal pond sitting INSIDE lidar-graded tidal
+    flats read as a hole of deep water.
+    """
+    tags = dicosmtags.get(osmid, {})
+    return tags.get("tidal") == "yes" or tags.get("water") == "lagoon"
 
 
 def small_roads_queries(road_level):
@@ -99,7 +119,8 @@ def _osm_layer_prefetch_specifications(tile):
     if not (os.path.isfile(FNAMES.custom_water(tile.lat, tile.lon))
             or os.path.isdir(FNAMES.custom_water_dir(tile.lat, tile.lon))):
         specifications.append(
-            ("water", WATER_QUERIES, WATER_TAGS_OF_INTEREST, [], ""))
+            ("water", WATER_QUERIES, WATER_TAGS_OF_INTEREST, [],
+             WATER_CACHE_TAG_SCHEMA))
     return specifications
 
 
@@ -780,6 +801,16 @@ def include_water(vector_map, tile):
             )
             return True
 
+    tidal_polygon_count = [0]
+
+    def water_needs_sea_mask(pol, osmid, dicosmtags):
+        """SEA_EQUIV routing: tidal ponds and lagoons first (any size),
+        then the historic large-lake rule."""
+        if water_polygon_is_tidal(osmid, dicosmtags):
+            tidal_polygon_count[0] += 1
+            return True
+        return filter_large_lakes(pol, osmid, dicosmtags)
+
     UI.vprint(0, "-> Dealing with inland water")
     wait_for_background_osm_prefetch()
     water_layer = OSM.OSM_layer()
@@ -810,6 +841,7 @@ def include_water(vector_map, tile):
             tile.lon,
             WATER_TAGS_OF_INTEREST,
             cached_suffix="water",
+            cache_schema=WATER_CACHE_TAG_SCHEMA,
         ):
             return 0
     # Airport-inset water supplement (additive, never a replacement):
@@ -835,8 +867,16 @@ def include_water(vector_map, tile):
                 )
     UI.vprint(1, "    * Building water multipolygon.")
     (water_area, sea_equiv_area) = OSM.OSM_to_MultiPolygon(
-        water_layer, tile.lat, tile.lon, filter_large_lakes
+        water_layer, tile.lat, tile.lon, water_needs_sea_mask
     )
+    if tidal_polygon_count[0]:
+        UI.vprint(
+            1,
+            "      *",
+            tidal_polygon_count[0],
+            "tidal pond / lagoon polygon(s) will be masked and depth-"
+            "graded like the sea.",
+        )
     if not water_area.is_empty:
         UI.vprint(1, "      Cleaning it.")
         try:
