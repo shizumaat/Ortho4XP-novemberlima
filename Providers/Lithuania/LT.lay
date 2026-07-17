@@ -1,0 +1,11 @@
+# Lithuanian INSPIRE orthoimagery view service (ORT10LT, 20 cm GSD),
+# geoportal.lt QGIS server. Capabilities state no fees and no access
+# constraints. Endpoint verified 2026-07-17.
+request_type=wms
+wms_size=512
+epsg_code=3857
+wms_version=1.1.1
+url_prefix=https://www.geoportal.lt/qgisserver/oi?
+layers=OI
+imagery_dir=grouped
+in_GUI=False

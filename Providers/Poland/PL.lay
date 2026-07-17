@@ -1,8 +1,11 @@
+# GUGiK Geoportal national orthophoto WMS (open). The old
+# img/guest/ORTO endpoint is retired; the PZGIK HighResolution service
+# replaces it. Endpoint verified 2026-07-17.
 request_type=wms
 wms_size=512
 epsg_code=3857
 wms_version=1.1.1
-url_prefix=http://mapy.geoportal.gov.pl/wss/service/img/guest/ORTO/MapServer/WMSServer?
+url_prefix=https://mapy.geoportal.gov.pl/wss/service/PZGIK/ORTO/WMS/HighResolution?
 layers=Raster
 imagery_dir=grouped
 in_GUI=False

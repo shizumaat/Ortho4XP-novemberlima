@@ -1,0 +1,13 @@
+# Quebec government orthophoto mosaic (geoegl.msp.gouv.qc.ca TMS,
+# CC BY 4.0 on the underlying Donnees Quebec datasets). Note the {-y}
+# placeholder: this is a genuine TMS with a south-origin row axis.
+# Endpoint verified 2026-07-17.
+request_type=tms
+epsg_code=3857
+tile_size=256
+top_left_corner=-20037508.34 20037508.34
+resolutions=156543.033928041 78271.5169640205 39135.75848201025 19567.879241005125 9783.939620502562 4891.969810251281 2445.9849051256406 1222.9924525628203 611.4962262814101 305.74811314070506 152.87405657035253 76.43702828517627 38.21851414258813 19.109257071294066 9.554628535647033 4.777314267823517 2.3886571339117583 1.1943285669558792 0.5971642834779396 0.2985821417389698 0.1492910708694849
+url_template=https://geoegl.msp.gouv.qc.ca/apis/carto/tms/1.0.0/orthos@EPSG_3857/{zoom}/{x}/{-y}.jpg
+max_threads=16
+imagery_dir=grouped
+in_GUI=True

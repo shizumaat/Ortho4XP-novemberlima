@@ -1,0 +1,8 @@
+# Ontario LIO imagery web map service (SWOOP and regional orthophoto
+# programs, Open Government Licence - Ontario), cached web mercator
+# tiles. Endpoint verified 2026-07-17.
+grid_type=webmercator
+url_template=https://ws.lioservices.lrc.gov.on.ca/arcgis2/rest/services/LIO_Imagery/Ontario_Imagery_Web_Map_Service/MapServer/tile/{zoom}/{y}/{x}
+max_threads=16
+imagery_dir=grouped
+in_GUI=True

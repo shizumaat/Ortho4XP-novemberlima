@@ -1,20 +1,21 @@
-# A European combined layer meant to be tuned and updated (color filters changed from none to useful,
-# and extents potentially modified) by the community. 
+# A European combined layer: national open orthophoto services where one
+# exists and still works, with ArcGIS World Imagery (Arc@) as the global
+# fallback base layer, so every European tile builds even outside the
+# national extents (Ireland, UK, Denmark, Norway, Slovakia, Greece,
+# Albania, the Balkans, ...). Layers paint in reverse file order: the
+# last line is the
+# base, the first line ends up on top. All endpoints live-verified
+# 2026-07-17.
 
-GeoPunt2012  Vlanderen      none    high    
+BE_Vl        Vlanderen      none    high
 
 FIN          Finland        none    medium
-CH_ZH        Zurich         none    high
-CH_VS        Valais         none    high
-NIB          Norway         none    medium
+EST          Estonia        none    medium
+LT           Lithuania      none    medium
 SE2          Sweden         none    medium
-DK           Denmark        none    medium
-Arc@         Ireland        none    medium
-Arc@         UK             none    medium
-DOP40        Germany        none    medium
+DOP20_NRW    NRW            none    medium
 PL           Poland         none    medium
 CZ           Czechia        none    medium
-CZ           Slovakia       none    medium
 NL           Netherlands    none    medium
 BE_Fr        Wallonie       none    medium
 Lux          Luxembourg     none    medium
@@ -25,8 +26,8 @@ HU           Hungary        none    medium
 PCN06        Italy          none    medium
 SLO          Slovenia       none    medium
 CRO_2016     CRO_2016       none    medium
-CRO_2017     CRO_2017       none    medium
 CRO_2011     CRO_add2011    none    medium
 SP           Spain          none    medium
-Arc@         Andorra        none    medium       
-Arc@         Portugal       none    medium
+PTSAT        Portugal       none    medium
+
+Arc@         global         none    low

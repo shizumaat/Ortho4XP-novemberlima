@@ -1,0 +1,8 @@
+# Cyprus Department of Lands and Surveys orthoimagery (10 cm source,
+# 2014/2019 mosaic), cached web mercator tile service, CC BY 4.0 per
+# data.gov.cy. Endpoint verified 2026-07-17.
+grid_type=webmercator
+url_template=https://eservices.dls.moi.gov.cy/arcgis/rest/services/BASEMAPS/Orthoimagery_2019_WebMercator/MapServer/tile/{zoom}/{y}/{x}
+max_threads=16
+imagery_dir=grouped
+in_GUI=True

@@ -1,0 +1,15 @@
+# DGT OrtoSat 2023: 30 cm satellite orthoimagery with full continental
+# Portugal coverage, CC BY 4.0. This is the layer EUR uses for Portugal:
+# the higher-resolution Ortos2021 aerial mosaic (provider PT) only
+# covers the northern half of the country, and a partially-covered
+# layer would imprint white over the fallback imagery in a combined
+# provider. Endpoint verified 2026-07-17.
+request_type=wms
+wms_size=512
+epsg_code=3857
+wms_version=1.1.1
+url_prefix=https://ortos.dgterritorio.gov.pt/wms/ortosat2023?
+layers=ortoSat2023-CorVerdadeira
+extent=Portugal
+imagery_dir=grouped
+in_GUI=False

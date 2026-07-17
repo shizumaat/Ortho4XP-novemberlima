@@ -1,5 +1,11 @@
-request_type=tms
-grid_type=webmercator
-url_template=http://m{switch:1,2,3,4}.mapserver.mapy.cz/ophoto-m/{zoom}-{x}-{y}
-imagery_dir=code
+# CUZK national orthophoto WMS (open). Replaces the retired mapy.cz tile
+# service. Covers Czechia only; the Slovakia entry in EUR.comb now falls
+# back to the global layer. Endpoint verified 2026-07-17.
+request_type=wms
+wms_size=512
+epsg_code=3857
+wms_version=1.1.1
+url_prefix=https://ags.cuzk.gov.cz/arcgis1/services/ORTOFOTO/MapServer/WMSServer?
+layers=0
+imagery_dir=grouped
 in_GUI=False

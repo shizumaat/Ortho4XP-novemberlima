@@ -44,6 +44,18 @@ def record_epsg(epsg_code):
 ################################################################################
 
 ################################################################################
+def record_epsg_alias(alias_code, actual_epsg_code):
+    """Register a non-EPSG code (e.g. an ESRI code from a provider file)
+    under its own key, backed by an equivalent real EPSG definition.
+    The key must be the alias itself: transformer() later looks the code
+    up verbatim, so recording the real EPSG under its own number instead
+    (the historic behavior) left the alias unresolvable and crashed the
+    imagery download with a KeyError."""
+    if alias_code not in epsg:
+        epsg[int(alias_code)] = CRS.from_epsg(int(actual_epsg_code))
+################################################################################
+
+################################################################################
 def transformer(s_epsg, t_epsg):
     return Transformer.from_crs(epsg[int(s_epsg)], epsg[int(t_epsg)], 
                                 always_xy = True)

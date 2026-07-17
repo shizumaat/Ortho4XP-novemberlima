@@ -1,0 +1,16 @@
+# ASIG (Albanian State Authority for Geospatial Information) orthophoto
+# 2015 (20 cm nationwide, 8 cm urban overlay), open keyless service.
+# Endpoint verified 2026-07-17, but the server rate-limits sustained
+# bursts, which would imprint white patches if it ran inside the EUR
+# combined provider — offered standalone instead.
+request_type=wms
+wms_size=512
+epsg_code=3857
+wms_version=1.1.1
+url_prefix=https://geoportal.asig.gov.al/service/orthophoto_2015/wms?
+layers=OrthoImagery_20cm,OrthoImagery_8cm
+# The ASIG server rate-limits request bursts (returns an HTML "NJOFTIM"
+# page instead of imagery); keep the download parallelism low.
+max_threads=4
+imagery_dir=grouped
+in_GUI=True

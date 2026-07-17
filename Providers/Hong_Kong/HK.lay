@@ -1,0 +1,8 @@
+# Hong Kong CSDI Imagery Map API (true digital orthophoto series), open
+# for commercial and non-commercial reuse with attribution to the HKSAR
+# Government / CSDI portal. Endpoint verified 2026-07-17.
+grid_type=webmercator
+url_template=https://mapapi.geodata.gov.hk/gs/api/v1.0.0/xyz/imagery/WGS84/{zoom}/{x}/{y}.png
+max_threads=16
+imagery_dir=grouped
+in_GUI=True

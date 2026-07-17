@@ -1,0 +1,12 @@
+# North Rhine-Westphalia DOP20 (20 cm) open WMS, Datenlizenz
+# Deutschland Zero. The federal BKG DOP services sit behind a security
+# gate, so state services are the only open German orthophotos; NRW is
+# the first one wired up. Endpoint verified 2026-07-17.
+request_type=wms
+wms_size=512
+epsg_code=3857
+wms_version=1.1.1
+url_prefix=https://www.wms.nrw.de/geobasis/wms_nw_dop?
+layers=nw_dop_rgb
+imagery_dir=grouped
+in_GUI=False

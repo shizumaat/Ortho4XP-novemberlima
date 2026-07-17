@@ -1,0 +1,13 @@
+# Flanders mid-scale winter orthophoto mosaic 2024 (Digitaal Vlaanderen,
+# open data), via the geo.api.vlaanderen.be WMS. Replaces the retired
+# tile.informatievlaanderen.be GeoPunt services. Endpoint verified
+# 2026-07-17.
+request_type=wms
+wms_size=512
+epsg_code=3857
+wms_version=1.1.1
+url_prefix=https://geo.api.vlaanderen.be/omw/wms?
+layers=omwrgb24vl
+extent=Vlanderen
+imagery_dir=grouped
+in_GUI=False

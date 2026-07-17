@@ -1,0 +1,15 @@
+# DGT (Direcao-Geral do Territorio) Ortos 2021 aerial mosaic, 25 cm,
+# CC BY 4.0 (attribution: "Geographic information provided by the
+# Direcao-Geral do Territorio"). Covers only the NORTHERN half of
+# continental Portugal (DGT flies the country in biennial halves), so
+# it is offered standalone rather than inside EUR; the full-coverage
+# satellite companion is PTSAT. Endpoint verified 2026-07-17.
+request_type=wms
+wms_size=512
+epsg_code=3857
+wms_version=1.1.1
+url_prefix=https://cartografia.dgterritorio.gov.pt/wms/ortos2021?
+layers=Ortos2021-RGB
+extent=Portugal
+imagery_dir=grouped
+in_GUI=True

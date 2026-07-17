@@ -141,9 +141,10 @@ def initialize_extents_dict():
                     try:
                         GEO.record_epsg(int(value))
                     except:
-                        # HACK for Slovenia
+                        # ESRI code used by some legacy extent files
+                        # (Slovenian D48 grid): alias it to its EPSG twin.
                         if int(value) == 102060:
-                            GEO.record_epsg(3912)
+                            GEO.record_epsg_alias(102060, 3912)
                         else:
                             print("Error in epsg code for extent", extent_code)
                             valid_extent = False
@@ -294,9 +295,10 @@ def initialize_providers_dict():
                     try:
                         GEO.record_epsg(int(value))
                     except:
-                        # HACK for Slovenia
+                        # ESRI code used by some legacy provider files
+                        # (Slovenian D48 grid): alias it to its EPSG twin.
                         if int(value) == 102060:
-                            GEO.record_epsg(3912)
+                            GEO.record_epsg_alias(102060, 3912)
                         else:
                             UI.vprint(
                                 0,

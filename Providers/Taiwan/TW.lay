@@ -1,0 +1,9 @@
+# Taiwan NLSC national orthophoto WMTS (25 cm standard product), open
+# Government Open Data License v1.0 (attribution required, derivatives
+# and commercial use explicitly permitted). PHOTO2 is the current
+# mosaic layer. Endpoint verified 2026-07-17.
+grid_type=webmercator
+url_template=https://wmts.nlsc.gov.tw/wmts/PHOTO2/default/GoogleMapsCompatible/{zoom}/{y}/{x}
+max_threads=16
+imagery_dir=grouped
+in_GUI=True
