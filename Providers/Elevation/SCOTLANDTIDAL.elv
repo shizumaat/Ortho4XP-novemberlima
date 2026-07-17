@@ -54,3 +54,9 @@ enabled=True
 #     box -3.70,54.85 clipped coastal hills to 179 m, not open water.)
 # Scope: INTERTIDAL ONLY -- exposed low-tide flats; no sub-tidal depths.
 # Parent terrain-side definition of the same service: SCOTLAND50CM.elv.
+
+# Exposed-flats lidar: data stops at the waterline, so this source is a
+# binary "flats" layer the OpenStreetMap shallow-water fallback matches
+# for free.  Automatic paths skip it; only masks_use_DEM_too=True
+# fetches it (for regions whose OSM tidal flats are unmapped).
+intertidal=True

@@ -40,6 +40,26 @@ SHALLOW_WATER_CATEGORIES = (
     ),
 )
 SHALLOW_WATER_EDGE_FADE_M = 150.0
+# Mask squares straddle tile edges (the orthophoto grid never aligns
+# with integer degrees), so the fallback query reaches this far into
+# the neighbouring tiles: flats polygons lying wholly beyond the tile
+# line still rasterize into the shared straddling squares, and the two
+# tiles' copies of such a square agree.  Sized for the worst case (a
+# ZL14 mask square is ~0.35 degrees) plus the pre-mask pad and fade.
+SHALLOW_WATER_QUERY_MARGIN_DEGREES = 0.5
+# Cache schema for the shallow-water categories: bumped when the query
+# bbox gained the margin so pre-margin caches re-download once.
+SHALLOW_WATER_CACHE_SCHEMA = "margin-0.5"
+# Where the measured bathymetry band's coverage simply ENDS while the
+# water is still shallow — intertidal lidar that stops at the waterline,
+# the band's own outer limit on a wide shallow shelf, an airport-radius
+# gate boundary — the depth ramp cannot complete and the alpha would
+# fall off a cliff quantized at the band's 10 m pixels (the "jagged
+# squares" seen at the Ria Formosa, 2026-07-16).  The alpha is instead
+# feathered across the data/nodata boundary over this distance; where
+# the ramp does complete inside the data (Kauai) the feather multiplies
+# near-zero values and changes nothing.
+BATHYMETRY_COVERAGE_FADE_M = 150.0
 # Mask workers spend nearly all their time in GIL-releasing numpy/scipy/PIL
 # calls (profiled 2026-07-15), so threads scale with cores; capped to keep
 # the per-worker image working set (a few hundred MB) in check.
@@ -169,9 +189,13 @@ def build_masks(tile, for_imagery=False):
     bathymetry_band_vrt = None
     if masks_dem_setting in ("auto", "True"):
         # "auto" only engages on fine nearshore data; explicit True also
-        # accepts the coarse global fallbacks (GEBCO and friends).
+        # accepts the coarse global fallbacks (GEBCO and friends) and
+        # the intertidal-only twins (exposed-flats lidar the mapped
+        # fallback otherwise stands in for).
         bathymetry_band_vrt = BATHYBAND.ensure_bathymetry_band(
-            tile, fine_nearshore_only=(masks_dem_setting == "auto")
+            tile,
+            fine_nearshore_only=(masks_dem_setting == "auto"),
+            intertidal_ok=(masks_dem_setting == "True"),
         )
     legacy_dem_refinement = masks_dem_setting == "True"
 
@@ -538,6 +562,8 @@ def load_shallow_water_polygons(tile):
                 tile.lon,
                 [],
                 cached_suffix=cached_suffix,
+                cache_schema=SHALLOW_WATER_CACHE_SCHEMA,
+                bbox_margin_degrees=SHALLOW_WATER_QUERY_MARGIN_DEGREES,
             ):
                 UI.lvprint(
                     0,
@@ -663,6 +689,56 @@ def build_shallow_water_alpha(til_x, til_y, tile, shallow_water_categories):
     return shallow_water_alpha
 
 
+def _feather_alpha_at_coverage_edge(alpha, valid, mask_pixel_size_m):
+    """Fade the depth-graded alpha across the band's coverage boundary.
+
+    ``alpha`` (float32, full 6144² pre-mask geometry) is exact inside
+    ``valid``; outside, the band has no data and the value is 0.  When
+    the data ends while the alpha is still high (an intertidal source
+    that stops at the waterline, the band's outer limit over a shallow
+    shelf, an airport-radius gate boundary), that boundary is a cliff
+    quantized at the band's native pixels.  This blends it out over
+    :data:`BATHYMETRY_COVERAGE_FADE_M`:
+
+    * a smooth 0..1 coverage ramp (gaussian of the validity mask,
+      0.5 exactly on the boundary) multiplies the whole field, and
+    * outside the data the alpha is first extended by normalized
+      convolution (nearby measured values averaged), so the fade decays
+      from the measured edge value instead of from 0.
+
+    Where the ramp already completed inside the data the feather
+    multiplies near-zero values — visually a no-op (Kauai).  Computed
+    at 1/4 resolution: the band's native pixels are coarser still, and
+    the fade spans dozens of mask pixels.
+    """
+    from scipy.ndimage import gaussian_filter
+
+    fade_pixels = BATHYMETRY_COVERAGE_FADE_M / mask_pixel_size_m
+    decimation = 4
+    sigma = max(fade_pixels / 2.0 / decimation, 0.5)
+    valid_small = valid[::decimation, ::decimation].astype(numpy.float32)
+    alpha_small = alpha[::decimation, ::decimation]
+    coverage_ramp = gaussian_filter(valid_small, sigma)
+    extended = gaussian_filter(alpha_small, sigma) / numpy.maximum(
+        coverage_ramp, 1e-3
+    )
+    ramp_image = Image.fromarray(
+        numpy.clip(numpy.round(coverage_ramp * 255.0), 0, 255).astype(
+            numpy.uint8
+        )
+    ).resize((alpha.shape[1], alpha.shape[0]), Image.BILINEAR)
+    extended_image = Image.fromarray(
+        numpy.clip(numpy.round(extended), 0, 255).astype(numpy.uint8)
+    ).resize((alpha.shape[1], alpha.shape[0]), Image.BILINEAR)
+    coverage_ramp = (
+        numpy.asarray(ramp_image, dtype=numpy.float32) / 255.0
+    )
+    filled = numpy.where(
+        valid, alpha, numpy.asarray(extended_image, dtype=numpy.float32)
+    )
+    return filled * coverage_ramp
+
+
 ################################################################################
 def build_bathymetry_arrays(til_x, til_y, tile, band_vrt_path):
     """Windowed read of the bathymetry band over one mask square.
@@ -679,6 +755,13 @@ def build_bathymetry_arrays(til_x, til_y, tile, band_vrt_path):
       with ``D = tile.reef_visibility_depth``: opaque at the waterline,
       0 at depth ``D`` and beyond (pure X-Plane water — a non-zero floor
       would seam at the band edge); ``None`` when the square has none.
+      The ramp extends up to ``mask_altitude_above`` (the intertidal
+      strip between the waterline and the land threshold is opaque, not
+      a hole), and it is feathered over
+      :data:`BATHYMETRY_COVERAGE_FADE_M` across the band's data/nodata
+      boundary — sources that stop while the water is still shallow
+      (intertidal lidar, a gated or truncated band) fade out instead of
+      falling off a pixel-quantized cliff.
 
     Returns ``(None, None)`` when the square lies outside the band's
     coverage or the warp fails.  Never raises.
@@ -735,10 +818,19 @@ def build_bathymetry_arrays(til_x, til_y, tile, band_vrt_path):
     )
     shallowness = numpy.clip(1.0 + values / reef_depth, 0.0, 1.0)
     spline = shallowness * shallowness * (3.0 - 2.0 * shallowness)
-    water = valid & (values <= 0.0)
-    water_alpha = numpy.where(water, 255.0 * spline, 0.0)[
-        1024 : 4096 + 1024, 1024 : 4096 + 1024
-    ].astype(numpy.uint8)
+    # The ramp reaches up to the land threshold, not just to 0: the
+    # intertidal strip is opaque imagery (values above 0 clip to full
+    # shallowness), and beyond the threshold the land pre-mask takes
+    # over at the same contour — no gap, no cliff.
+    water = valid & (values <= mask_altitude_above)
+    alpha = numpy.where(water, 255.0 * spline, 0.0).astype(numpy.float32)
+    if not valid.all():
+        alpha = _feather_alpha_at_coverage_edge(
+            alpha, valid, GEO.webmercator_pixel_size(latm0, tile.mask_zl)
+        )
+    water_alpha = numpy.clip(
+        numpy.round(alpha[1024 : 4096 + 1024, 1024 : 4096 + 1024]), 0, 255
+    ).astype(numpy.uint8)
 
     if not land_array.any():
         land_array = None

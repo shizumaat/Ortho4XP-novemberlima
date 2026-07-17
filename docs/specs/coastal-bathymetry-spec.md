@@ -82,12 +82,24 @@ coastline elevation band (`O4_Elevation_Level.ensure_coastline_band`):
 
 * `ensure_bathymetry_band(tile) -> str | None` — returns the band VRT
   path or None. Never raises; degrades loudly via `UI.vprint`.
-* Cells: the tile's 10×10 grid of 0.1° cells; a cell is fetched when
-  its centre lies within `bathymetry_band_km` (default 5.0, tile cfg
-  var) **plus the cell half-diagonal** of the tile's OSM coastline
-  (shared `cached_suffix="coastline"` query — zero extra downloads) OR
-  of any OSM `natural=water` polygon larger than `max_pond` — inland
-  reservoirs get depth data where the source has it.
+* Cells: the tile's 10×10 grid of 0.1° cells **plus one overhang ring
+  into the neighbouring tiles** (indices −1 and 10, added 2026-07-16
+  after the 37N seam at the Ria Formosa: mask squares and the DSF post
+  grid straddle tile edges, and a band clamped to the tile leaves each
+  neighbour's copy of a shared straddling square blind on the other
+  side of the line). A cell is fetched when its centre lies within
+  `bathymetry_band_km` (default 5.0, tile cfg var) **plus the cell
+  half-diagonal** of the tile's OSM coastline (shared
+  `cached_suffix="coastline"` query — zero extra downloads; the
+  complete ways it holds extend past the tile edge, so overhang cells
+  select correctly) OR of any OSM `natural=water` polygon larger than
+  `max_pond` — inland reservoirs get depth data where the source has
+  it. Overhang cells resolve to the OWNING tile's canonical cell path
+  (its band directory, its local indices), so two adjacent builds fetch
+  each shared cell once, in whichever order they run; they are stamped
+  in the fetching tile's `index.json` under an owner-qualified key
+  (`<stem>@<owner_short_latlon>`), and the owner's durable no-coverage
+  negatives are honoured before any probe.
 * Airport-radius gate (auto mode only; ruling 2026-07-16 after the
   +37-009 first fetch ran multi-hour for coastline nobody approaches
   low): `"auto"` additionally keeps only the cells within
@@ -206,10 +218,29 @@ uint8 pair (`None` = no contribution):
   deep-water pixel the band covers and produce a visible seam at the
   band's outer edge. (Inland water keeps its `ratio_water` grey from
   the pre-mask; the ramp can only add visibility on top of it.)
-* Land pixels (`v > 0`) and nodata contribute 0. The band's topo side
+* The ramp extends up to the land threshold (`v <=
+  mask_altitude_above`, 0.5 m), not just to the waterline: the wet
+  beach strip a low-tide lidar survey measures at +0.0…+0.5 m is
+  opaque imagery, and from the threshold up the land pre-mask takes
+  over at the same contour — no alpha hole between them (the
+  translucent patches seen among the Culatra houses, 2026-07-16).
+  Higher land values and nodata contribute 0. The band's topo side
   additionally refines the land pre-mask (values ≥ 0.5 m are land)
   whenever the band exists — measured islets survive even when OSM
   misses them.
+* Coverage-edge feather (2026-07-16, the "jagged squares" defect):
+  where the band's data simply ENDS while the alpha is still high — an
+  intertidal source that stops at the waterline, the band's outer
+  limit over a wide shallow shelf, an airport-radius gate boundary —
+  the raw data/nodata cliff is quantized at the band's 10 m pixels
+  (bilinear warps cannot interpolate across nodata). The alpha is
+  therefore feathered over `BATHYMETRY_COVERAGE_FADE_M` (150 m, the
+  fallback's own fade scale): a gaussian 0..1 coverage ramp of the
+  validity mask multiplies the field, with the outside first extended
+  by normalized convolution so the fade decays from the measured edge
+  value. Computed at quarter resolution (the band pixels are coarser
+  still). Where the ramp already completed inside the data (Kauai) the
+  feather multiplies near-zero values — a visual no-op.
 * A mask square whose water pre-mask is empty but whose depth alpha is
   non-zero (an offshore atoll in a full-sea square) is still written —
   the legacy early-return must consult the ramp.
@@ -255,6 +286,30 @@ left bare (`build_bathymetry_arrays` returned `(None, None)`). A square
 the band touches never composes the fallback. It cannot grade basin
 interiors (no depths in OSM) — that remains measured-data scope (Allen
 Coral Atlas, national lidar).
+
+The category queries reach `SHALLOW_WATER_QUERY_MARGIN_DEGREES` (0.5°)
+beyond the tile (2026-07-16): mask squares straddle tile edges, and the
+plain tile bbox never returns a flats polygon lying wholly on the other
+side of the line, so the two tiles' copies of a straddling square would
+disagree. The per-tile cache files carry
+`SHALLOW_WATER_CACHE_SCHEMA = "margin-0.5"`; pre-margin caches
+re-download once.
+
+### 4.5 Intertidal-only sources (2026-07-16)
+
+Exposed-flats lidar (`intertidal=True` in the `.elv` definition — the
+seven *TIDAL twins) measures down to roughly the low-tide waterline and
+no further: visually its mask contribution is a binary "flats" layer,
+which the free OSM fallback above matches wherever the flats are
+mapped, and the DSF `sea_level` raster's `min(measured, elevation − 2)`
+convention makes its centimetre depths a strict no-op. The automatic
+paths (`masks_use_DEM_too="auto"` and both DSF raster callers)
+therefore skip intertidal definitions entirely — no minutes-per-cell
+national-server fetches for a result OSM provides — and only explicit
+`masks_use_DEM_too=True` passes `intertidal_ok=True` to
+`ensure_bathymetry_band` (for regions whose OSM tidal flats are
+unmapped). An intertidal twin ahead of a real bathymetry source in the
+priority walk never starves it on the automatic paths.
 
 ## 5. DSF `sea_level` raster (Step 3)
 

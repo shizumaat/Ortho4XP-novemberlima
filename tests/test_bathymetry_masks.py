@@ -100,9 +100,11 @@ _VALUE_BANDS = [
 ]
 
 
-def _write_banded_geotiff(path, window):
+def _write_banded_geotiff(path, window, bands=None):
     """A 100 m-posting 4326 raster over ``window`` (+margin) whose value
-    depends only on longitude, split into the six ``_VALUE_BANDS``."""
+    depends only on longitude, split into the six ``_VALUE_BANDS`` (or
+    the caller's ``bands``, same ``(low, high, value)`` shape; fractions
+    not covered by any band stay nodata)."""
     (lonmin, latmin, lonmax, latmax) = window
     span = lonmax - lonmin
     margin = 0.02
@@ -116,7 +118,7 @@ def _write_banded_geotiff(path, window):
     for column in range(columns):
         longitude = west + (column + 0.5) * degrees_per_100m
         fraction = (longitude - lonmin) / span
-        for low, high, value in _VALUE_BANDS:
+        for low, high, value in (bands or _VALUE_BANDS):
             if low <= fraction < high:
                 values[:, column] = value
                 break
@@ -215,6 +217,122 @@ def test_build_bathymetry_arrays_returns_none_off_coverage(tmp_path):
         til_x + 16 * 200, til_y, tile, raster_path
     )
     assert land_array is None and water_alpha is None
+
+
+def test_coverage_edge_feather_smooths_shallow_data_edge(tmp_path):
+    """Intertidal-class data that simply STOPS while still shallow (the
+    Ria Formosa flats end at -0.5 m against nodata) must fade out over
+    BATHYMETRY_COVERAGE_FADE_M instead of falling off a cliff quantized
+    at the band's pixels — the 2026-07-16 'jagged squares' defect."""
+    location_lat, location_lon = 21.35, -159.5
+    (til_x, til_y) = GEO.wgs84_to_orthogrid(
+        location_lat, location_lon, MASK_ZL
+    )
+    window = _mask_square_window(til_x, til_y, MASK_ZL)
+    raster_path = str(tmp_path / "band.tif")
+    # One shallow flats band surrounded by nodata on both sides.
+    _write_banded_geotiff(raster_path, window, bands=[(0.30, 0.60, -0.5)])
+
+    tile = types.SimpleNamespace(
+        mask_zl=MASK_ZL, reef_visibility_depth=REEF_DEPTH
+    )
+    (_land_array, water_alpha) = MASK.build_bathymetry_arrays(
+        til_x, til_y, tile, raster_path
+    )
+    assert water_alpha is not None
+
+    (lonmin, _latmin, lonmax, _latmax) = window
+    span = lonmax - lonmin
+    alpha_fraction = (
+        (_column_longitudes(window, 6144) - lonmin) / span
+    )[1024 : 4096 + 1024]
+    row = water_alpha[2048].astype(int)
+
+    # Deep inside the data: the flats are essentially opaque.
+    interior = row[(alpha_fraction > 0.40) & (alpha_fraction < 0.50)]
+    assert interior.size and interior.min() >= 250
+    # Far outside the data: pure water, the feather fully decays.
+    outside = row[(alpha_fraction < 0.22) | (alpha_fraction > 0.68)]
+    assert outside.size and outside.max() == 0
+    # The transition is a fade, not a cliff: no adjacent-pixel jump
+    # anywhere near the old ~250-level step, and a real population of
+    # intermediate values on the way down.
+    assert numpy.max(numpy.abs(numpy.diff(row))) < 25
+    assert numpy.count_nonzero((row > 20) & (row < 235)) >= 40
+
+
+def test_intertidal_strip_up_to_land_threshold_is_opaque(tmp_path):
+    """Values between the waterline and mask_altitude_above (the wet
+    beach a low-tide lidar survey measures) are opaque imagery, not the
+    alpha hole they used to be; from the threshold up the land array
+    takes over at the same contour."""
+    location_lat, location_lon = 21.35, -159.5
+    (til_x, til_y) = GEO.wgs84_to_orthogrid(
+        location_lat, location_lon, MASK_ZL
+    )
+    window = _mask_square_window(til_x, til_y, MASK_ZL)
+    raster_path = str(tmp_path / "band.tif")
+    _write_banded_geotiff(
+        raster_path,
+        window,
+        bands=[(0.30, 0.45, 0.3), (0.45, 0.60, 10.0)],
+    )
+
+    tile = types.SimpleNamespace(
+        mask_zl=MASK_ZL, reef_visibility_depth=REEF_DEPTH
+    )
+    (land_array, water_alpha) = MASK.build_bathymetry_arrays(
+        til_x, til_y, tile, raster_path
+    )
+    assert land_array is not None and water_alpha is not None
+
+    (lonmin, _latmin, lonmax, _latmax) = window
+    span = lonmax - lonmin
+    land_fraction = (_column_longitudes(window, 6144) - lonmin) / span
+    alpha_fraction = land_fraction[1024 : 4096 + 1024]
+
+    def _core(fraction, low, high):
+        return (fraction > low + 0.03) & (fraction < high - 0.03)
+
+    # The +0.3 m strip: opaque alpha, below the land threshold.
+    strip_alpha = water_alpha[:, _core(alpha_fraction, 0.30, 0.45)]
+    assert strip_alpha.size and numpy.all(strip_alpha >= 250)
+    strip_land = land_array[:, _core(land_fraction, 0.30, 0.45)]
+    assert numpy.all(strip_land == 0)
+    # The +10 m band: land array, no water alpha.
+    high_alpha = water_alpha[:, _core(alpha_fraction, 0.45, 0.60)]
+    assert numpy.all(high_alpha == 0)
+    high_land = land_array[:, _core(land_fraction, 0.45, 0.60)]
+    assert numpy.all(high_land == 255)
+
+
+def test_shallow_water_fallback_query_uses_margin(monkeypatch):
+    """The fallback's Overpass queries reach beyond the tile (straddling
+    mask squares need the flats polygons wholly across the line) and
+    carry the schema bump that invalidates pre-margin caches."""
+    captured = {}
+
+    monkeypatch.setattr(MASK.OSM, "OSM_layer", lambda: object())
+
+    def _capture(queries, layer, lat, lon, tags, cached_suffix="",
+                 **keyword_arguments):
+        captured[cached_suffix] = keyword_arguments
+        return 0  # a failed download skips the category loudly
+
+    monkeypatch.setattr(MASK.OSM, "OSM_queries_to_OSM_layer", _capture)
+
+    tile = types.SimpleNamespace(lat=0, lon=0)
+    assert MASK.load_shallow_water_polygons(tile) is None
+    assert set(captured) == {"reef", "tidalflat"}
+    for keyword_arguments in captured.values():
+        assert (
+            keyword_arguments["bbox_margin_degrees"]
+            == MASK.SHALLOW_WATER_QUERY_MARGIN_DEGREES
+        )
+        assert (
+            keyword_arguments["cache_schema"]
+            == MASK.SHALLOW_WATER_CACHE_SCHEMA
+        )
 
 
 # =====================================================================
@@ -367,7 +485,9 @@ def test_build_masks_dem_too_tristate_resolution(
     band_calls = []
     monkeypatch.setattr(
         BATHYBAND, "ensure_bathymetry_band",
-        lambda tile, **keyword_arguments: band_calls.append(tile) or None,  # no band available
+        lambda tile, **keyword_arguments: band_calls.append(
+            keyword_arguments
+        ) or None,  # no band available
     )
     _RecordingDEM.instances = []
     monkeypatch.setattr(MASK.DEM, "DEM", _RecordingDEM)
@@ -382,6 +502,11 @@ def test_build_masks_dem_too_tristate_resolution(
 
     assert (len(band_calls) == 1) is expect_band_fetch
     assert (len(_RecordingDEM.instances) == 1) is expect_dem_load
+    if expect_band_fetch:
+        # "auto" applies the fine-nearshore gate and never fetches
+        # intertidal-only sources; explicit "True" is the only opt-in.
+        assert band_calls[0]["fine_nearshore_only"] is (setting == "auto")
+        assert band_calls[0]["intertidal_ok"] is (setting == "True")
 
 
 # =====================================================================

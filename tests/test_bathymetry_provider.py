@@ -292,6 +292,23 @@ def test_value_floor_bathymetry_preserves_depths(monkeypatch, tmp_path):
 # =====================================================================
 # select_bathymetry_definition + terrain-path role filters
 # =====================================================================
+def test_intertidal_flag_parses_from_real_registry():
+    """The shipped .elv files carry the intertidal flag: the *TIDAL
+    twins (exposed-flats lidar) parse True, real seabed bathymetry
+    (CUDEM) parses False, and providers without the key default False.
+    Reads the real Providers/Elevation directory — no network."""
+    saved = INSETS.elevation_providers_dict
+    try:
+        INSETS.elevation_providers_dict = {}
+        definitions = INSETS.initialize_elevation_providers_dict()
+        assert definitions["PORTUGALTIDAL"]["intertidal"] is True
+        assert definitions["SCOTLANDTIDAL"]["intertidal"] is True
+        assert definitions["CUDEMHAWAII"]["intertidal"] is False
+        assert definitions["GEBCO2024"]["intertidal"] is False
+    finally:
+        INSETS.elevation_providers_dict = saved
+
+
 def test_select_bathymetry_returns_only_bathymetry_role(monkeypatch):
     """The dedicated entry point returns the covering bathymetry provider."""
     _install_registry(

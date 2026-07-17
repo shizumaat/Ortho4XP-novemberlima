@@ -58,6 +58,13 @@ import O4_UI_Utils as UI
 # and keeps a 0.1 degree cell around 4 MB (spec section 3).
 BATHYMETRY_CELL_DEGREES = 0.1
 BATHYMETRY_CELL_RESOLUTION_M = 10.0
+# The band extends one cell ring BEYOND the 1 degree tile: mask squares
+# and the DSF raster's post grid straddle tile edges, and a band clamped
+# to the tile leaves each neighbour's copy of a shared mask square blind
+# on the other side of the line (the 37N seam at the Ria Formosa,
+# 2026-07-16).  Overhang cells resolve to the OWNING tile's canonical
+# cell files, so two adjacent builds fetch each shared cell once.
+BAND_OVERHANG_CELLS = 1
 
 # Inland water bodies smaller than this (square kilometres) do not pull
 # band cells; matches the masking intuition that only sea-sized water
@@ -623,6 +630,7 @@ def prefetch_bathymetry_band(tile) -> None:
     if masks_dem_setting not in ("auto", "True"):
         return
     fine_nearshore_only = masks_dem_setting == "auto"
+    intertidal_ok = masks_dem_setting == "True"
     try:
         import O4_Airport_Elevation_Insets as INSETS
 
@@ -630,7 +638,7 @@ def prefetch_bathymetry_band(tile) -> None:
             return
     except Exception:
         return
-    key = (tile.lat, tile.lon, fine_nearshore_only)
+    key = (tile.lat, tile.lon, fine_nearshore_only, intertidal_ok)
     with _prefetch_futures_guard:
         if key in _prefetch_futures:
             return
@@ -640,7 +648,10 @@ def prefetch_bathymetry_band(tile) -> None:
             max_workers=1, thread_name_prefix="bathymetry_prefetch"
         )
         _prefetch_futures[key] = executor.submit(
-            _ensure_bathymetry_band_now, tile, fine_nearshore_only
+            _ensure_bathymetry_band_now,
+            tile,
+            fine_nearshore_only,
+            intertidal_ok,
         )
         executor.shutdown(wait=False)
     UI.vprint(
@@ -650,7 +661,7 @@ def prefetch_bathymetry_band(tile) -> None:
 
 
 def ensure_bathymetry_band(
-    tile, fine_nearshore_only: bool = False
+    tile, fine_nearshore_only: bool = False, intertidal_ok: bool = False
 ) -> Optional[str]:
     """Fetch (or recycle) the coastal bathymetry band for the tile.
 
@@ -658,8 +669,14 @@ def ensure_bathymetry_band(
     by :func:`prefetch_bathymetry_band` at Step 1), the caller joins it
     instead of fetching again; the future is consumed so a later build
     of the same tile re-evaluates fresh state.
+
+    ``intertidal_ok`` (see :func:`_ensure_bathymetry_band_now`) is
+    passed by the masks step for ``masks_use_DEM_too=True`` only; the
+    DSF raster callers keep the default and never fetch intertidal-only
+    sources.
     """
-    key = (tile.lat, tile.lon, bool(fine_nearshore_only))
+    key = (tile.lat, tile.lon, bool(fine_nearshore_only),
+           bool(intertidal_ok))
     with _prefetch_futures_guard:
         future = _prefetch_futures.pop(key, None)
     # The caller now waits in the foreground: from here on, cell
@@ -677,13 +694,63 @@ def ensure_bathymetry_band(
                     str(error),
                     "); fetching directly.",
                 )
-        return _ensure_bathymetry_band_now(tile, fine_nearshore_only)
+        return _ensure_bathymetry_band_now(
+            tile, fine_nearshore_only, intertidal_ok
+        )
     finally:
         _foreground_wait.clear()
 
 
+def _resolve_band_cell(tile, cell_column, cell_row, code):
+    """Path, stamp key and owner stamp for one (possibly overhang) cell.
+
+    In-tile cells keep their historical stem (the file basename) so
+    existing durable negatives stay valid.  Overhang cells (indices
+    outside 0..9) resolve to the OWNING tile's canonical cell path —
+    adjacent builds share one physical file, in whichever order they
+    run — under a stamp key qualified by the owner tile (the basename
+    alone would collide with this tile's own cell of the same local
+    indices).
+    """
+    owner_lat = tile.lat + cell_row // 10
+    owner_lon = tile.lon + cell_column // 10
+    local_column = cell_column % 10
+    local_row = cell_row % 10
+    cell_path = FNAMES.bathymetry_band_cell(
+        owner_lat,
+        owner_lon,
+        local_column,
+        local_row,
+        code,
+        BATHYMETRY_CELL_RESOLUTION_M,
+    )
+    basename_stem = os.path.splitext(os.path.basename(cell_path))[0]
+    if (owner_lat, owner_lon) == (tile.lat, tile.lon):
+        return {
+            "column": cell_column,
+            "row": cell_row,
+            "path": cell_path,
+            "stem": basename_stem,
+            "owner_stamp_path": None,
+            "owner_stem": basename_stem,
+        }
+    return {
+        "column": cell_column,
+        "row": cell_row,
+        "path": cell_path,
+        "stem": "%s@%s" % (
+            basename_stem,
+            FNAMES.short_latlon(owner_lat, owner_lon),
+        ),
+        "owner_stamp_path": FNAMES.bathymetry_band_index(
+            owner_lat, owner_lon
+        ),
+        "owner_stem": basename_stem,
+    }
+
+
 def _ensure_bathymetry_band_now(
-    tile, fine_nearshore_only: bool = False
+    tile, fine_nearshore_only: bool = False, intertidal_ok: bool = False
 ) -> Optional[str]:
     """The actual band fetch (docstring contract on the public wrapper).
 
@@ -702,6 +769,14 @@ def _ensure_bathymetry_band_now(
     (:func:`_filter_cells_to_airport_reach`): only shoreline cells
     within ``tile.bathymetry_airport_radius_km`` of an apt.dat airport
     are fetched.
+
+    ``intertidal_ok`` admits ``intertidal=True`` sources (exposed-flats
+    lidar that stops at the waterline).  Only ``masks_use_DEM_too=True``
+    passes it: everywhere else their data is a binary "flats" layer the
+    free OpenStreetMap fallback matches (and the DSF ``sea_level``
+    raster's ``min(measured, elevation - 2)`` convention makes their
+    centimetre depths a strict no-op), so the slow national-server
+    fetch is not worth starting.
     """
     if not has_gdal:
         UI.vprint(
@@ -714,6 +789,27 @@ def _ensure_bathymetry_band_now(
     import O4_Airport_Elevation_Insets as INSETS
 
     definitions = INSETS.select_bathymetry_definitions(tile.lat, tile.lon)
+    if not intertidal_ok:
+        intertidal = [
+            definition
+            for definition in definitions
+            if definition.get("intertidal")
+        ]
+        definitions = [
+            definition
+            for definition in definitions
+            if definition not in intertidal
+        ]
+        if intertidal and not definitions:
+            UI.vprint(
+                1,
+                "   INFO: the covering bathymetry source(s)",
+                ", ".join(d["code"] for d in intertidal),
+                "only measure exposed tidal flats; the OpenStreetMap"
+                " shallow-water fallback serves those for free — set"
+                " masks_use_DEM_too=True to fetch the measured flats"
+                " anyway.",
+            )
     if fine_nearshore_only:
         coarse = [
             definition
@@ -789,8 +885,14 @@ def _ensure_bathymetry_band_now(
 
     cell_indices = []
     cell_count = 10  # a 1 degree tile is a 10 x 10 grid of 0.1 degree cells
-    for cell_column in range(cell_count):
-        for cell_row in range(cell_count):
+    # ... plus one overhang ring into the neighbouring tiles (indices -1
+    # and 10): the coastline geometry holds the complete OSM ways that
+    # touch this tile, so distance selection keeps working across the
+    # edge.
+    for cell_column in range(-BAND_OVERHANG_CELLS,
+                             cell_count + BAND_OVERHANG_CELLS):
+        for cell_row in range(-BAND_OVERHANG_CELLS,
+                              cell_count + BAND_OVERHANG_CELLS):
             centre = Point(
                 (cell_column + 0.5)
                 * BATHYMETRY_CELL_DEGREES
@@ -885,27 +987,31 @@ def _ensure_bathymetry_band_now(
         if UI.red_flag:
             return None
         code = definition["code"]
-        cells = []
-        for (cell_column, cell_row) in cell_indices:
-            cell_path = FNAMES.bathymetry_band_cell(
-                tile.lat,
-                tile.lon,
-                cell_column,
-                cell_row,
-                code,
-                BATHYMETRY_CELL_RESOLUTION_M,
-            )
-            cells.append(
-                {
-                    "column": cell_column,
-                    "row": cell_row,
-                    "path": cell_path,
-                    "stem": os.path.splitext(
-                        os.path.basename(cell_path)
-                    )[0],
-                }
-            )
+        cells = [
+            _resolve_band_cell(tile, cell_column, cell_row, code)
+            for (cell_column, cell_row) in cell_indices
+        ]
         cells_total = len(cells)
+
+        # Overhang cells honour the OWNER tile's durable no-coverage
+        # negatives (one stamp read per neighbour, on demand).
+        owner_stamp_negatives = {}
+
+        def _owner_recorded_no_coverage(cell):
+            owner_stamp_path = cell["owner_stamp_path"]
+            if not owner_stamp_path:
+                return False
+            if owner_stamp_path not in owner_stamp_negatives:
+                owner_stamp_negatives[owner_stamp_path] = {
+                    stem
+                    for (stem, outcome) in _read_band_stamp(
+                        owner_stamp_path
+                    ).get("cells", {}).items()
+                    if outcome == NO_COVERAGE
+                }
+            return (
+                cell["owner_stem"] in owner_stamp_negatives[owner_stamp_path]
+            )
 
         UI.vprint(
             1,
@@ -930,6 +1036,9 @@ def _ensure_bathymetry_band_now(
                 # A cancelled build drains the fan-out quickly instead of
                 # keeping the worker child alive on background fetches.
                 return (cell["stem"], None)
+            # Overhang cells live in the (possibly not yet created)
+            # neighbour tile's band directory.
+            os.makedirs(os.path.dirname(cell["path"]), exist_ok=True)
             temporary_path = "%s.part%d.tif" % (
                 cell["path"],
                 os.getpid(),
@@ -1017,6 +1126,10 @@ def _ensure_bathymetry_band_now(
                     except OSError:
                         pass
                 if cell_outcomes.get(cell["stem"]) == NO_COVERAGE:
+                    settled += 1
+                    continue
+                if _owner_recorded_no_coverage(cell):
+                    cell_outcomes[cell["stem"]] = NO_COVERAGE
                     settled += 1
                     continue
                 still_missing.append(cell)

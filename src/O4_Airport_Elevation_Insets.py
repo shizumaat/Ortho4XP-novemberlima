@@ -201,6 +201,13 @@ def initialize_elevation_providers_dict(providers_directory=None):
             definition["coverage_bbox"] = _parse_bounding_box(
                 definition["coverage_bbox"]
             )
+        # role=bathymetry sources whose data stops at the waterline
+        # (exposed-flats lidar): visually a binary "flats" layer, so the
+        # automatic paths prefer the free OpenStreetMap fallback and only
+        # masks_use_DEM_too=True fetches them (spec section 4.5).
+        definition["intertidal"] = _parse_boolean(
+            definition.get("intertidal", "False")
+        )
         # Base-tier (role=base) fields, spec section 3.6.
         if "resolution_arc_seconds" in definition:
             definition["resolution_arc_seconds"] = _parse_float(

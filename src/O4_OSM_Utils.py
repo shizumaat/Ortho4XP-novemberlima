@@ -464,6 +464,7 @@ def OSM_queries_to_OSM_layer(
     cached_suffix="",
     node_tags_of_interest=[],
     cache_schema="",
+    bbox_margin_degrees=0.0,
 ):
     if cached_suffix:
         with _osm_cache_lock(FNAMES.osm_cached(lat, lon, cached_suffix)):
@@ -476,6 +477,7 @@ def OSM_queries_to_OSM_layer(
                 cached_suffix,
                 node_tags_of_interest,
                 cache_schema,
+                bbox_margin_degrees,
             )
     return _OSM_queries_to_OSM_layer_serialized(
         queries,
@@ -486,6 +488,7 @@ def OSM_queries_to_OSM_layer(
         cached_suffix,
         node_tags_of_interest,
         cache_schema,
+        bbox_margin_degrees,
     )
 
 
@@ -498,6 +501,7 @@ def _OSM_queries_to_OSM_layer_serialized(
     cached_suffix="",
     node_tags_of_interest=[],
     cache_schema="",
+    bbox_margin_degrees=0.0,
 ):
     # this one is a bit complicated by a few checks of existing cached data
     # which had different filenames is versions prior to 1.30
@@ -570,8 +574,20 @@ def _OSM_queries_to_OSM_layer_serialized(
             "    * Downloading OSM data for",
             ", ".join(statements_to_download),
         )
+        # An optional margin extends the request beyond the 1 degree
+        # tile: layers consumed by geometry that straddles tile edges
+        # (the shallow-water mask fallback) need the features lying
+        # wholly on the other side of the line, which the plain tile
+        # bbox never returns.  Callers passing a margin must bump their
+        # cache_schema (the cache file is still keyed per tile).
         response = get_overpass_data(
-            statements_to_download, (lat, lon, lat + 1, lon + 1),
+            statements_to_download,
+            (
+                lat - bbox_margin_degrees,
+                lon - bbox_margin_degrees,
+                lat + 1 + bbox_margin_degrees,
+                lon + 1 + bbox_margin_degrees,
+            ),
             request_description=cached_suffix,
         )
         if UI.red_flag:
