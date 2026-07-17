@@ -56,8 +56,8 @@ STEP_LABELS = {
 }
 SCAN_FLUSH_SECONDS = 0.1     # scan streaming cadence (~10 Hz)
 ETA_EMIT_SECONDS = 1.0       # RunEta cadence
-RATE_WINDOW_SECONDS = 20.0   # in-step live-rate sliding window
 RATE_MIN_SPAN_SECONDS = 3.0  # need this much window before trusting a rate
+RATE_MIN_GAIN_PERCENT = 0.5  # ...and this much percent gained inside it
 
 
 def plan_steps(do_vector, do_imagery, do_overlays, steps=None):
@@ -215,7 +215,9 @@ class _EtaTracker:
         self.tile_index = 0
         self.step_key = None
         self.step_started_at = None
-        self.samples = deque()                 # (t, percent) in current step
+        # (t, percent) in current step; maxlen bounds a percent that
+        # stalls forever (the gain-based trim below only fires on gain).
+        self.samples = deque(maxlen=10000)
         self.autopatch = None                  # {"icao": (t_begin, eta_total)}
         self.finished_steps = {}               # (lat,lon) -> set(step)
 
@@ -232,11 +234,21 @@ class _EtaTracker:
         self.autopatch = None
 
     def percent_sample(self, percent):
-        now = time.time()
-        self.samples.append((now, float(percent)))
-        cutoff = now - RATE_WINDOW_SECONDS
-        while self.samples and self.samples[0][0] < cutoff:
-            self.samples.popleft()
+        self.samples.append((time.time(), float(percent)))
+        # Keep the TIGHTEST window that still carries a measurable
+        # rate: drop the oldest sample only while the ones behind it
+        # still span the minimum time and percent gain.  The old fixed
+        # 20 s window meant an hours-long download step never gained
+        # 0.5 % inside it, so the live rate NEVER engaged and the
+        # estimate fell back to the crude model heuristics.
+        while len(self.samples) > 2:
+            (t_next, p_next) = self.samples[1]
+            (t_last, p_last) = self.samples[-1]
+            if (t_last - t_next >= RATE_MIN_SPAN_SECONDS
+                    and p_last - p_next >= RATE_MIN_GAIN_PERCENT):
+                self.samples.popleft()
+            else:
+                break
 
     def autopatch_begin(self, airports):
         now = time.time()
@@ -277,7 +289,8 @@ class _EtaTracker:
         if len(self.samples) >= 2:
             (t_a, p_a), (t_b, p_b) = self.samples[0], self.samples[-1]
             span, gained = t_b - t_a, p_b - p_a
-            if span >= RATE_MIN_SPAN_SECONDS and gained > 0.5:
+            if (span >= RATE_MIN_SPAN_SECONDS
+                    and gained >= RATE_MIN_GAIN_PERCENT):
                 rate = gained / span
                 return max((100.0 - p_b) / rate, 0.0)
         # No live signal: the model estimate, degrading into
@@ -512,11 +525,14 @@ class EngineSession:
 
     def cancel(self):
         self._cancel_all = True
+        # Raised in THIS process even for parallel runs (whose steps
+        # abort via the per-child cancel command below): background
+        # helpers here — the OSM-extract downloader — watch this flag
+        # to go network-quiet with the build.
+        UI.red_flag = True
         parallel_run = self._parallel
         if parallel_run is not None:
             parallel_run.cancel_all()
-            return
-        UI.red_flag = True
 
     def shutdown(self):
         """Front-end exit: stop everything promptly, without blocking.

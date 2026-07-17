@@ -226,6 +226,31 @@ def test_run_eta_autopatch_overrun_keeps_receding(session):
     assert 175.0 < remaining < 195.0
 
 
+def test_run_eta_live_rate_engages_on_slow_steps(session, monkeypatch):
+    """The old fixed 20 s sample window could never accumulate the
+    0.5 % gain an hours-long download step needs, so the live rate
+    NEVER engaged there and the estimate fell back to the (broken)
+    model figure — the "inaccurate while downloading" defect.  The
+    window now widens until it carries a measurable rate."""
+    s, events = session
+    s._eta = SESSION._EtaTracker(
+        [(30, 31)], SESSION.plan_steps(True, True, False),
+        {(30, 31): {"imagery": 300.0}})
+    clock = [1000.0]
+    monkeypatch.setattr(SESSION.time, "time", lambda: clock[0])
+    s._eta.step_started((30, 31), "imagery")
+    # 0.1 % every 10 s — a near-three-hour step.
+    percent = 0.0
+    for _ in range(12):
+        clock[0] += 10.0
+        percent += 0.1
+        s._eta.percent_sample(percent)
+    remaining = s._eta._current_step_remaining()
+    # Live rate 0.01 %/s: (100 − 1.2) / 0.01 ≈ 9880 s — nowhere near
+    # the 300 s model estimate the old window fell back to.
+    assert remaining == pytest.approx((100.0 - percent) / 0.01, rel=0.01)
+
+
 def test_run_eta_overrun_step_estimate_keeps_receding(session):
     """Same guarantee on the plain per-step estimate path (no
     auto-patch signal): a step 500 s into a 30 s prediction reads as
