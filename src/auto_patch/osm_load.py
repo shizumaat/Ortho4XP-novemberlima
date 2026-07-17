@@ -60,7 +60,8 @@ __all__ = [
 @functools.lru_cache(maxsize=32)
 def _load_osm_tile(path: str) -> tuple[dict[str, tuple[float, float]],
                                        list[tuple[str, list[str], dict[str, str]]],
-                                       list[tuple[str, list[str], dict[str, str]]]]:
+                                       list[tuple[str, list[str], dict[str, str]]],
+                                       dict[str, dict[str, str]]]:
     """Parse an Ortho4XP-cached OSM tile (.osm.bz2 or .osm).
 
     Cached by PATH (``maxsize=32`` covers a tile's 3×3 neighbourhood across the
@@ -81,6 +82,11 @@ def _load_osm_tile(path: str) -> tuple[dict[str, tuple[float, float]],
       * ways:  ``[(id, [nd_ref, ...], {tag: val})]``
       * relations: ``[(id, [member_way_ref, ...], {tag: val})]``
         — only outer-role way members are included.
+      * node_tags: ``{id: {tag: val}}`` for the (few) nodes that carry
+        tags the layer's download whitelist retained — e.g. the road
+        layers' at-grade level-crossing evidence
+        (``aeroway=aircraft_crossing``, ``barrier`` gates).  Caches
+        written before the tag-schema bump simply yield ``{}``.
 
     All IDs are stringified at the boundary because every downstream
     auto_patch caller treats node/way IDs as opaque strings (and
@@ -90,7 +96,7 @@ def _load_osm_tile(path: str) -> tuple[dict[str, tuple[float, float]],
     import O4_OSM_Utils as OSM
     layer = OSM.OSM_layer()
     if not layer.update_dicosm(path):
-        return {}, [], []
+        return {}, [], [], {}
 
     nodes: dict[str, tuple[float, float]] = {
         str(nid): (lat, lon)
@@ -107,7 +113,11 @@ def _load_osm_tile(path: str) -> tuple[dict[str, tuple[float, float]],
         outer = role_dict.get("outer", []) if isinstance(role_dict, dict) else []
         relations.append(
             (str(rid), [str(wid) for wid in outer], rel_tags.get(rid, {})))
-    return nodes, ways, relations
+    node_tags: dict[str, dict[str, str]] = {
+        str(nid): tags
+        for nid, tags in layer.dicosmtags.get("n", {}).items()
+    }
+    return nodes, ways, relations, node_tags
 
 
 # `_osm_tile_path` removed — was a hand-rolled reimplementation of
@@ -212,7 +222,7 @@ def _load_osm_airports(xplane_root: str, icao: str,
             if osm_path in seen_paths or not os.path.isfile(osm_path):
                 continue
             seen_paths.add(osm_path)
-            n2, w2, r2 = _load_osm_tile(osm_path)
+            n2, w2, r2, _nt2 = _load_osm_tile(osm_path)
             # Namespace this tile's node IDs.
             tile_prefix = f"t{tile_lat_n:+03d}{tile_lon_n:+04d}:"
             for nid, coord in n2.items():
@@ -525,9 +535,11 @@ def _load_osm_big_roads(apt_lat: float, apt_lon: float,
     pipeline.  Returns empty containers when no cache exists at
     this tile (tile builds without road data — e.g. SPLP, where
     big_roads.osm.bz2 was never generated — silently skip tunnel
-    emission).
+    emission).  Callers that also need the node tags use
+    ``_load_osm_road_layer`` directly.
     """
-    return _load_osm_road_layer("big_roads", apt_lat, apt_lon, radius_deg)
+    return _load_osm_road_layer(
+        "big_roads", apt_lat, apt_lon, radius_deg)[:2]
 
 
 def _load_osm_small_roads(apt_lat: float, apt_lon: float,
@@ -542,18 +554,26 @@ def _load_osm_small_roads(apt_lat: float, apt_lon: float,
     with car logic (≤ 4 %).  Same multi-tile + bbox logic as the big-road
     loader; returns empty containers when no cache exists for the tile.
     """
-    return _load_osm_road_layer("small_roads", apt_lat, apt_lon, radius_deg)
+    return _load_osm_road_layer(
+        "small_roads", apt_lat, apt_lon, radius_deg)[:2]
 
 
 @functools.lru_cache(maxsize=16)
 def _load_osm_road_layer(layer: str, apt_lat: float, apt_lon: float,
                          radius_deg: float = 0.05
                          ) -> tuple[dict[str, tuple[float, float]],
-                                    list[tuple[str, list[str], dict[str, str]]]]:
+                                    list[tuple[str, list[str], dict[str, str]]],
+                                    dict[str, dict[str, str]]]:
     """Shared loader for a road OSM cache ``layer`` (``big_roads`` /
     ``small_roads``): merge the 3×3 tile neighbourhood, namespace node /
     way IDs per tile, and keep ways whose centroid OR any vertex lies
     within ``radius_deg`` of the airport.
+
+    Returns ``(nodes, ways, node_tags)``; ``node_tags`` holds the tag
+    dicts of the (few) nodes whose tags the download whitelist retained
+    (level-crossing evidence: ``aeroway=aircraft_crossing``,
+    ``barrier`` gates) — empty for caches written before the tag-schema
+    bump.
 
     Cached (``lru_cache``): a process that builds the same airport
     repeatedly (the test suite builds CYXY/HECA/… many times) parses each
@@ -563,6 +583,7 @@ def _load_osm_road_layer(layer: str, apt_lat: float, apt_lon: float,
     base_lon = int(math.floor(apt_lon))
     nodes: dict[str, tuple[float, float]] = {}
     ways: list[tuple[str, list[str], dict[str, str]]] = []
+    node_tags: dict[str, dict[str, str]] = {}
     seen_paths = set()
     for dlat in (0, -1, 1):
         for dlon in (0, -1, 1):
@@ -573,18 +594,20 @@ def _load_osm_road_layer(layer: str, apt_lat: float, apt_lon: float,
             if osm_path in seen_paths or not os.path.isfile(osm_path):
                 continue
             seen_paths.add(osm_path)
-            n2, w2, _r2 = _load_osm_tile(osm_path)
+            n2, w2, _r2, nt2 = _load_osm_tile(osm_path)
             tile_prefix = (
                 f"r{tile_lat_n:+03d}{tile_lon_n:+04d}:")
             for nid, coord in n2.items():
                 nodes[tile_prefix + nid] = coord
+            for nid, tags in nt2.items():
+                node_tags[tile_prefix + nid] = tags
             for wid, nds, tags in w2:
                 ways.append(
                     (tile_prefix + wid,
                      [tile_prefix + n for n in nds],
                      tags))
     if not nodes:
-        return {}, []
+        return {}, [], {}
 
     def _in_box(lat, lon):
         return (abs(lat - apt_lat) <= radius_deg
@@ -607,4 +630,4 @@ def _load_osm_road_layer(layer: str, apt_lat: float, apt_lon: float,
             if _in_box(lat, lon):
                 kept.append((wid, nds, tags))
                 break
-    return nodes, kept
+    return nodes, kept, node_tags

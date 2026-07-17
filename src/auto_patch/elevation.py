@@ -2745,6 +2745,13 @@ _SINGLE_POLY_FLAT_TOL_M = 0.05
 # single-poly ring) strip it to match the apt.dat width.
 _LEGACY_RUNWAY_MARGIN_M = 3.0
 
+# Runway-crossing slab bracket snap distance (``_single_poly_station_slab``):
+# a slab edge snaps outward to a kept profile station only when that station
+# is within this axial distance of the overlap edge, otherwise the slab is
+# clamped to the overlap itself.  Small so a distant (sparse-profile) station
+# never balloons the crossing junction across unstationed runway.
+_XING_SLAB_SNAP_M = 5.0
+
 
 def _build_single_poly_runway_ring(state: dict, lat0: float, lon0: float,
                                    cos0: float):
@@ -2860,13 +2867,30 @@ def _single_poly_profile_alt(geometry: dict, x: float, y: float) -> float:
 
 
 def _single_poly_station_slab(geometry: dict, overlap) -> Polygon | None:
-    """The ring's axis-aligned SLAB between the kept stations bracketing
-    ``overlap`` — the de-seg equivalent of "the sub-rects of this ref
-    that overlap the other runway" (the legacy crossing junction is the
-    union of those; ``_resolve_runway_crossings`` pass 2).  Slab corners
-    are computed with the RING BUILDER's own lerp so the cut line passes
-    exactly through the ring's station vertices (shared corners, no
-    T-verts)."""
+    """The ring's axis-aligned SLAB spanning ``overlap`` — the de-seg
+    equivalent of "the sub-rects of this ref that overlap the other
+    runway" (the legacy crossing junction is the union of those;
+    ``_resolve_runway_crossings`` pass 2).
+
+    The slab is bracketed to the overlap's OWN axial extent, snapping a
+    bracket edge OUTWARD to a kept station only when that station is
+    within ``_XING_SLAB_SNAP_M`` of the overlap edge (so the cut reuses
+    an existing ring vertex when one is right there, no near-duplicate
+    sliver).  It must NOT snap to a DISTANT station: the profile sample
+    list is sparse (physical ends + a few crossing anchors), so a runway
+    whose only stations below the crossing is the physical end ``0.0``
+    would balloon the slab across the ENTIRE unstationed runway span —
+    the crossing junction then inherited each runway's full profile
+    range (KBNA 02L/20R+13/31: the slab reached the 182.6 m 02L
+    threshold and the 169.5 m 20R end, 1.4 km from the crossing, and the
+    junction's concave-corner vertices jumped 8.6 m / 731 % between the
+    two runways' extremes).  A cut at a non-station fraction is safe:
+    ``poly.difference(slab)`` mints a coincident vertex on the remainder
+    ring at the same coordinate, and both sides re-sample
+    ``_single_poly_profile_alt`` there → identical value, no step and no
+    T-vert.  Coverage is preserved because the overlap projects entirely
+    inside ``[t_lo, t_hi]`` on this axis, so the slab still contains the
+    whole physical crossing."""
     ax, ay = geometry['axis_a']
     bx, by = geometry['axis_b']
     ux, uy = geometry['unit']
@@ -2883,10 +2907,16 @@ def _single_poly_station_slab(geometry: dict, overlap) -> Polygon | None:
         return None
     t_lo, t_hi = min(ts), max(ts)
     station_fractions = [f for f, _e in geometry['stations']]
-    f_lo = max((f for f in station_fractions if f <= t_lo + 1e-9),
-               default=station_fractions[0])
-    f_hi = min((f for f in station_fractions if f >= t_hi - 1e-9),
-               default=station_fractions[-1])
+    snap = _XING_SLAB_SNAP_M / length if length > 0 else 0.0
+    # Snap the low edge DOWN to a station only if one sits within ``snap``
+    # just below the overlap; otherwise clamp to the overlap edge itself.
+    below = [f for f in station_fractions if f <= t_lo + 1e-9]
+    f_lo = max(below) if below and (t_lo - max(below)) <= snap else t_lo
+    above = [f for f in station_fractions if f >= t_hi - 1e-9]
+    f_hi = min(above) if above and (min(above) - t_hi) <= snap else t_hi
+    # Never exceed the ring's physical extent.
+    f_lo = max(f_lo, station_fractions[0])
+    f_hi = min(f_hi, station_fractions[-1])
     if f_hi - f_lo < 1e-9:
         return None
 
