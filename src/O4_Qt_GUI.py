@@ -17,7 +17,7 @@ import sys
 import threading
 import traceback
 
-from PySide6.QtCore import QByteArray, QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -145,6 +145,11 @@ class TwoLineElidedLabel(QLabel):
     their most specific parts at both ends); the full text moves to the
     tooltip.  The horizontal size policy is Ignored so a long value can
     never widen its panel — extra length costs ellipsis, not width.
+    The height is FIXED at two lines: layouts would otherwise grant
+    only the one-line minimum (clipping the second line away), and a
+    height that depended on width would feed the scroll-area relayout
+    loop — width flips the vertical scrollbar, which changes width —
+    that oscillates until the stack overflows.
     """
 
     def __init__(self, text="", parent=None):
@@ -153,6 +158,7 @@ class TwoLineElidedLabel(QLabel):
         policy = self.sizePolicy()
         policy.setHorizontalPolicy(QSizePolicy.Ignored)
         self.setSizePolicy(policy)
+        self._reserve_two_lines()
         self._full_text = ""
         self.setText(text)
 
@@ -163,6 +169,19 @@ class TwoLineElidedLabel(QLabel):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._refresh_elision()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self._reserve_two_lines()
+            self._refresh_elision()
+
+    def _reserve_two_lines(self):
+        margins = self.contentsMargins()
+        self.setFixedHeight(
+            2 * self.fontMetrics().lineSpacing() + 2
+            + margins.top() + margins.bottom()
+        )
 
     def _fits_two_lines(self, candidate, width):
         rect = self.fontMetrics().boundingRect(
@@ -244,6 +263,12 @@ class MainWindow(QMainWindow):
         self._airports = []
         self._built = {}
         self._installed = set()
+        # True while a scenery scan is streaming results in: a tile
+        # absent from _built is then merely "not scanned yet", not
+        # known-unbuilt, and the info panel says so.  Starts True —
+        # the startup scan is already scheduled, so nothing is known
+        # until it reports.
+        self._scanning = True
         self._progress_states = {}
         self._building = False
         self._stop_requested = False
@@ -387,6 +412,10 @@ class MainWindow(QMainWindow):
 
         self.info_group = QGroupBox("Tile")
         ig = QFormLayout(self.info_group)
+        # macOS's native form style is FieldsStayAtSizeHint, which
+        # gives the Ignored-policy elided labels ZERO width (their size
+        # hint is meaningless by design) — the values simply vanish.
+        ig.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.info_title = QLabel("—")
         ig.addRow(self.info_title)
         self.info_provider = QLabel("—")
@@ -433,7 +462,11 @@ class MainWindow(QMainWindow):
         options_page = QWidget()
         bg = QVBoxLayout(options_page)
         bg.setContentsMargins(0, 0, 0, 0)
-        self.build_summary = QLabel("No tiles selected")
+        # Two-line elided: the dynamic summary ("N tiles selected ·
+        # rough est. …") must never widen the fixed-width panel into
+        # clipping, and plain word wrap here would tie its height to
+        # its width — the scroll-area oscillation the class avoids.
+        self.build_summary = TwoLineElidedLabel("No tiles selected")
         bg.addWidget(self.build_summary)
         self.chk_vector = QCheckBox("Vector, mesh && masks")
         self.chk_vector.setChecked(True)
@@ -492,6 +525,11 @@ class MainWindow(QMainWindow):
         pg = QVBoxLayout(progress_page)
         pg.setContentsMargins(0, 0, 0, 0)
         self.progress_title = QLabel("")
+        # Ignored: the title is rich text (no elision support), so it
+        # clips rather than ever widening the fixed-width panel.
+        title_policy = self.progress_title.sizePolicy()
+        title_policy.setHorizontalPolicy(QSizePolicy.Ignored)
+        self.progress_title.setSizePolicy(title_policy)
         pg.addWidget(self.progress_title)
         rows_scroll = QScrollArea()
         rows_scroll.setWidgetResizable(True)
@@ -824,7 +862,11 @@ class MainWindow(QMainWindow):
         # contract the one-shot scan had).
         self._scan_built = {}
         self._scan_installed = set()
+        self._scanning = True
         self._session.scan(self.working_dir(), CFG.custom_scenery_dir)
+        # An already-shown "(not built)" verdict is stale the moment a
+        # rescan starts — repaint the active tile as pending.
+        self._active_changed(self.map.active_tile())
 
     # ------------------------------------------------------------------
     # Engine event dispatch (the view renders; the session computes)
@@ -844,8 +886,14 @@ class MainWindow(QMainWindow):
         self._installed.update(event.installed)
         self.map.set_built(self._built)
         self.map.set_installed(self._installed)
+        # The active tile stops being "(scanning…)" the moment its
+        # own result streams in.
+        active = self.map.active_tile()
+        if active is not None and active in event.built:
+            self._active_changed(active)
 
     def _on_scan_done(self, event):
+        self._scanning = False
         self._built = dict(self._scan_built)
         self._installed = set(self._scan_installed)
         self.map.clear_scan_status()
@@ -973,6 +1021,9 @@ class MainWindow(QMainWindow):
         )
 
         if info is None:
+            # While a scan streams in, absence only means "not scanned
+            # yet" — a built tile must not flash as "(not built)".
+            pending = self._scanning
             for w in (
                 self.info_provider,
                 self.info_zl,
@@ -980,9 +1031,10 @@ class MainWindow(QMainWindow):
                 self.info_imagery,
                 self.info_size,
             ):
-                w.setText("—")
+                w.setText("…" if pending else "—")
             self.info_title.setText(
-                self.info_title.text() + "  (not built)"
+                self.info_title.text()
+                + ("  (scanning…)" if pending else "  (not built)")
             )
             self.install_check.setEnabled(False)
             self.install_check.setChecked(False)

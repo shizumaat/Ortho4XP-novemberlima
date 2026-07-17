@@ -1,10 +1,21 @@
 """Main-window layout contracts (2026-07-17).
 
-Three regressions guarded here:
+Regressions guarded here:
 
 * the tile-details Elevation / Airport lidar values are capped at two
   wrapped lines with MIDDLE elision (long provider lists used to
-  overflow their boxes);
+  overflow their boxes), and the labels are fixed at two lines tall so
+  the form always shows both lines;
+* the right panel's content never demands more width than its
+  fixed-width scroll viewport (wider content clipped silently — the
+  horizontal scrollbar is off — and a width-dependent label height
+  crashed via scroll-area relayout oscillation);
+* the tile-info form pins AllNonFixedFieldsGrow (macOS's native
+  FieldsStayAtSizeHint style collapses Ignored-policy fields to zero
+  width — the values vanished on Macs only);
+* while a scenery scan streams in, an unknown tile reads
+  "(scanning…)" — never a premature "(not built)" — and flips to its
+  real info the moment its batch arrives;
 * the console drawer defaults to six lines, keeps its size when toggled
   (re-opening restores the height it had), and window growth goes to
   the map, not the console;
@@ -115,6 +126,133 @@ class TestTwoLineElidedLabel:
         window = make_window()
         assert isinstance(window.info_elevation, GUI.TwoLineElidedLabel)
         assert isinstance(window.info_airport_lidar, GUI.TwoLineElidedLabel)
+
+    def test_labels_are_fixed_at_two_lines_tall(self, qapp):
+        """Layouts must grant BOTH lines — and exactly two, so height
+        never depends on width (the scroll-area oscillation guard)."""
+        label = self._label(qapp, 170)
+        two_lines = 2 * label.fontMetrics().lineSpacing() + 2
+        assert label.minimumHeight() == two_lines
+        assert label.maximumHeight() == two_lines
+
+
+class TestPanelFitsItsViewport:
+    """The right panel is a fixed-width scroll area with the horizontal
+    scrollbar off: content wider than the viewport silently clips, so
+    no child may demand more width than the viewport offers."""
+
+    def test_panel_minimum_width_fits(self, qapp, make_window):
+        window = make_window()
+        window.show()
+        qapp.processEvents()
+        # Long dynamic values, as after a scan of a lidar-covered tile.
+        window.build_summary.setText(
+            "12 tiles selected · rough est. 48.0 GB · airport lidar on 12"
+        )
+        window.info_elevation.setText(LONG_TEXT)
+        window.info_airport_lidar.setText(LONG_TEXT)
+        qapp.processEvents()
+        panel = window.info_group.parentWidget()
+        scroll = panel.parentWidget()
+        while not hasattr(scroll, "viewport"):
+            scroll = scroll.parentWidget()
+        assert panel.minimumSizeHint().width() <= scroll.viewport().width()
+        assert panel.width() <= scroll.viewport().width()
+
+    def test_info_rows_get_two_lines_in_the_form(self, qapp, make_window):
+        window = make_window()
+        window.show()
+        qapp.processEvents()
+        window.info_group.setVisible(True)
+        window.info_elevation.setText(LONG_TEXT)
+        qapp.processEvents()
+        metrics = window.info_elevation.fontMetrics()
+        assert window.info_elevation.height() >= 2 * metrics.lineSpacing()
+        assert window.info_airport_lidar.height() >= 2 * metrics.lineSpacing()
+
+    def test_info_form_grows_ignored_policy_fields(self, make_window):
+        """macOS's native form style (FieldsStayAtSizeHint) gives the
+        Ignored-policy elided labels ZERO width — the values vanish.
+        The layout must pin the growing policy explicitly."""
+        from PySide6.QtWidgets import QFormLayout
+
+        window = make_window()
+        layout = window.info_group.layout()
+        assert (
+            layout.fieldGrowthPolicy()
+            == QFormLayout.AllNonFixedFieldsGrow
+        )
+
+
+class TestScanPendingState:
+    """While a scenery scan is streaming in, a tile absent from the
+    results is merely "not scanned yet": the info panel must say
+    "(scanning…)", not flash a wrong "(not built)" verdict."""
+
+    def _scan_done(self, window):
+        from o4_engine import events as EV
+
+        window._on_scan_done(EV.ScanDone())
+
+    def test_starts_in_scanning_state(self, qapp, make_window):
+        window = make_window()
+        window.show()
+        qapp.processEvents()
+        window._active_changed((36, -87))
+        assert "(scanning…)" in window.info_title.text()
+        assert "(not built)" not in window.info_title.text()
+        assert window.info_provider.text() == "…"
+
+    def test_scan_done_reveals_not_built(self, qapp, make_window):
+        window = make_window()
+        window.show()
+        qapp.processEvents()
+        self._scan_done(window)
+        window._active_changed((36, -87))
+        assert "(not built)" in window.info_title.text()
+        assert window.info_provider.text() == "—"
+
+    def test_active_tile_updates_when_its_batch_arrives(
+        self, qapp, make_window
+    ):
+        import inspect
+
+        import O4_Tile_Info as TINFO
+        from o4_engine import events as EV
+
+        window = make_window()
+        window.show()
+        qapp.processEvents()
+        window.map.set_active(36, -87)
+        window._active_changed((36, -87))
+        assert "(scanning…)" in window.info_title.text()
+        required = {
+            "lat": 36,
+            "lon": -87,
+            "build_dir": "/nonexistent",
+            "dir_name": "zOrtho4XP_+36-087",
+            "dsf_present": True,
+        }
+        signature = inspect.signature(TINFO.TileInfo)
+        kwargs = {
+            name: required.get(name)
+            for name, parameter in signature.parameters.items()
+            if parameter.default is inspect.Parameter.empty
+        }
+        info = TINFO.TileInfo(**kwargs, provider="BI", zl=16)
+        window._on_scan_batch(EV.ScanBatch(built={(36, -87): info}))
+        assert "(scanning…)" not in window.info_title.text()
+        assert window.info_provider.text() == "BI"
+
+    def test_rescan_returns_to_scanning_state(self, qapp, make_window):
+        window = make_window()
+        window.show()
+        qapp.processEvents()
+        self._scan_done(window)
+        window._session.scan = lambda *args, **kwargs: None
+        window.map.set_active(36, -87)
+        window.refresh_tiles()
+        assert "(scanning…)" in window.info_title.text()
 
 
 class TestConsoleDrawer:
