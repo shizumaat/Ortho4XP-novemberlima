@@ -307,7 +307,7 @@ class OSM_layer:
         )
         return 1
 
-    def write_to_file(self, filename):
+    def write_to_file(self, filename, header_attributes=None):
         try:
             if filename[-4:] == ".bz2":
                 fout = bz2.open(filename, "wt", encoding="utf-8")
@@ -316,11 +316,19 @@ class OSM_layer:
         except:
             UI.vprint(1, "    Could not open", filename, "for writing.")
             return 0
+        extra_attributes = "".join(
+            ' ' + key + '="' + str(value) + '"'
+            for key, value in (header_attributes or {}).items()
+        )
         fout.write(
             '<?xml version="1.0" encoding="UTF-8"?>\n<osm version="0.6" '
-            + 'generator="Ortho4XP">\n'
+            + 'generator="Ortho4XP"' + extra_attributes + '>\n'
         )
-        if not len(self.dicosmfirst["n"]):
+        # Node tags may exist without any first-class node (a way-only
+        # layer whose child nodes carry whitelisted tags, e.g. the road
+        # layers' barrier / aircraft-crossing evidence) — the tagless
+        # fast path below would silently drop them.
+        if not len(self.dicosmfirst["n"]) and not len(self.dicosmtags["n"]):
             for nodeid, (lonp, latp) in self.dicosmn.items():
                 fout.write(
                     '  <node id="'
@@ -407,6 +415,46 @@ class OSM_layer:
         return 1
 
 
+def _cached_osm_schema_matches(cached_data_filename, cache_schema) -> bool:
+    """True when the cached OSM file carries the expected tag-schema
+    marker (``o4_tag_schema="..."`` on the ``<osm`` root tag).  An
+    empty ``cache_schema`` accepts any cache (legacy behaviour).  A
+    cache written before schema stamping has no marker and therefore
+    matches only the empty schema — so bumping a layer's schema makes
+    its old caches re-download once with the richer tag whitelist."""
+    if not cache_schema:
+        return True
+    marker = 'o4_tag_schema="' + cache_schema + '"'
+    try:
+        if cached_data_filename[-4:] == ".bz2":
+            pfile = bz2.open(cached_data_filename, "rt", encoding="utf-8")
+        else:
+            pfile = open(cached_data_filename, "r", encoding="utf-8")
+        with pfile:
+            head = pfile.readline() + pfile.readline()
+        return marker in head
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+# Concurrent callers of the SAME cached query (the bathymetry-band
+# prefetch racing the vector step's coastline download) must not both
+# hit Overpass nor interleave writes to the shared cache file: the
+# per-cache-file lock serializes them, and the second entrant then
+# recycles the cache the first one just wrote.
+_osm_cache_locks_guard = threading.Lock()
+_osm_cache_locks = {}
+
+
+def _osm_cache_lock(cached_data_filename):
+    with _osm_cache_locks_guard:
+        lock = _osm_cache_locks.get(cached_data_filename)
+        if lock is None:
+            lock = threading.Lock()
+            _osm_cache_locks[cached_data_filename] = lock
+        return lock
+
+
 def OSM_queries_to_OSM_layer(
     queries,
     osm_layer,
@@ -414,6 +462,42 @@ def OSM_queries_to_OSM_layer(
     lon,
     tags_of_interest=[],
     cached_suffix="",
+    node_tags_of_interest=[],
+    cache_schema="",
+):
+    if cached_suffix:
+        with _osm_cache_lock(FNAMES.osm_cached(lat, lon, cached_suffix)):
+            return _OSM_queries_to_OSM_layer_serialized(
+                queries,
+                osm_layer,
+                lat,
+                lon,
+                tags_of_interest,
+                cached_suffix,
+                node_tags_of_interest,
+                cache_schema,
+            )
+    return _OSM_queries_to_OSM_layer_serialized(
+        queries,
+        osm_layer,
+        lat,
+        lon,
+        tags_of_interest,
+        cached_suffix,
+        node_tags_of_interest,
+        cache_schema,
+    )
+
+
+def _OSM_queries_to_OSM_layer_serialized(
+    queries,
+    osm_layer,
+    lat,
+    lon,
+    tags_of_interest=[],
+    cached_suffix="",
+    node_tags_of_interest=[],
+    cache_schema="",
 ):
     # this one is a bit complicated by a few checks of existing cached data
     # which had different filenames is versions prior to 1.30
@@ -436,10 +520,32 @@ def OSM_queries_to_OSM_layer(
                 else:
                     if tag not in target_tags[osm_type]:
                         target_tags[osm_type].append(tag)
+    # Node-tag whitelist: the per-query loop above only feeds each
+    # query's own osm type (way queries keep way tags), so node tags on
+    # the ways' child nodes were always dropped.  Callers that need
+    # them (e.g. the road layers' level-crossing evidence: barrier
+    # gates, aeroway=aircraft_crossing) pass them here.  They stay OUT
+    # of input_tags: a tagged child node must not become a first-class
+    # feature of the layer.
+    for tag in node_tags_of_interest:
+        if isinstance(tag, str):
+            if (tag, "") not in target_tags["n"]:
+                target_tags["n"].append((tag, ""))
+        elif tag not in target_tags["n"]:
+            target_tags["n"].append(tag)
     cached_data_filename = FNAMES.osm_cached(lat, lon, cached_suffix)
     if cached_suffix and os.path.isfile(cached_data_filename):
-        UI.vprint(1, "    * Recycling OSM data from", cached_data_filename)
-        return osm_layer.update_dicosm(cached_data_filename, input_tags, target_tags)
+        if _cached_osm_schema_matches(cached_data_filename, cache_schema):
+            UI.vprint(1, "    * Recycling OSM data from",
+                      cached_data_filename)
+            return osm_layer.update_dicosm(
+                cached_data_filename, input_tags, target_tags)
+        UI.vprint(
+            1,
+            "    * Cached OSM data at",
+            cached_data_filename,
+            "predates the current tag schema, re-downloading.",
+        )
     # Recycle per-query cached files from the pre-1.30 cache layout when
     # present, and collect every remaining statement so they can all be
     # downloaded in ONE batched Overpass request (see build_overpass_query
@@ -487,7 +593,10 @@ def OSM_queries_to_OSM_layer(
             return 0
         osm_layer.update_dicosm(response, input_tags, target_tags)
     if cached_suffix:
-        osm_layer.write_to_file(cached_data_filename)
+        osm_layer.write_to_file(
+            cached_data_filename,
+            header_attributes=({"o4_tag_schema": cache_schema}
+                               if cache_schema else None))
     return 1
 
 
@@ -708,7 +817,7 @@ def _select_most_available_server_key(candidate_keys) -> str:
     return random.choice(list(candidate_keys))
 
 
-def _select_overpass_server_key(server_keys, failed_server_key=None) -> str:
+def _select_overpass_server_key(server_keys, failed_server_keys=frozenset()) -> str:
     """Choose which Overpass server the next request attempt goes to.
 
     A pinned choice (overpass_server_choice naming an entry from
@@ -719,15 +828,22 @@ def _select_overpass_server_key(server_keys, failed_server_key=None) -> str:
     there is no proven-good server (first download of the session, or
     right after a failed attempt) are the candidates' status endpoints
     probed to find the most available one.
+
+    ``failed_server_keys`` holds every server that already failed for
+    the current request; none of them is picked again while an untried
+    server remains, because a status probe can report a server as
+    available even when it answers requests with garbage or timeouts.
     """
     if overpass_server_choice in server_keys:
         return overpass_server_choice
     sticky_server_key = getattr(
         get_overpass_data, "last_successful_server_key", None
     )
-    candidate_keys = [key for key in server_keys if key != failed_server_key]
+    candidate_keys = [
+        key for key in server_keys if key not in failed_server_keys
+    ]
     if not candidate_keys:
-        candidate_keys = server_keys
+        candidate_keys = list(server_keys)
     if sticky_server_key in candidate_keys:
         return sticky_server_key
     if len(candidate_keys) == 1:
@@ -841,10 +957,14 @@ def get_overpass_data(query, bbox, request_description="") -> bytes:
         )
     overpass_query = build_overpass_query(query, bbox)
     request_label = f" ({request_description})" if request_description else ""
-    failed_server_key = None
+    failed_server_keys = set()
     for tentative in range(1, max_osm_tentatives + 1):
+        if len(failed_server_keys) >= len(server_keys):
+            # Every server failed once this round; start a fresh round
+            # rather than keeping a dead exclusion list around.
+            failed_server_keys.clear()
         current_server_key = _select_overpass_server_key(
-            server_keys, failed_server_key
+            server_keys, failed_server_keys
         )
         # Announce the attempt BEFORE sending it: a busy server can hold
         # the connection open for minutes before failing, and without
@@ -896,7 +1016,7 @@ def get_overpass_data(query, bbox, request_description="") -> bytes:
                 f"      OSM server {current_server_key}{request_label} "
                 f"was too busy, new tentative in {wait_seconds} sec...",
             )
-        failed_server_key = current_server_key
+        failed_server_keys.add(current_server_key)
         # Sleep in one-second slices so the GUI stop button stays
         # responsive during a long backoff wait.
         for _ in range(wait_seconds):
