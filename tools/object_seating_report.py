@@ -78,6 +78,11 @@ def main() -> int:
     for resource_or_dsf, reason in result["skipped"]:
         print(f"  {os.path.basename(resource_or_dsf):44} {reason[:90]}")
     print()
+    print(f"partially baked ({len(result['partially_baked'])}) — passing "
+          "structures bake, skipped structures stay authored:")
+    for resource, summary in result["partially_baked"]:
+        print(f"  {os.path.basename(resource):44} {summary[:90]}")
+    print()
 
     rows = []
     for pool, decision in result["decisions"]:

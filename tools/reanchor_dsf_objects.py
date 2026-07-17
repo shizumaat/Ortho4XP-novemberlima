@@ -294,6 +294,8 @@ def main(argument_list: list[str] | None = None) -> int:
         )
         for resource_path, reason in result["skipped"]:
             print(f"    skipped {resource_path}: {reason}")
+        for resource_path, summary in result["partially_baked"]:
+            print(f"    partially baked {resource_path}: {summary}")
         if arguments.dry_run:
             _report_dry_run_decisions(target, result)
         elif result["objects_written"]:

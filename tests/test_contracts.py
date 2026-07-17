@@ -369,6 +369,14 @@ def test_rebake_report_fields():
         "skipped",
         "orphaned_backups",
         "provenance_path",
+        # Exclusion reversion pass (O4_OBJECT_REBAKE_REVERT_EXCLUDED):
+        # excluded objects un-baked from their backups, and the ones
+        # whose backup is missing (reported, never overwritten).
+        "objects_reverted",
+        "reversions_missing_backup",
+        # Amendment A21: objects written with some structures left at
+        # their authored y (per-structure partial bake).
+        "partially_baked",
     )
 
 

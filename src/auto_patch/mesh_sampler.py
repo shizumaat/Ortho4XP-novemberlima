@@ -38,11 +38,35 @@ confirmed at ``O4_Mesh_Utils.py`` read side, which subtracts 1).
 
 from __future__ import annotations
 
+import os
+
 import numpy
 
 # O4_Mesh_Utils.write_mesh_file writes the elevation column divided by
 # this constant; reading multiplies it back.
 MESH_ELEVATION_SCALE = 100000.0
+
+# One-entry parse cache: Phase 2 constructs a sampler PER OBJECT POOL
+# (dozens per airport, several airports per tile) against the same
+# ~160 MB tile mesh, and the text parse dominated the whole rebake
+# (profiled 2026-07-15: ~80 constructions x ~1.3 s).  Keyed by
+# (path, mtime_ns, size) so a rebuilt mesh is never served stale; one
+# entry suffices (a run works one tile mesh at a time) and bounds the
+# held memory to one tile's arrays (~100 MB).  The cached arrays are
+# shared read-only between sampler instances — nothing mutates them
+# after the parse.
+_parse_cache_key: tuple[str, int, int] | None = None
+_parse_cache_arrays: tuple[numpy.ndarray, numpy.ndarray] | None = None
+
+
+def _read_mesh_cached(mesh_path: str) -> tuple[numpy.ndarray, numpy.ndarray]:
+    global _parse_cache_key, _parse_cache_arrays
+    stat = os.stat(mesh_path)
+    key = (os.path.abspath(mesh_path), stat.st_mtime_ns, stat.st_size)
+    if key != _parse_cache_key:
+        _parse_cache_arrays = MeshElevationSampler._read_mesh(mesh_path)
+        _parse_cache_key = key
+    return _parse_cache_arrays
 
 
 class OutsideMeshError(Exception):
@@ -75,7 +99,7 @@ class MeshElevationSampler:
         maximum_longitude += margin_degrees
         maximum_latitude += margin_degrees
 
-        vertices, triangles = self._read_mesh(mesh_path)
+        vertices, triangles = _read_mesh_cached(mesh_path)
 
         vertex_inside_bounds = (
             (vertices[:, 0] >= minimum_longitude)

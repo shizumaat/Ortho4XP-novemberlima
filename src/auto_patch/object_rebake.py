@@ -97,6 +97,19 @@ class RebakeReport:
     skipped: list[tuple[str, str]] = field(default_factory=list)
     orphaned_backups: list[str] = field(default_factory=list)
     provenance_path: str | None = None
+    # Objects that carried a live bake but are EXCLUDED from the current
+    # decision (no delta applied): restored byte-exact from ``.anchor_bak``
+    # so the live pack always reflects exactly the current decision.
+    objects_reverted: list[str] = field(default_factory=list)
+    # Excluded objects whose live file still carries a bake but whose
+    # ``.anchor_bak`` is gone: cannot be reverted, reported loudly, never
+    # written blindly.
+    reversions_missing_backup: list[str] = field(default_factory=list)
+    # (resource_path, summary) for objects written with SOME structures
+    # left unbaked (amendment A21): the passing structures' vertices
+    # moved, the skipped structures' vertices keep their authored y.
+    # Per-structure detail lands in the provenance sidecar entry.
+    partially_baked: list[tuple[str, str]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +223,14 @@ def _rewrite_y_tokens(
     byte (including non-UTF-8 bytes and ``\\r\\n`` endings) round-trips
     exactly on lines the plan does not touch.
 
+    When the destination already holds EXACTLY the bytes about to be
+    written (the byte-idempotent re-run, invariant I-15), the write is
+    skipped so the file's mtime survives: the re-run used to rewrite
+    identical bytes into every corrected ``.obj``, churning mtimes and
+    with them every mtime-fingerprinted pack sidecar (classification,
+    footprints, road network — ~40-55 s of recompute per pipeline run,
+    2026-07-15 profile) plus X-Plane's own object cache.
+
     Returns the number of VERTEX lines rewritten (``vertex_lines``
     members), the honest ``vertices_offset_total`` contribution;
     positional-command rewrites are applied but not counted as vertices.
@@ -249,10 +270,19 @@ def _rewrite_y_tokens(
             output.append("".join(parts) + line_ending)
             if line_index in vertex_lines:
                 vertices_moved += 1
+    new_content = "".join(output)
+    try:
+        with open(
+            destination_path, newline="", encoding="latin-1"
+        ) as handle:
+            if handle.read() == new_content:
+                return vertices_moved   # byte-identical — keep the mtime
+    except OSError:
+        pass
     with open(
         destination_path, "w", newline="", encoding="latin-1"
     ) as handle:
-        handle.writelines(output)
+        handle.write(new_content)
     return vertices_moved
 
 
@@ -426,7 +456,25 @@ def apply(
     provenance.  Byte-idempotent (reads from ``.anchor_bak``, I-15);
     refuses objects with ``ANIM_begin`` unless ``DSF_OBJECT_ALLOW_ANIM``
     (invariant I-11) and any definition with more than one ``OBJECT``
-    placement (invariant I-4)."""
+    placement (invariant I-4).
+
+    Baking is per STRUCTURE, not all-or-nothing per resource (amendment
+    A21): a resource where some structures were skipped still bakes its
+    passing structures' deltas — the skipped structures' vertices carry
+    no delta, so the rewrite (always from ``.anchor_bak``) leaves them at
+    their authored y.  Such objects are reported in
+    ``RebakeReport.partially_baked`` and their provenance entry records
+    each skipped structure (centroid, surface area, reason).  Only a
+    resource in ``decision.skipped`` — every structure skipped, or a
+    resource-level refusal — is refused entirely.
+
+    The live pack always reflects EXACTLY the current decision: any object
+    the decision EXCLUDES (its structures skipped, so it carries no delta)
+    yet still holding a live bake from an earlier run is un-baked from its
+    ``.anchor_bak`` and its stale provenance cleared (reversion pass,
+    gated by ``O4_OBJECT_REBAKE_REVERT_EXCLUDED`` — default on; set 0 for
+    the old keep-stale behaviour).  A missing backup is reported loudly and
+    never overwritten."""
     # Function-local import so tests (and the environment) can drive the
     # flag at call time — the dsf_reader module-level-import trap, spec
     # section 4-W1.
@@ -495,11 +543,27 @@ def apply(
         for resource_path in group
     }
 
+    # Amendment A21 — per-structure skips within resources that still
+    # bake.  The decision's structures carry their own ``skip_reason``;
+    # aggregate them per resource here so a written object with skipped
+    # structures gets (a) a ``partially_baked`` report entry and (b)
+    # per-structure detail in its provenance entry.  Deterministic:
+    # decision order.
+    skipped_structures_by_resource: dict[str, list[Structure]] = {}
+    for structure in decision.structures:
+        if not structure.skip_reason:
+            continue
+        for structure_resource in structure.triangles_by_resource:
+            skipped_structures_by_resource.setdefault(
+                structure_resource, []
+            ).append(structure)
+
     provenance = _load_provenance(pack_root)
     tile = _tile_name_from_mesh_path(mesh_path)
     objects_written: list[str] = []
     vertices_offset_total = 0
     orphaned_backups: list[str] = []
+    partially_baked: list[tuple[str, str]] = []
 
     for resource_path in resources:
         if resource_path in duplicated_resources:
@@ -618,7 +682,7 @@ def apply(
         decision_anchor = getattr(decision, "anchor_by_resource", {}).get(
             resource_path
         )
-        provenance["objects"][resource_path] = {
+        provenance_entry = {
             # Amendment A13: the decision carries each object's anchor;
             # a prototype-era recorded anchor survives as the fallback.
             "anchor": (
@@ -633,9 +697,143 @@ def apply(
             "backup_sha256": _sha256_of_file(backup_path),
             "written_sha256": _sha256_of_file(live_path),
         }
+        skipped_structures = skipped_structures_by_resource.get(
+            resource_path
+        )
+        if skipped_structures:
+            # Amendment A21: this object baked its passing structures
+            # only.  Record each skipped structure so the sidecar shows
+            # exactly which pieces stayed at their authored y and why.
+            provenance_entry["structures_skipped"] = [
+                {
+                    "centroid_latitude": structure.centroid_latitude,
+                    "centroid_longitude": structure.centroid_longitude,
+                    "surface_area_square_metres": (
+                        structure.surface_area_square_metres
+                    ),
+                    "reason": structure.skip_reason,
+                }
+                for structure in skipped_structures
+            ]
+            summary = (
+                f"{len(skipped_structures)} structure(s) left at their "
+                "authored y (skipped), passing structures baked; first "
+                f"reason: {skipped_structures[0].skip_reason}"
+            )
+            partially_baked.append((resource_path, summary))
+            _LOGGER.info(
+                "object re-anchor partially baked %s: %s",
+                resource_path,
+                summary,
+            )
+        provenance["objects"][resource_path] = provenance_entry
+
+    # --- reversion pass: the live pack always reflects the current
+    # decision.  An object EXCLUDED from this decision (its structures
+    # skipped, so it carries no delta) but still holding a live bake from
+    # an earlier run keeps floating at that stale offset — nothing above
+    # ever visits it, because the main loop iterates only baked resources.
+    # Un-bake it from its ``.anchor_bak`` and clear the stale provenance
+    # (a roof at its authored height beats a roof at a stale-mesh height —
+    # the WED-authored placement the pack author validated).  The
+    # conservative default is ON; O4_OBJECT_REBAKE_REVERT_EXCLUDED=0
+    # restores the old keep-stale behaviour.
+    objects_reverted: list[str] = []
+    reversions_missing_backup: list[str] = []
+    revert_excluded = (
+        os.environ.get("O4_OBJECT_REBAKE_REVERT_EXCLUDED", "1") != "0"
+    )
+    if revert_excluded:
+        skip_reason_by_resource: dict[str, str] = {}
+        for skipped_resource, reason in skipped:
+            skip_reason_by_resource.setdefault(skipped_resource, reason)
+        # Every resource this pool's decision knows about — baked,
+        # skipped, or merely present in a structure — minus the ones just
+        # written.  Scoped to this decision (one resource lives in exactly
+        # one pool, invariant I-4), so this never touches another pool's
+        # objects.
+        decision_known: set[str] = set(resources)
+        decision_known.update(decision.anchor_ground_by_resource)
+        decision_known.update(
+            getattr(decision, "anchor_by_resource", {})
+        )
+        for skipped_resource, _reason in decision.skipped:
+            decision_known.add(skipped_resource)
+        for structure in decision.structures:
+            decision_known.update(structure.triangles_by_resource)
+        written_this_run = set(objects_written)
+        for resource_path in sorted(decision_known - written_this_run):
+            live_path = os.path.join(pack_root, resource_path)
+            backup_path = live_path + BACKUP_SUFFIX
+            recorded_entry = provenance["objects"].get(resource_path, {})
+            recorded_backup_hash = recorded_entry.get("backup_sha256")
+            recorded_written_hash = recorded_entry.get("written_sha256")
+            provenance_says_baked = (
+                recorded_written_hash is not None
+                and recorded_written_hash != recorded_backup_hash
+            )
+            backup_exists = os.path.isfile(backup_path)
+            live_exists = os.path.isfile(live_path)
+            live_differs_from_backup = (
+                backup_exists
+                and live_exists
+                and _sha256_of_file(live_path)
+                != _sha256_of_file(backup_path)
+            )
+            if not (provenance_says_baked or live_differs_from_backup):
+                # No live bake to undo — leave it untouched.
+                continue
+            if not backup_exists:
+                # Safety rule: never write a pack file without its backup.
+                _LOGGER.warning(
+                    "object re-anchor cannot revert %s: it is excluded "
+                    "from the current decision and its live file still "
+                    "carries a bake, but %s is missing — left as-is, NOT "
+                    "overwritten",
+                    live_path,
+                    os.path.basename(backup_path),
+                )
+                reversions_missing_backup.append(resource_path)
+                continue
+            reason = skip_reason_by_resource.get(
+                resource_path,
+                "excluded from the current decision — no bake applied",
+            )
+            if live_differs_from_backup:
+                # Byte-exact restore from the authored original.
+                shutil.copy2(backup_path, live_path)
+                objects_reverted.append(resource_path)
+                _LOGGER.warning(
+                    "object re-anchor REVERTED %s to its authored "
+                    "placement (%s): %s",
+                    live_path,
+                    os.path.basename(backup_path),
+                    reason,
+                )
+            backup_hash = _sha256_of_file(backup_path)
+            provenance["objects"][resource_path] = {
+                "anchor": (
+                    list(decision.anchor_by_resource[resource_path])
+                    if resource_path in getattr(
+                        decision, "anchor_by_resource", {}
+                    )
+                    else recorded_entry.get("anchor")
+                ),
+                # Stale anchor_ground must not survive a mesh change for an
+                # excluded object: the current sample if we have one, else
+                # dropped rather than left pointing at the old mesh.
+                "anchor_ground_m": (
+                    decision.anchor_ground_by_resource.get(resource_path)
+                ),
+                "tile": tile,
+                "backup_sha256": backup_hash,
+                # Applied delta 0 — live now equals the backup.
+                "written_sha256": backup_hash,
+                "excluded_reason": reason,
+            }
 
     provenance_path: str | None = None
-    if objects_written:
+    if objects_written or objects_reverted:
         provenance["meshes"][tile] = _mesh_signature(mesh_path)
         provenance_path = _provenance_path(pack_root)
         with open(provenance_path, "w") as handle:
@@ -645,6 +843,11 @@ def apply(
     written_set = set(objects_written)
     structures_baked = 0
     for structure in decision.structures:
+        if structure.skip_reason:
+            # A skipped structure's resource may still have been written
+            # for its OTHER structures (amendment A21) — the skipped one
+            # carried no delta and did not bake.
+            continue
         contributing = {
             resource_path
             for resource_path, triangles in (
@@ -663,6 +866,9 @@ def apply(
         skipped=skipped,
         orphaned_backups=orphaned_backups,
         provenance_path=provenance_path,
+        objects_reverted=objects_reverted,
+        reversions_missing_backup=reversions_missing_backup,
+        partially_baked=partially_baked,
     )
 
 

@@ -1359,3 +1359,31 @@ plan section 4.3) with the full safety kit — DSF backup, provenance hashes, by
 re-derivation from the backup, ``--restore`` — behind a default-off flag
 (``O4_DSF_OBJECT_NORMALIZE_ELEVATION_MODE``), soak-tested per pack. Queued with A17 and the hinge
 cut; pull forward only if the un-bakeable ±1 m residue proves visually significant in-sim.
+
+### A21 — Per-structure baking within a partially-skipped resource *(2026-07-16 KBNA calibration)*
+
+Amendment A19's resource-level visibility entry ("N structure(s) skipped (others baked)") landed
+in ``RebakeDecision.skipped``, and ``object_rebake.apply`` refuses every resource listed there —
+so ONE tiny structure tripping the A3 residual guard un-baked its whole resource. Real case:
+``KBNA_Terminal-part13``/``part33`` in "US-KBNA Nashville Airport" are each one huge terminal
+structure (thousands of vertices, delta well-determined) plus 1–3 tiny detached pieces; a ~2 mm A3
+loss on a tiny piece left the whole terminal floating (then reverted-to-authored by the exclusion
+reversion pass — correct, but strictly worse than baking the good structures). 26 of the KBNA
+pack's resources were in this state.
+
+Fix: baking is per STRUCTURE. ``structure_deltas`` already computes deltas per (structure,
+object) and writes none for a skipped structure, so ``delta_by_resource_and_vertex`` is exactly
+the partial bake; the aggregation now lists a resource in ``skipped`` only when EVERY structure
+carrying it was skipped (resource-level refusals — I-9, I-13 anchor, I-4 — are unchanged).
+``apply`` bakes the passing structures' vertices from ``.anchor_bak`` as always — the skipped
+structures' vertices simply carry no delta and keep their authored y — and byte-idempotence
+(I-15) holds unchanged. Positional commands inside a skipped structure's box take offset 0
+(authored); an ``ANIM`` block spanning a skipped and a baked structure still refuses the resource
+(differing offsets, I-11).
+
+Visibility moves with the bake: the report gains ``partially_baked`` (resource, summary), the
+per-airport console line counts them, and the provenance sidecar entry of a partially-baked
+object records each skipped structure (centroid, surface area, reason) under
+``structures_skipped`` — per-resource entries carry per-structure detail. ``structures_baked``
+no longer counts a skipped structure whose resource was written for its siblings. Multi-placement
+refusal (I-4) is untouched: it is resource-level and upstream of pooling.

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import shutil
@@ -758,3 +759,311 @@ def test_non_finite_offset_is_refused(tmp_path):
     assert any(
         "non-finite" in reason for _resource, reason in report.skipped
     )
+
+
+# ---------------------------------------------------------------------------
+# reversion — the live pack always reflects the current decision
+# ---------------------------------------------------------------------------
+
+EXCLUDED_RESOURCE = "Objects/excluded.obj"
+
+
+def _two_resource_bake_decision() -> RebakeDecision:
+    """Bake box A of BOTH resources — the round-1 state where every
+    object carries a live bake and provenance records it."""
+    return RebakeDecision(
+        structures=[
+            _structure_over([(0, 1, 2), (0, 2, 3)], BOX_RESOURCE),
+            _structure_over([(0, 1, 2), (0, 2, 3)], EXCLUDED_RESOURCE),
+        ],
+        delta_by_resource_and_vertex={
+            BOX_RESOURCE: {index: 2.5 for index in range(4)},
+            EXCLUDED_RESOURCE: {index: 3.0 for index in range(4)},
+        },
+        anchor_ground_by_resource={
+            BOX_RESOURCE: 100.0,
+            EXCLUDED_RESOURCE: 166.46,
+        },
+        skipped=[],
+    )
+
+
+def _excludes_second_resource_decision() -> RebakeDecision:
+    """Round 2: only BOX_RESOURCE bakes; EXCLUDED_RESOURCE is skipped
+    (present in the decision's scope, but carries no delta)."""
+    return RebakeDecision(
+        structures=[_structure_over([(0, 1, 2), (0, 2, 3)], BOX_RESOURCE)],
+        delta_by_resource_and_vertex={
+            BOX_RESOURCE: {index: 2.5 for index in range(4)}
+        },
+        anchor_ground_by_resource={BOX_RESOURCE: 100.0},
+        skipped=[
+            (
+                EXCLUDED_RESOURCE,
+                "single-offset correction would worsen the seating "
+                "(amendment A3)",
+            )
+        ],
+    )
+
+
+def _bake_both(tmp_path):
+    pack_root, mesh_path = _make_pack(
+        tmp_path,
+        {
+            BOX_RESOURCE: _two_box_object_text(),
+            EXCLUDED_RESOURCE: _two_box_object_text(),
+        },
+    )
+    apply(_two_resource_bake_decision(), pack_root, mesh_path)
+    return pack_root, mesh_path
+
+
+def test_excluded_object_with_live_bake_is_reverted(tmp_path):
+    pack_root, mesh_path = _bake_both(tmp_path)
+    excluded_live = _live_path(pack_root, EXCLUDED_RESOURCE)
+    excluded_backup = _backup_path(pack_root, EXCLUDED_RESOURCE)
+    # Round 1 left a real live bake and a stale anchor_ground (166.46).
+    assert _read_bytes(excluded_live) != _read_bytes(excluded_backup)
+
+    included_baked_bytes = _read_bytes(_live_path(pack_root))
+    report = apply(
+        _excludes_second_resource_decision(), pack_root, mesh_path
+    )
+
+    assert report.objects_reverted == [EXCLUDED_RESOURCE]
+    assert report.reversions_missing_backup == []
+    # The excluded object is byte-exactly its authored original again.
+    assert _read_bytes(excluded_live) == _read_bytes(excluded_backup)
+    # The included object is untouched by the reversion pass.
+    assert _read_bytes(_live_path(pack_root)) == included_baked_bytes
+
+    with open(os.path.join(pack_root, PROVENANCE_FILENAME)) as handle:
+        provenance = json.load(handle)
+    entry = provenance["objects"][EXCLUDED_RESOURCE]
+    # Applied delta 0: written == backup.
+    assert entry["written_sha256"] == entry["backup_sha256"]
+    assert entry["backup_sha256"] == _sha256_of(excluded_backup)
+    # The stale anchor_ground did NOT survive the exclusion.
+    assert entry["anchor_ground_m"] is None
+    assert "amendment A3" in entry["excluded_reason"]
+    # The still-baked object keeps its honest baked provenance.
+    box_entry = provenance["objects"][BOX_RESOURCE]
+    assert box_entry["written_sha256"] != box_entry["backup_sha256"]
+
+
+def test_excluded_object_missing_backup_reports_and_never_writes(
+    tmp_path, caplog
+):
+    pack_root, mesh_path = _bake_both(tmp_path)
+    excluded_live = _live_path(pack_root, EXCLUDED_RESOURCE)
+    baked_bytes = _read_bytes(excluded_live)
+    # The backup is gone but the live file still carries the bake and
+    # provenance still records it: reversion must NOT guess.
+    os.remove(_backup_path(pack_root, EXCLUDED_RESOURCE))
+
+    with caplog.at_level(logging.WARNING):
+        report = apply(
+            _excludes_second_resource_decision(), pack_root, mesh_path
+        )
+
+    assert report.objects_reverted == []
+    assert report.reversions_missing_backup == [EXCLUDED_RESOURCE]
+    # The live file was not touched — no backup means no write.
+    assert _read_bytes(excluded_live) == baked_bytes
+    assert any(
+        "missing" in record.getMessage()
+        and "excluded.obj" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_revert_gate_off_keeps_the_stale_bake(tmp_path, monkeypatch):
+    monkeypatch.setenv("O4_OBJECT_REBAKE_REVERT_EXCLUDED", "0")
+    pack_root, mesh_path = _bake_both(tmp_path)
+    excluded_live = _live_path(pack_root, EXCLUDED_RESOURCE)
+    excluded_backup = _backup_path(pack_root, EXCLUDED_RESOURCE)
+    stale_bytes = _read_bytes(excluded_live)
+
+    report = apply(
+        _excludes_second_resource_decision(), pack_root, mesh_path
+    )
+
+    assert report.objects_reverted == []
+    # Old keep-stale behaviour: the excluded object still floats.
+    assert _read_bytes(excluded_live) == stale_bytes
+    assert _read_bytes(excluded_live) != _read_bytes(excluded_backup)
+
+
+def test_untouched_object_is_not_reverted(tmp_path):
+    """An excluded object that never carried a bake (live == backup) is
+    left entirely alone — reversion only undoes real live bakes."""
+    pack_root, mesh_path = _make_pack(
+        tmp_path,
+        {
+            BOX_RESOURCE: _two_box_object_text(),
+            EXCLUDED_RESOURCE: _two_box_object_text(),
+        },
+    )
+    # Give the excluded resource a pristine backup equal to its live file
+    # (no bake ever applied), and no provenance entry.
+    shutil.copy2(
+        _live_path(pack_root, EXCLUDED_RESOURCE),
+        _backup_path(pack_root, EXCLUDED_RESOURCE),
+    )
+    pristine_bytes = _read_bytes(_live_path(pack_root, EXCLUDED_RESOURCE))
+
+    report = apply(
+        _excludes_second_resource_decision(), pack_root, mesh_path
+    )
+
+    assert report.objects_reverted == []
+    assert report.reversions_missing_backup == []
+    assert _read_bytes(
+        _live_path(pack_root, EXCLUDED_RESOURCE)
+    ) == pristine_bytes
+
+
+# ---------------------------------------------------------------------------
+# amendment A21 — per-structure baking within a partially-skipped resource
+# ---------------------------------------------------------------------------
+
+PARTIAL_SKIP_REASON = (
+    "single-offset correction would worsen the seating: mean ground-part "
+    "residual 0.481 m corrected vs 0.479 m uncorrected over 2 "
+    "ground-touching part(s) — left unbaked (amendment A3)"
+)
+
+
+def _partial_two_box_decision(
+    resource_path: str = BOX_RESOURCE,
+) -> RebakeDecision:
+    """Box A (vertices 0-3) bakes with ``BOX_A_DELTA``; box B (vertices
+    4-7) is a SKIPPED structure of the SAME resource — it carries a
+    ``skip_reason`` and no deltas, exactly what ``structure_deltas``
+    produces for the KBNA_Terminal-part13 case (one huge passing
+    structure plus a tiny amendment-A3 refusal)."""
+    baked_structure = _structure_over([(0, 1, 2), (0, 2, 3)], resource_path)
+    skipped_structure = Structure(
+        triangles_by_resource={resource_path: [(4, 5, 6), (4, 6, 7)]},
+        surface_area_square_metres=7.5,
+        centroid_latitude=35.209,
+        centroid_longitude=-80.931,
+        minimum_base_y_by_resource={resource_path: 0.0},
+        is_ground_touching=True,
+        ground_span_metres=0.1,
+        needs_pad=False,
+        skip_reason=PARTIAL_SKIP_REASON,
+        inherited_from_structure_index=None,
+    )
+    return RebakeDecision(
+        structures=[baked_structure, skipped_structure],
+        delta_by_resource_and_vertex={
+            resource_path: {index: BOX_A_DELTA for index in range(4)}
+        },
+        anchor_ground_by_resource={resource_path: 219.83},
+        skipped=[],
+    )
+
+
+def test_partially_skipped_resource_bakes_only_passing_structures(tmp_path):
+    pack_root, mesh_path = _make_pack(
+        tmp_path, {BOX_RESOURCE: _two_box_object_text()}
+    )
+    report = apply(_partial_two_box_decision(), pack_root, mesh_path)
+
+    assert report.objects_written == [BOX_RESOURCE]
+    assert report.vertices_offset_total == 4
+    # The skipped structure never counts as baked, even though its
+    # resource was written for its sibling.
+    assert report.structures_baked == 1
+    assert report.skipped == []
+    assert report.objects_reverted == []
+    assert len(report.partially_baked) == 1
+    partial_resource, partial_summary = report.partially_baked[0]
+    assert partial_resource == BOX_RESOURCE
+    assert "1 structure(s)" in partial_summary
+    assert "amendment A3" in partial_summary
+
+    # Box A's vertices moved by its delta; box B's are byte-identical
+    # to the authored original.
+    backup_lines = _read_bytes(_backup_path(pack_root)).decode().split("\n")
+    live_lines = _read_bytes(_live_path(pack_root)).decode().split("\n")
+    assert len(backup_lines) == len(live_lines)
+    vertex_row = 0
+    for backup_line, live_line in zip(backup_lines, live_lines):
+        backup_tokens = backup_line.split()
+        if not backup_tokens or backup_tokens[0] != "VT":
+            assert live_line == backup_line
+            continue
+        if vertex_row < 4:
+            live_tokens = live_line.split()
+            assert float(live_tokens[2]) == pytest.approx(
+                float(backup_tokens[2]) + BOX_A_DELTA
+            )
+        else:
+            assert live_line == backup_line
+        vertex_row += 1
+    assert vertex_row == 8
+
+    # The provenance entry carries per-structure detail for the skips.
+    with open(os.path.join(pack_root, PROVENANCE_FILENAME)) as handle:
+        provenance = json.load(handle)
+    entry = provenance["objects"][BOX_RESOURCE]
+    assert entry["written_sha256"] != entry["backup_sha256"]
+    detail = entry["structures_skipped"]
+    assert len(detail) == 1
+    assert detail[0]["reason"] == PARTIAL_SKIP_REASON
+    assert detail[0]["centroid_latitude"] == pytest.approx(35.209)
+    assert detail[0]["centroid_longitude"] == pytest.approx(-80.931)
+    assert detail[0]["surface_area_square_metres"] == pytest.approx(7.5)
+
+
+def test_partial_bake_is_byte_idempotent(tmp_path):
+    pack_root, mesh_path = _make_pack(
+        tmp_path, {BOX_RESOURCE: _two_box_object_text()}
+    )
+    apply(_partial_two_box_decision(), pack_root, mesh_path)
+    first_bytes = _read_bytes(_live_path(pack_root))
+    report = apply(_partial_two_box_decision(), pack_root, mesh_path)
+    assert _read_bytes(_live_path(pack_root)) == first_bytes
+    assert report.objects_written == [BOX_RESOURCE]
+    assert report.partially_baked and (
+        report.partially_baked[0][0] == BOX_RESOURCE
+    )
+
+
+def test_full_bake_then_partial_rebake_unbakes_the_skipped_structure(
+    tmp_path,
+):
+    """Round 1 baked BOTH boxes; round 2's decision skips box B.  The
+    rewrite always reads from ``.anchor_bak``, so box B's vertices return
+    to their authored y while box A stays baked — no reversion pass
+    involved (the resource is still written)."""
+    pack_root, mesh_path = _make_pack(
+        tmp_path, {BOX_RESOURCE: _two_box_object_text()}
+    )
+    apply(_two_box_decision(), pack_root, mesh_path)
+
+    report = apply(_partial_two_box_decision(), pack_root, mesh_path)
+    assert report.objects_written == [BOX_RESOURCE]
+    assert report.objects_reverted == []
+
+    backup_lines = _read_bytes(_backup_path(pack_root)).decode().split("\n")
+    live_lines = _read_bytes(_live_path(pack_root)).decode().split("\n")
+    vertex_row = 0
+    for backup_line, live_line in zip(backup_lines, live_lines):
+        backup_tokens = backup_line.split()
+        if not backup_tokens or backup_tokens[0] != "VT":
+            continue
+        live_tokens = live_line.split()
+        if vertex_row < 4:
+            assert float(live_tokens[2]) == pytest.approx(
+                float(backup_tokens[2]) + BOX_A_DELTA
+            )
+        else:
+            # Box B carried BOX_B_DELTA after round 1; the partial
+            # rebake returned it to the authored original.
+            assert live_line == backup_line
+        vertex_row += 1
+    assert vertex_row == 8

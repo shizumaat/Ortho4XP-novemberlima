@@ -45,9 +45,11 @@ full detail goes to verbosity level 2, plus the "restart X-Plane
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
+import pickle
 
 import O4_UI_Utils as UI
 
@@ -79,6 +81,8 @@ _COUNT_KEYS = (
     "structures_needing_pad",
     "vertices_offset",
     "objects_skipped",
+    "objects_reverted",
+    "objects_partially_baked",
     "airports_failed",
     "foot_pad_requests",
 )
@@ -211,6 +215,110 @@ def _pool_world_bounds(
     )
 
 
+# Bump when partition_structures' output shape or semantics change, or
+# when anything new starts feeding the partition (the pickle payload and
+# the hash must both change meaning together).
+_PARTITION_CACHE_VERSION = 1
+
+
+def _cached_partition_structures(
+    pool,
+    geometry_by_resource,
+    geometry_source_by_resource,
+    pack_root,
+    epsilon_metres,
+):
+    """``object_anchor.partition_structures`` behind a pack sidecar cache.
+
+    The partition is a pure function of the pool's placements and the
+    authored OBJ8 geometry (module contract in ``object_anchor``): it
+    never touches the mesh or DEM, yet dominated the whole post-mesh
+    rebake (profiled 2026-07-15: 195 s of 385 s at KBNA) and reruns on
+    every mesh build.  Cached per pool under
+    ``Airport_mod_cache/<pack>/`` (the ruling-established home for
+    Ortho4XP-only sidecars).
+
+    The key is a CONTENT hash — placements plus the bytes of each
+    geometry source file (the ``.anchor_bak`` original when present,
+    ruling R1) — not a size/mtime fingerprint: the rebake itself
+    rewrites pack ``.obj`` files every run, so mtimes churn while the
+    partition inputs stay identical.  ``object_anchor`` stays pure; the
+    file input/output lives here with the rest of Phase 2's disk work.
+    ``O4_OBJECT_PARTITION_CACHE=0`` disables.  Cache misses (corrupt or
+    version-skewed files included) silently recompute.
+    """
+    cache_directory = dsf_reader.airport_mod_cache_dir(pack_root)
+    if (
+        cache_directory is None
+        or os.environ.get("O4_OBJECT_PARTITION_CACHE", "1") != "1"
+    ):
+        return object_anchor.partition_structures(
+            pool, geometry_by_resource, epsilon_metres=epsilon_metres
+        )
+
+    from .config import DSF_OBJECT_ELEVATED_BASE_M
+
+    digest = hashlib.sha1()
+    digest.update(
+        repr(
+            (
+                _PARTITION_CACHE_VERSION,
+                epsilon_metres,
+                DSF_OBJECT_ELEVATED_BASE_M,
+            )
+        ).encode()
+    )
+    for placement in pool.placements:
+        digest.update(repr(placement).encode())
+    for resource_path in sorted(
+        {placement.resource_path for placement in pool.placements}
+    ):
+        source_path = geometry_source_by_resource.get(resource_path)
+        if source_path is None:
+            continue
+        digest.update(resource_path.encode())
+        try:
+            with open(source_path, "rb") as handle:
+                digest.update(handle.read())
+        except OSError:
+            # Unreadable source — do not risk a stale key; skip caching.
+            return object_anchor.partition_structures(
+                pool, geometry_by_resource, epsilon_metres=epsilon_metres
+            )
+    cache_path = os.path.join(
+        cache_directory,
+        "o4_object_partition_%s.cache" % digest.hexdigest()[:16],
+    )
+
+    if os.path.isfile(cache_path):
+        try:
+            with open(cache_path, "rb") as handle:
+                payload = pickle.load(handle)
+            if payload.get("version") == _PARTITION_CACHE_VERSION:
+                return payload["structures"]
+        except Exception:
+            pass  # corrupt/unreadable cache — recompute below
+
+    structures = object_anchor.partition_structures(
+        pool, geometry_by_resource, epsilon_metres=epsilon_metres
+    )
+    try:
+        os.makedirs(cache_directory, exist_ok=True)
+        temporary_path = cache_path + ".tmp"
+        with open(temporary_path, "wb") as handle:
+            pickle.dump(
+                {
+                    "version": _PARTITION_CACHE_VERSION,
+                    "structures": structures,
+                },
+                handle,
+            )
+        os.replace(temporary_path, cache_path)
+    except OSError:
+        pass  # caching is best-effort; the result is already computed
+    return structures
+
+
 def discover_and_rebake_airport(
     dsf_path: str,
     mesh_path: str,
@@ -275,6 +383,13 @@ def discover_and_rebake_airport(
         "decisions": [],
         # object_anchor.FootPadRequest instances, all pools merged.
         "foot_pad_requests": [],
+        # Objects un-baked because they are excluded from the current
+        # decision but still carried a stale live bake (reversion pass).
+        "objects_reverted": [],
+        "reversions_missing_backup": [],
+        # Objects written with SOME structures left unbaked (amendment
+        # A21): (resource_path, summary) pairs from the rebake report.
+        "partially_baked": [],
     }
 
     lines = dsf_reader._load_dsf_text(dsf_path)
@@ -345,6 +460,7 @@ def discover_and_rebake_airport(
 
     resolved_paths: dict[str, str] = {}
     geometry_by_resource: dict = {}
+    geometry_source_by_resource: dict[str, str] = {}
     for resource_path in sorted(
         {placement.resource_path for placement in placements}
     ):
@@ -419,6 +535,7 @@ def discover_and_rebake_airport(
             continue
         resolved_paths[resource_path] = physical_path
         geometry_by_resource[resource_path] = geometry
+        geometry_source_by_resource[resource_path] = geometry_source_path
     if not resolved_paths:
         return result
 
@@ -453,10 +570,12 @@ def discover_and_rebake_airport(
                     )
                 )
             continue
-        structures = object_anchor.partition_structures(
+        structures = _cached_partition_structures(
             pool,
             pool_geometry_by_resource,
-            epsilon_metres=epsilon_metres,
+            geometry_source_by_resource,
+            pack_root,
+            epsilon_metres,
         )
         decision = object_anchor.structure_deltas(
             pool, pool_geometry_by_resource, structures, sampler
@@ -472,6 +591,11 @@ def discover_and_rebake_airport(
                 report.structures_needing_pad
             )
             result["skipped"].extend(report.skipped)
+            result["objects_reverted"].extend(report.objects_reverted)
+            result["reversions_missing_backup"].extend(
+                report.reversions_missing_backup
+            )
+            result["partially_baked"].extend(report.partially_baked)
         else:
             result["structures_baked"] += sum(
                 1
@@ -482,6 +606,27 @@ def discover_and_rebake_airport(
                 1 for structure in decision.structures if structure.needs_pad
             )
             result["skipped"].extend(decision.skipped)
+            # Amendment A21 parity with the write path: resources that
+            # WOULD bake only their passing structures.
+            for resource_path in sorted(
+                decision.delta_by_resource_and_vertex
+            ):
+                resource_skipped = [
+                    structure
+                    for structure in decision.structures
+                    if structure.skip_reason
+                    and resource_path in structure.triangles_by_resource
+                ]
+                if resource_skipped:
+                    result["partially_baked"].append(
+                        (
+                            resource_path,
+                            f"{len(resource_skipped)} structure(s) would "
+                            "stay at their authored y (skipped), passing "
+                            "structures bake; first reason: "
+                            + resource_skipped[0].skip_reason,
+                        )
+                    )
     return result
 
 
@@ -604,6 +749,32 @@ def rebake_dsf_objects(tile) -> dict:
             ]
             counts["vertices_offset"] += airport_result["vertices_offset"]
             counts["objects_skipped"] += len(airport_result["skipped"])
+            counts["objects_reverted"] += len(
+                airport_result["objects_reverted"]
+            )
+            counts["objects_partially_baked"] += len(
+                airport_result["partially_baked"]
+            )
+            for resource_path, summary in airport_result["partially_baked"]:
+                UI.vprint(
+                    2,
+                    f"  [object-anchor] {icao}: partially baked "
+                    f"{resource_path} — {summary}",
+                )
+            for resource_path in airport_result["objects_reverted"]:
+                UI.vprint(
+                    1,
+                    f"  [object-anchor] {icao}: reverted {resource_path} "
+                    "to its authored placement (excluded from the current "
+                    "decision; stale live bake removed)",
+                )
+            for resource_path in airport_result["reversions_missing_backup"]:
+                UI.vprint(
+                    0,
+                    f"  [object-anchor] {icao}: {resource_path} is "
+                    "excluded and still carries a stale bake but its "
+                    ".anchor_bak is missing — left untouched, NOT reverted",
+                )
             counts["foot_pad_requests"] += len(
                 airport_result["foot_pad_requests"]
             )
@@ -679,10 +850,19 @@ def rebake_dsf_objects(tile) -> dict:
                         f", {len(airport_result['skipped'])} skipped"
                         if airport_result["skipped"]
                         else ""
+                    )
+                    + (
+                        f", {len(airport_result['partially_baked'])} "
+                        "partially baked"
+                        if airport_result["partially_baked"]
+                        else ""
                     ),
                 )
             if (
-                airport_result["objects_written"]
+                (
+                    airport_result["objects_written"]
+                    or airport_result["objects_reverted"]
+                )
                 and pack_root not in corrected_pack_roots
             ):
                 corrected_pack_roots.add(pack_root)

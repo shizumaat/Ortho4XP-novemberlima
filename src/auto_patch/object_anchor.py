@@ -178,7 +178,14 @@ class RebakeDecision:
     structures: list[Structure]
     delta_by_resource_and_vertex: dict[str, dict[int, float]]
     anchor_ground_by_resource: dict[str, float]
-    skipped: list[tuple[str, str]]  # (resource_path, reason)
+    # (resource_path, reason) for resources that must not be baked AT
+    # ALL: ``object_rebake.apply`` refuses every resource listed here.
+    # A resource where only SOME structures were skipped is not listed —
+    # its passing structures' deltas are in
+    # ``delta_by_resource_and_vertex`` and bake normally (amendment
+    # A21); the skipped structures keep their ``skip_reason`` in
+    # ``structures``, which is where per-structure detail comes from.
+    skipped: list[tuple[str, str]]
     # Amendment A13: (latitude, longitude, heading_degrees) per resource,
     # so the provenance sidecar can record each object's anchor on fresh
     # bakes (workstream W5's escalation: ``apply`` has no placements).
@@ -762,7 +769,10 @@ def structure_deltas(
     exceeds the mean uncorrected residual
     ``|ground(anchor) + base_y − ground(part)|``, correction would
     worsen the seating and the structure is skipped with both numbers in
-    ``skip_reason``.
+    ``skip_reason``.  A skip is per STRUCTURE, never per resource
+    (amendment A21): a resource whose other structures pass still bakes
+    those structures' deltas, and only lands in ``skipped`` when every
+    structure carrying it was skipped.
 
     Foot re-anchor (``DSF_OBJECT_FOOT_ANCHOR``, project memory
     kbna-gantry-pond-multi-foot-objects): a structure the absolute
@@ -1361,7 +1371,12 @@ def structure_deltas(
     # Amendment A19: structure-level skips must be VISIBLE at the
     # resource level.  Forty-nine HECA resources vanished from the bake
     # because every structure carrying their geometry was skipped and
-    # nothing said so.  One aggregated entry per affected resource.
+    # nothing said so.  One aggregated entry per affected resource — but
+    # ONLY for resources left with no delta at all (amendment A21): a
+    # resource whose OTHER structures baked stays out of ``skipped``
+    # (``object_rebake.apply`` refuses everything listed there), bakes
+    # the passing structures' deltas, and surfaces its per-structure
+    # skips through the report and the provenance sidecar instead.
     skip_count_by_resource: dict[str, int] = {}
     first_skip_reason_by_resource: dict[str, str] = {}
     for updated_structure in updated_structures:
@@ -1375,18 +1390,14 @@ def structure_deltas(
                 resource_path, updated_structure.skip_reason
             )
     for resource_path in sorted(skip_count_by_resource):
+        if resource_path in delta_by_resource_and_vertex:
+            continue
         count = skip_count_by_resource[resource_path]
-        fully_unbaked = resource_path not in delta_by_resource_and_vertex
         skipped.append(
             (
                 resource_path,
-                (
-                    f"ALL {count} structure(s) carrying this resource "
-                    "were skipped — resource left unbaked"
-                    if fully_unbaked
-                    else f"{count} structure(s) skipped (others baked)"
-                )
-                + f"; first reason: "
+                f"ALL {count} structure(s) carrying this resource "
+                "were skipped — resource left unbaked; first reason: "
                 + first_skip_reason_by_resource[resource_path],
             )
         )

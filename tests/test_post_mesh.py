@@ -196,6 +196,17 @@ class Harness:
     pass
 
 
+@pytest.fixture(autouse=True)
+def sandbox_ortho4xp_data_root(tmp_path, monkeypatch):
+    """The partition sidecar cache lands under the Ortho4XP data root
+    (``Airport_mod_cache/<pack>/``), which in a source checkout resolves
+    to the current working directory — without this pin the tests here
+    would write ``Airport_mod_cache/`` into the repository (same sandbox
+    as test_dsf_object_buildings.py)."""
+    monkeypatch.setenv(
+        "ORTHO4XP_DATA_ROOT", str(tmp_path / "o4_data_root"))
+
+
 @pytest.fixture()
 def phase_two_harness(tmp_path, monkeypatch):
     """A fake tile, a synthetic mesh at ``FNAMES.mesh_file(...)``, a
@@ -364,6 +375,106 @@ def test_idempotent_through_the_full_path(phase_two_harness):
     assert backup_after_first_run == backup_after_second_run
     assert first_counts["structures_baked"] == 1
     assert second_counts["structures_baked"] == 1
+
+
+def test_idempotent_rerun_does_not_touch_the_live_file(phase_two_harness):
+    """A byte-identical re-bake must not REWRITE the live ``.obj`` — the
+    old unconditional write churned mtimes, invalidating every
+    mtime-fingerprinted pack sidecar (classification, footprints, road
+    network) and X-Plane's object cache on every mesh build."""
+    harness = phase_two_harness
+    dsf_path, pack_root = _make_pack(
+        harness.tmp_path, "Fake Pack", SINGLE_PLACEMENT_DSF_BODY,
+        {"objects/offset_bake.obj": OFFSET_SLAB_OBJECT})
+    harness.write_worklist(
+        [harness.worklist_entry("KTST", dsf_path, pack_root)])
+    live_path = os.path.join(pack_root, "objects", "offset_bake.obj")
+
+    post_mesh.rebake_dsf_objects(harness.tile)
+    backdated = os.path.getmtime(live_path) - 1000.0
+    os.utime(live_path, (backdated, backdated))
+
+    post_mesh.rebake_dsf_objects(harness.tile)
+    assert os.path.getmtime(live_path) == pytest.approx(backdated), (
+        "identical re-bake rewrote the live file (mtime churn)")
+
+
+# ── partition sidecar cache (Airport_mod_cache/<pack>/) ─────────────
+
+
+def test_partition_cache_serves_second_run_and_content_invalidates(
+        phase_two_harness, monkeypatch):
+    """Run 2 takes its partition from the pack sidecar cache (the
+    partition is pure pack geometry — 2026-07-15 profile put it at 195 s
+    of the 385 s KBNA rebake) and bakes identically; changing the
+    geometry SOURCE bytes invalidates the content-hash key."""
+    harness = phase_two_harness
+    dsf_path, pack_root = _make_pack(
+        harness.tmp_path, "Fake Pack", SINGLE_PLACEMENT_DSF_BODY,
+        {"objects/offset_bake.obj": OFFSET_SLAB_OBJECT})
+    harness.write_worklist(
+        [harness.worklist_entry("KTST", dsf_path, pack_root)])
+    live_path = os.path.join(pack_root, "objects", "offset_bake.obj")
+
+    partition_calls = []
+    real_partition = post_mesh.object_anchor.partition_structures
+
+    def counting_partition(*args, **kwargs):
+        partition_calls.append(1)
+        return real_partition(*args, **kwargs)
+
+    monkeypatch.setattr(
+        post_mesh.object_anchor, "partition_structures",
+        counting_partition)
+
+    first_counts = post_mesh.rebake_dsf_objects(harness.tile)
+    assert first_counts["structures_baked"] == 1
+    assert len(partition_calls) == 1
+    with open(live_path, "rb") as handle:
+        live_after_first_run = handle.read()
+
+    second_counts = post_mesh.rebake_dsf_objects(harness.tile)
+    assert second_counts["structures_baked"] == 1
+    assert len(partition_calls) == 1  # served from the sidecar cache
+    with open(live_path, "rb") as handle:
+        assert handle.read() == live_after_first_run
+
+    # Content invalidation: the geometry source after run 1 is the
+    # ``.anchor_bak`` original (ruling R1) — rewriting it with different
+    # bytes must recompute the partition, not serve the stale entry.
+    backup_path = live_path + ".anchor_bak"
+    with open(backup_path) as handle:
+        original = handle.read()
+    with open(backup_path, "w") as handle:
+        handle.write(original + "# trailing comment changes the bytes\n")
+    post_mesh.rebake_dsf_objects(harness.tile)
+    assert len(partition_calls) == 2
+
+
+def test_partition_cache_disabled_by_environment_flag(
+        phase_two_harness, monkeypatch):
+    monkeypatch.setenv("O4_OBJECT_PARTITION_CACHE", "0")
+    harness = phase_two_harness
+    dsf_path, pack_root = _make_pack(
+        harness.tmp_path, "Fake Pack", SINGLE_PLACEMENT_DSF_BODY,
+        {"objects/offset_bake.obj": OFFSET_SLAB_OBJECT})
+    harness.write_worklist(
+        [harness.worklist_entry("KTST", dsf_path, pack_root)])
+
+    partition_calls = []
+    real_partition = post_mesh.object_anchor.partition_structures
+
+    def counting_partition(*args, **kwargs):
+        partition_calls.append(1)
+        return real_partition(*args, **kwargs)
+
+    monkeypatch.setattr(
+        post_mesh.object_anchor, "partition_structures",
+        counting_partition)
+
+    post_mesh.rebake_dsf_objects(harness.tile)
+    post_mesh.rebake_dsf_objects(harness.tile)
+    assert len(partition_calls) == 2  # no cache with the flag off
 
 
 # ── multi-ground-cluster foot pads (sidecar) ─────────────────────────

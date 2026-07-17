@@ -41,8 +41,11 @@ and moved the deck box.  The bake belongs after a FINAL mesh only.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import os
+import pickle
 
 import O4_UI_Utils as UI
 
@@ -196,6 +199,61 @@ def _load_object_geometry_by_resource(
     return geometry_by_resource
 
 
+# Bump when ``dsf_road_network.parse_dsf_road_networks`` changes its
+# record shapes — invalidates every road-network sidecar.
+_ROAD_NETWORK_CACHE_VERSION = 1
+
+# Sidecar file name prefix; the full name carries the DSF stem
+# (``o4_dsf_road_network_<dsf-stem>.cache``).  Lives under
+# ``dsf_reader.airport_mod_cache_dir`` — NOT in the roads pack (user
+# ruling 2026-07-15, no Ortho4XP clutter in scenery packs).
+_ROAD_NETWORK_SIDECAR_PREFIX = "o4_dsf_road_network"
+
+# Pre-ruling in-pack sidecar name, removed on sight (legacy cleanup).
+_ROAD_NETWORK_LEGACY_SIDECAR_NAME = "o4_dsf_road_network.cache"
+
+
+def _road_network_sidecar(dsf_path: str) -> tuple[str | None, str | None]:
+    """Sidecar path + fingerprint for one sibling DSF's road network.
+
+    ``parse_dsf_road_networks`` output is a pure function of the DSF text
+    dump, which is itself a pure function of the DSF file, so the
+    fingerprint is just a code version salt plus the DSF's own size and
+    mtime — any layout edit to a roads pack necessarily rewrites the DSF.
+    The sidecar lives under ``dsf_reader.airport_mod_cache_dir`` for that
+    roads pack (user ruling 2026-07-15 — Ortho4XP-only caches stay out of
+    scenery pack folders); a pre-ruling in-pack sidecar found at the pack
+    root is removed here.  Returns ``(None, None)`` when no pack root
+    resolves or the DSF cannot be stat-ed."""
+    pack_root = dsf_reader._pack_root_for_dsf(dsf_path)
+    cache_directory = dsf_reader.airport_mod_cache_dir(pack_root)
+    if cache_directory is None:
+        return None, None
+    # Legacy cleanup: exactly the old filename at the pack root, every
+    # OSError swallowed.
+    try:
+        os.remove(os.path.join(pack_root,
+                               _ROAD_NETWORK_LEGACY_SIDECAR_NAME))
+    except OSError:
+        pass
+    try:
+        dsf_stat = os.stat(dsf_path)
+    except OSError:
+        return None, None
+    fingerprint = (
+        f"{_ROAD_NETWORK_CACHE_VERSION}:{os.path.basename(dsf_path)}"
+        f":{dsf_stat.st_size}:{dsf_stat.st_mtime}"
+    )
+    dsf_stem = os.path.splitext(os.path.basename(dsf_path))[0]
+    return (
+        os.path.join(
+            cache_directory,
+            f"{_ROAD_NETWORK_SIDECAR_PREFIX}_{dsf_stem}.cache",
+        ),
+        fingerprint,
+    )
+
+
 def _discover_sibling_road_networks(
     xplane_root: str, tile_lat: int, tile_lon: int
 ) -> list:
@@ -224,10 +282,52 @@ def _discover_sibling_road_networks(
         dsf_path = _tile_dsf_path(earth_nav_data, tile_lat, tile_lon)
         if not os.path.isfile(dsf_path):
             continue
+
+        # ── Per-DSF road-network sidecar cache (default ON) ──  A hit
+        # skips BOTH the DSFTool text dump (``_load_dsf_text``) and the
+        # parse, the two costs the profile attributes to this discovery.
+        # ``O4_DSF_ROAD_NETWORK_CACHE=0`` disables read and write.
+        cache_enabled = (
+            os.environ.get("O4_DSF_ROAD_NETWORK_CACHE", "1") == "1"
+        )
+        sidecar_path = None
+        fingerprint = None
+        if cache_enabled:
+            import pickle
+            sidecar_path, fingerprint = _road_network_sidecar(dsf_path)
+            if (
+                sidecar_path
+                and fingerprint
+                and os.path.isfile(sidecar_path)
+            ):
+                try:
+                    with open(sidecar_path, "rb") as sidecar_file:
+                        payload = pickle.load(sidecar_file)
+                    if payload.get("fingerprint") == fingerprint:
+                        network = payload["result"]
+                        if network.segments:
+                            networks.append(network)
+                        continue
+                except Exception:
+                    pass
+
         lines = dsf_reader._load_dsf_text(dsf_path)
         if not lines:
             continue
         network = dsf_road_network.parse_dsf_road_networks(lines)
+
+        if sidecar_path is not None and fingerprint is not None:
+            import pickle
+            try:
+                os.makedirs(os.path.dirname(sidecar_path), exist_ok=True)
+                with open(sidecar_path, "wb") as sidecar_file:
+                    pickle.dump(
+                        {"fingerprint": fingerprint, "result": network},
+                        sidecar_file,
+                    )
+            except Exception:
+                pass
+
         if network.segments:
             networks.append(network)
     return networks
@@ -241,10 +341,18 @@ def _discover_sibling_road_networks(
 # the new code path.
 _CLASSIFICATION_CACHE_VERSION = 3
 
-# Sidecar file name inside the airport package (pack-root level; the
-# in-pack precedent is the ``.anchor_bak`` object backups the Phase 2
-# y-bake writes next to each adjusted object).
-_CLASSIFICATION_SIDECAR_NAME = "o4_object_terrain_classification.cache"
+# Sidecar file name prefix; the full name carries the DSF stem
+# (``o4_object_terrain_classification_<dsf-stem>.cache``).  Lives under
+# ``dsf_reader.airport_mod_cache_dir`` — NOT in the airport pack (user
+# ruling 2026-07-15: Ortho4XP-only caches stay out of scenery pack
+# folders; the ``.anchor_bak`` object BACKUPS explicitly stay in-pack
+# next to the files they back up).
+_CLASSIFICATION_SIDECAR_PREFIX = "o4_object_terrain_classification"
+
+# Pre-ruling in-pack sidecar name, removed on sight (legacy cleanup).
+_CLASSIFICATION_LEGACY_SIDECAR_NAME = (
+    "o4_object_terrain_classification.cache"
+)
 
 
 def _classification_sidecar(dsf_path, pack_root, pavement_polygons,
@@ -279,10 +387,23 @@ def _classification_sidecar(dsf_path, pack_root, pavement_polygons,
     across a mesh change — the ``O4_AUTO_PATCH_REBUILD=1`` gotcha class does
     not apply here.
 
-    Returns ``(None, None)`` when no pack root is known (nowhere to put
-    a sidecar) or fingerprinting fails."""
-    if not pack_root or not os.path.isdir(pack_root):
+    The sidecar lives under ``dsf_reader.airport_mod_cache_dir`` (user
+    ruling 2026-07-15 — Ortho4XP-only caches stay out of scenery pack
+    folders); a pre-ruling in-pack sidecar found at the pack root is
+    removed here so the pack stays clean.
+
+    Returns ``(None, None)`` when no pack root is known (nowhere to key
+    a sidecar on) or fingerprinting fails."""
+    cache_directory = dsf_reader.airport_mod_cache_dir(pack_root)
+    if cache_directory is None:
         return None, None
+    # Legacy cleanup: exactly the old filename at the pack root, every
+    # OSError swallowed.
+    try:
+        os.remove(os.path.join(pack_root,
+                               _CLASSIFICATION_LEGACY_SIDECAR_NAME))
+    except OSError:
+        pass
     import hashlib
     digest = hashlib.sha1()
     try:
@@ -327,8 +448,12 @@ def _classification_sidecar(dsf_path, pack_root, pavement_polygons,
             digest.update(b"no-pavement-evidence")
     except OSError:
         return None, None
+    dsf_stem = os.path.splitext(os.path.basename(dsf_path))[0]
     return (
-        os.path.join(pack_root, _CLASSIFICATION_SIDECAR_NAME),
+        os.path.join(
+            cache_directory,
+            f"{_CLASSIFICATION_SIDECAR_PREFIX}_{dsf_stem}.cache",
+        ),
         digest.hexdigest(),
     )
 
@@ -375,8 +500,8 @@ def attach_bridge_classification(layout, xplane_root: str):
     # default ON) ──  The read → load → classify chain is recomputed
     # byte-identically on every build of an unchanged pack.  The
     # FINISHED result (R4 family expansion included) is pickled as a
-    # sidecar INSIDE the airport package — the same in-pack convention
-    # as the ``.anchor_bak`` object backups — guarded by a fingerprint
+    # sidecar under the data root's ``Airport_mod_cache/<pack>/`` (user
+    # ruling 2026-07-15: never inside the pack) guarded by a fingerprint
     # of everything the classification reads: the overlay DSF, every
     # ``.obj`` in the pack (a Phase 2 y-bake rewrite invalidates
     # automatically), the pavement-coverage evidence, and a code
@@ -481,6 +606,7 @@ def attach_bridge_classification(layout, xplane_root: str):
     if sidecar_path is not None and fingerprint is not None:
         import pickle
         try:
+            os.makedirs(os.path.dirname(sidecar_path), exist_ok=True)
             with open(sidecar_path, "wb") as sidecar_file:
                 pickle.dump(
                     {"fingerprint": fingerprint, "result": result},
@@ -565,6 +691,94 @@ def _raw_route_lines_layout_meters(layout) -> list:
     return lines
 
 
+# Bump together with classifier-behavior changes that
+# ``_CLASSIFICATION_CACHE_VERSION`` alone would not capture for the
+# post-mesh exclusion path (both versions salt the exclusion cache key).
+_EXCLUSION_CACHE_VERSION = 1
+
+
+def _cached_exclusion_pairs(
+    pack_root: str,
+    terrain_placements,
+    mean_sea_level_placements,
+    geometry_by_resource,
+    compute,
+) -> set[tuple[str, str]]:
+    """Content-hash sidecar cache for the ruling-R4 exclusion set.
+
+    The set is a pure function of the DSF placements, the loaded OBJ8
+    geometry and the classifier version — never the mesh — yet it was
+    recomputed on every mesh build (profiled 2026-07-15: 46 s of the
+    KBNA rebake, the classifier being the bulk).  Keyed by CONTENT
+    (placements + a digest of each loaded geometry), not file mtimes:
+    the Phase 2 y-bake rewrites pack ``.obj`` files each run, churning
+    mtimes while the classification inputs stay put.  Stored as JSON
+    under ``Airport_mod_cache/<pack>/``.  ``O4_OBJECT_EXCLUSION_CACHE=0``
+    disables; any read problem silently recomputes.
+    """
+    cache_directory = dsf_reader.airport_mod_cache_dir(pack_root)
+    if (
+        cache_directory is None
+        or os.environ.get("O4_OBJECT_EXCLUSION_CACHE", "1") != "1"
+    ):
+        return compute()
+
+    digest = hashlib.sha1()
+    digest.update(
+        repr(
+            (
+                _EXCLUSION_CACHE_VERSION,
+                _CLASSIFICATION_CACHE_VERSION,
+                pack_root,
+            )
+        ).encode()
+    )
+    for placement in terrain_placements:
+        digest.update(repr(placement).encode())
+    digest.update(b"|mean-sea-level|")
+    for placement in mean_sea_level_placements:
+        digest.update(repr(placement).encode())
+    for resource_path in sorted(geometry_by_resource):
+        digest.update(resource_path.encode())
+        digest.update(
+            hashlib.sha1(
+                pickle.dumps(geometry_by_resource[resource_path])
+            ).digest()
+        )
+    cache_path = os.path.join(
+        cache_directory,
+        "o4_object_exclusions_%s.cache" % digest.hexdigest()[:16],
+    )
+
+    if os.path.isfile(cache_path):
+        try:
+            with open(cache_path) as handle:
+                payload = json.load(handle)
+            if payload.get("version") == _EXCLUSION_CACHE_VERSION:
+                return {
+                    (pair[0], pair[1]) for pair in payload["exclusions"]
+                }
+        except Exception:
+            pass  # corrupt/unreadable — recompute below
+
+    exclusions = compute()
+    try:
+        os.makedirs(cache_directory, exist_ok=True)
+        temporary_path = cache_path + ".tmp"
+        with open(temporary_path, "w") as handle:
+            json.dump(
+                {
+                    "version": _EXCLUSION_CACHE_VERSION,
+                    "exclusions": sorted(exclusions),
+                },
+                handle,
+            )
+        os.replace(temporary_path, cache_path)
+    except OSError:
+        pass  # best effort — the set is already computed
+    return exclusions
+
+
 def exclusion_set_for_dsf(
     dsf_path: str,
     xplane_root: str | None,
@@ -629,17 +843,27 @@ def exclusion_set_for_dsf(
     )
     if not geometry_by_resource:
         return set()
-    result = object_terrain_features.classify_object_terrain_features(
+
+    def compute() -> set[tuple[str, str]]:
+        result = object_terrain_features.classify_object_terrain_features(
+            terrain_placements,
+            geometry_by_resource,
+            pavement_polygons_longitude_latitude=None,
+            mean_sea_level_placements=mean_sea_level_placements,
+            pack_root=pack_root or "",
+        )
+        _expand_exclusions_to_anchor_families(
+            result, terrain_placements, pack_root or ""
+        )
+        return set(result.exclusions)
+
+    return _cached_exclusion_pairs(
+        pack_root or "",
         terrain_placements,
+        mean_sea_level_placements,
         geometry_by_resource,
-        pavement_polygons_longitude_latitude=None,
-        mean_sea_level_placements=mean_sea_level_placements,
-        pack_root=pack_root or "",
+        compute,
     )
-    _expand_exclusions_to_anchor_families(
-        result, terrain_placements, pack_root or ""
-    )
-    return set(result.exclusions)
 
 
 def _log_classification_summary(icao, result, road_networks) -> None:

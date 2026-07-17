@@ -191,3 +191,68 @@ def test_real_mesh_vertex_queries_are_self_consistent():
             abs(sampler.elevation_at(latitude, longitude) - elevation_metres)
             < 1e-6
         )
+
+
+# ── parse cache (one full-mesh text parse per (path, mtime, size)) ───
+
+
+def test_parse_cache_shares_one_parse_across_constructions(monkeypatch):
+    """Phase 2 constructs a sampler per object pool against the same
+    tile mesh (~80 constructions at KBNA, 2026-07-15 profile); the
+    module-level parse cache must serve every construction after the
+    first from one parse, and samplers must behave identically."""
+    from auto_patch import mesh_sampler as sampler_module
+
+    monkeypatch.setattr(sampler_module, "_parse_cache_key", None)
+    monkeypatch.setattr(sampler_module, "_parse_cache_arrays", None)
+    parse_calls = []
+    real_read_mesh = MeshElevationSampler._read_mesh
+
+    def counting_read_mesh(mesh_path):
+        parse_calls.append(mesh_path)
+        return real_read_mesh(mesh_path)
+
+    monkeypatch.setattr(
+        MeshElevationSampler, "_read_mesh",
+        staticmethod(counting_read_mesh))
+
+    first = MeshElevationSampler(FIXTURE_MESH_PATH, FIXTURE_BOUNDS)
+    second = MeshElevationSampler(FIXTURE_MESH_PATH, FIXTURE_BOUNDS)
+    assert len(parse_calls) == 1
+    for longitude, latitude, elevation_metres in FIXTURE_VERTICES:
+        assert (
+            first.elevation_at(latitude, longitude)
+            == second.elevation_at(latitude, longitude)
+        )
+
+
+def test_parse_cache_invalidates_when_the_mesh_file_changes(
+        tmp_path, monkeypatch):
+    from auto_patch import mesh_sampler as sampler_module
+
+    monkeypatch.setattr(sampler_module, "_parse_cache_key", None)
+    monkeypatch.setattr(sampler_module, "_parse_cache_arrays", None)
+    mesh_path = tmp_path / "Data+00+000.mesh"
+    with open(FIXTURE_MESH_PATH) as handle:
+        original = handle.read()
+    mesh_path.write_text(original)
+
+    parse_calls = []
+    real_read_mesh = MeshElevationSampler._read_mesh
+
+    def counting_read_mesh(path):
+        parse_calls.append(path)
+        return real_read_mesh(path)
+
+    monkeypatch.setattr(
+        MeshElevationSampler, "_read_mesh",
+        staticmethod(counting_read_mesh))
+
+    MeshElevationSampler(str(mesh_path), FIXTURE_BOUNDS)
+    assert len(parse_calls) == 1
+
+    # Rewrite with different bytes (a rebuilt mesh): size changes, so
+    # the (path, mtime_ns, size) key misses even on coarse filesystems.
+    mesh_path.write_text(original + "\n")
+    MeshElevationSampler(str(mesh_path), FIXTURE_BOUNDS)
+    assert len(parse_calls) == 2

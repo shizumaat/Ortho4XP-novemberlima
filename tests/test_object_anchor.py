@@ -722,6 +722,65 @@ class TestOutsideMeshSkips:
         )
         assert "walker.obj" in decision.anchor_ground_by_resource
 
+    def test_partially_skipped_resource_keeps_its_passing_deltas(
+        self, plane_sampler
+    ):
+        # Amendment A21: ONE resource, TWO structures — a box at the
+        # anchor (bakes) and a box ~500 m east whose centroid falls off
+        # the mesh (skipped).  The resource must NOT land in
+        # ``decision.skipped`` (``object_rebake.apply`` refuses every
+        # resource listed there): the passing structure's deltas bake,
+        # and the skipped structure keeps its ``skip_reason`` for the
+        # per-structure report and provenance detail.
+        geometry = compound_geometry(
+            (0.0, 10.0, 0.0, 5.0, 0.0, 10.0),
+            (495.0, 505.0, 0.0, 5.0, 0.0, 10.0),
+        )
+        placement = make_placement(
+            "partial.obj", PLANE_ANCHOR_LATITUDE, PLANE_ANCHOR_LONGITUDE
+        )
+        geometry_by_resource = {"partial.obj": geometry}
+        pool = ObjectPool(
+            placements=[placement],
+            resolved_paths={"partial.obj": "/nonexistent/partial.obj"},
+        )
+        structures = partition_structures(
+            pool,
+            geometry_by_resource,
+            epsilon_metres=CONTACT_EPSILON_METRES,
+        )
+        assert len(structures) == 2
+        decision = structure_deltas(
+            pool, geometry_by_resource, structures, plane_sampler
+        )
+        skip_reasons = [
+            structure.skip_reason for structure in decision.structures
+        ]
+        assert sum(1 for reason in skip_reasons if reason) == 1
+        assert any(
+            reason and "outside the built mesh" in reason
+            for reason in skip_reasons
+        )
+        # The resource still bakes: no resource-level skip entry ...
+        assert decision.skipped == []
+        # ... and the delta map holds exactly the passing structure's
+        # vertices (8 of the 16 — the skipped box carries no delta).
+        deltas = decision.delta_by_resource_and_vertex["partial.obj"]
+        baked_structure = next(
+            structure
+            for structure in decision.structures
+            if not structure.skip_reason
+        )
+        baked_vertices = {
+            vertex_index
+            for triangle in baked_structure.triangles_by_resource[
+                "partial.obj"
+            ]
+            for vertex_index in triangle
+        }
+        assert set(deltas) == baked_vertices
+        assert len(deltas) == 8
+
     def test_anchor_outside_mesh_skips_every_structure_of_that_object(
         self, plane_sampler
     ):
