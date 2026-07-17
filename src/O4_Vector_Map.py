@@ -15,6 +15,7 @@ import O4_File_Names as FNAMES
 import O4_Geo_Utils as GEO
 import O4_Airport_Utils as APT
 import O4_Airport_Elevation_Insets as INSETS
+import O4_Elevation_Level as ELEVATION_LEVEL
 from auto_patch import driver as AUTOPATCH
 from auto_patch import osm_aeroway as OSMAERO
 import O4_Config_Utils as CFG
@@ -35,8 +36,23 @@ BIG_ROADS_QUERIES = [
     'way["railway"="rail"]',
     'way["railway"="narrow_gauge"]',
 ]
-ROADS_TAGS_OF_INTEREST = ["bridge", "tunnel"]
+# ``width`` / ``lanes`` size the auto-patch tunnel ramps from the mapped
+# carriageway instead of the per-type width table (user 2026-07-16,
+# EGPB: the table's 18 m ``primary`` default tripled the A970's width).
+ROADS_TAGS_OF_INTEREST = ["bridge", "tunnel", "width", "lanes"]
+# Node tags retained on the road ways' child nodes: at-grade
+# level-crossing evidence for the implied-crossing-tunnel veto (user
+# 2026-07-16, EGPB/Gibraltar — the world's few public roads that cross
+# an active runway at grade are mapped with ``aeroway=aircraft_crossing``
+# and barrier gates, and must NOT get a synthetic tunnel).
+ROAD_NODE_TAGS_OF_INTEREST = ["aeroway", "crossing:aircraft", "barrier"]
+# Tag-schema version stamped into the road layer caches.  Bump it when
+# the retained-tag whitelists above grow: caches written under an older
+# schema are re-downloaded once instead of silently recycled without
+# the new tags.
+ROAD_CACHE_TAG_SCHEMA = "2026-07-16"
 COASTLINE_QUERIES = ['way["natural"="coastline"]']
+AIRPORTS_QUERIES = [('node["aeroway"]', 'way["aeroway"]', 'rel["aeroway"]')]
 WATER_QUERIES = [
     'rel["natural"="water"]',
     'rel["waterway"="riverbank"]',
@@ -69,20 +85,37 @@ def _osm_layer_prefetch_specifications(tile):
     specifications = []
     if tile.road_level:
         specifications.append(
-            ("big_roads", BIG_ROADS_QUERIES, ROADS_TAGS_OF_INTEREST))
+            ("big_roads", BIG_ROADS_QUERIES, ROADS_TAGS_OF_INTEREST,
+             ROAD_NODE_TAGS_OF_INTEREST, ROAD_CACHE_TAG_SCHEMA))
     if tile.road_level >= 2:
         specifications.append(
             ("small_roads", small_roads_queries(tile.road_level),
-             ROADS_TAGS_OF_INTEREST))
+             ROADS_TAGS_OF_INTEREST,
+             ROAD_NODE_TAGS_OF_INTEREST, ROAD_CACHE_TAG_SCHEMA))
     if not (os.path.isfile(FNAMES.custom_coastline(tile.lat, tile.lon))
             or os.path.isdir(FNAMES.custom_coastline_dir(tile.lat,
                                                          tile.lon))):
-        specifications.append(("coastline", COASTLINE_QUERIES, []))
+        specifications.append(("coastline", COASTLINE_QUERIES, [], [], ""))
     if not (os.path.isfile(FNAMES.custom_water(tile.lat, tile.lon))
             or os.path.isdir(FNAMES.custom_water_dir(tile.lat, tile.lon))):
         specifications.append(
-            ("water", WATER_QUERIES, WATER_TAGS_OF_INTEREST))
+            ("water", WATER_QUERIES, WATER_TAGS_OF_INTEREST, [], ""))
     return specifications
+
+
+def osm_layer_warm_specifications(tile):
+    """Every OSM layer a build of this tile downloads, airports first.
+
+    Consumed by the parallel-build OSM warmer
+    (docs/specs/parallel-tile-builds.md §3.7), which pre-downloads queued
+    tiles' caches one Overpass request at a time while earlier tiles
+    compute.  Same 5-tuple shape as the prefetch specifications:
+    ``(cached_suffix, queries, tags_of_interest, node_tags_of_interest,
+    cache_schema)``.
+    """
+    return [
+        ("airports", AIRPORTS_QUERIES, ["all"], [], "")
+    ] + _osm_layer_prefetch_specifications(tile)
 
 
 _osm_prefetch_thread = None
@@ -103,11 +136,13 @@ def start_background_osm_prefetch(tile):
     global _osm_prefetch_thread
     wait_for_background_osm_prefetch()  # never two prefetches at once
     specifications = [
-        (cached_suffix, queries, tags_of_interest)
-        for (cached_suffix, queries, tags_of_interest)
-        in _osm_layer_prefetch_specifications(tile)
-        if not os.path.isfile(
-            FNAMES.osm_cached(tile.lat, tile.lon, cached_suffix))
+        specification
+        for specification in _osm_layer_prefetch_specifications(tile)
+        if not (os.path.isfile(
+                    FNAMES.osm_cached(tile.lat, tile.lon, specification[0]))
+                and OSM._cached_osm_schema_matches(
+                    FNAMES.osm_cached(tile.lat, tile.lon, specification[0]),
+                    specification[4]))
     ]
     if not specifications:
         return
@@ -118,7 +153,8 @@ def start_background_osm_prefetch(tile):
     )
 
     def download_missing_layer_caches():
-        for cached_suffix, queries, tags_of_interest in specifications:
+        for (cached_suffix, queries, tags_of_interest,
+                node_tags_of_interest, cache_schema) in specifications:
             if UI.red_flag:
                 return
             # The layer object is discarded: the point is the cache file
@@ -131,6 +167,8 @@ def start_background_osm_prefetch(tile):
                 tile.lon,
                 tags_of_interest,
                 cached_suffix=cached_suffix,
+                node_tags_of_interest=node_tags_of_interest,
+                cache_schema=cache_schema,
             )
 
     _osm_prefetch_thread = threading.Thread(
@@ -174,6 +212,16 @@ def build_poly_file(tile):
         os.makedirs(tile.build_dir)
     if not os.path.exists(FNAMES.osm_dir(tile.lat, tile.lon)):
         os.makedirs(FNAMES.osm_dir(tile.lat, tile.lon))
+
+    # Start the coastal bathymetry band fetch in the background when this
+    # tile will want it: the network fetch then overlaps the vector and
+    # mesh steps instead of serializing in front of the masks step
+    # (docs/specs/coastal-bathymetry-spec.md section 3).  A no-op on
+    # non-coastal tiles and when the mask settings do not call for it.
+    import O4_Bathymetry_Band as BATHYBAND
+
+    BATHYBAND.prefetch_bathymetry_band(tile)
+
     node_file = FNAMES.input_node_file(tile)
     poly_file = FNAMES.input_poly_file(tile)
     vector_map = VECT.Vector_Map()
@@ -315,7 +363,7 @@ def build_poly_file(tile):
 def include_airports(vector_map, tile):
     UI.vprint(0, "-> Dealing with airports")
     airport_layer = OSM.OSM_layer()
-    queries = [('node["aeroway"]', 'way["aeroway"]', 'rel["aeroway"]')]
+    queries = AIRPORTS_QUERIES
     tags_of_interest = ["all"]
     if not OSM.OSM_queries_to_OSM_layer(
         queries,
@@ -351,6 +399,12 @@ def include_airports(vector_map, tile):
     # covers the tile, or GDAL is unavailable. The user's custom_dem config
     # value is never rewritten.
     INSETS.ensure_insets_for_tile(tile, dico_airports)
+    # Tile-wide elevation detail level (docs/specs/elevation-level-spec.md):
+    # fetch the whole-tile overlay for a numeric elevation_level, or the
+    # coastline lidar band for "coastline" (dico_airports feeds its
+    # approach-visibility ladder). No-op -- and a byte-identical build --
+    # on the default "auto".
+    ELEVATION_LEVEL.ensure_tile_overlay(tile, dico_airports)
     dem_source = INSETS.assemble_inset_composite_source(tile, tile.custom_dem)
     tile.dem = DEM.DEM(
         tile.lat,
@@ -364,6 +418,9 @@ def include_airports(vector_map, tile):
     # airport relief through to the mesh. No-op (byte-identical) when no
     # inset covers the tile or the feature is gated off.
     INSETS.densify_tile_dem_for_insets(tile)
+    # The tile-wide overlay is base terrain: bake it BEFORE the airport
+    # smoothing pass (airport insets keep baking last, after smoothing).
+    ELEVATION_LEVEL.bake_tile_overlay_into_alt_dem(tile)
     APT.smooth_raster_over_airports(tile, dico_airports)
     # Auto-generate runway, taxiway, and building patches from CIFP data +
     # OSM geometry (before loading patches so include_patches() picks them up)
@@ -503,6 +560,8 @@ def include_roads(vector_map, tile, apt_array, apt_area):
         tile.lon,
         tags_of_interest,
         cached_suffix="big_roads",
+        node_tags_of_interest=ROAD_NODE_TAGS_OF_INTEREST,
+        cache_schema=ROAD_CACHE_TAG_SCHEMA,
     ):
         return 0
     UI.vprint(1, "    * Checking which large roads need leveling.")
@@ -524,6 +583,8 @@ def include_roads(vector_map, tile, apt_array, apt_area):
             tile.lon,
             tags_of_interest,
             cached_suffix="small_roads",
+            node_tags_of_interest=ROAD_NODE_TAGS_OF_INTEREST,
+            cache_schema=ROAD_CACHE_TAG_SCHEMA,
         ):
             return 0
         UI.vprint(1, "    * Checking which smaller roads need leveling.")
