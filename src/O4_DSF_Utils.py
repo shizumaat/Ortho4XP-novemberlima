@@ -12,6 +12,7 @@ from PIL import Image, ImageDraw
 import subprocess
 import O4_Airport_Fade_Masks as FADE
 import O4_Bathymetry as BATHY
+import O4_DEM_Utils as DEM
 import O4_Default_Terrain_Map as DEFTER
 import O4_File_Names as FNAMES
 import O4_Geo_Utils as GEO
@@ -422,7 +423,7 @@ def extract_elevation_and_bathymetry_data(lat, lon):
     if dsfid == "7z":
         UI.vprint(2, "     The original DSF is a 7z archive, uncompressing...")
         os.replace(tmp_file, tmp_file + ".7z")
-        subprocess.run([OVL.unzip_cmd, "e", f"-o{FNAMES.Tmp_dir}", f"{tmp_file}.7z"], env=UI.subprocess_env())
+        subprocess.run([OVL.unzip_cmd, "e", f"-o{FNAMES.Tmp_dir}", f"{tmp_file}.7z"], **UI.external_tool_keyword_arguments())
         os.remove(tmp_file + '.7z')
     file_len = os.path.getsize(tmp_file)
     f = open(tmp_file, "rb")
@@ -485,6 +486,232 @@ def extract_elevation_and_bathymetry_data(lat, lon):
     os.remove(tmp_file)
 
     return (bDEMN, bDEMS)
+
+
+################################################################################
+# Measured coastal bathymetry for the DSF rasters
+# (docs/specs/coastal-bathymetry-spec.md section 5).
+################################################################################
+DSF_RASTER_POSTS = 1201
+# IMED layout verified against the X-Plane 12 Global Scenery donor:
+# version=1, bytes-per-post=2 (int16), flags=5, square post grid,
+# scale=1.0, offset=0.0.
+_DSF_RASTER_HEADER = struct.pack(
+    "<BBHIIff", 1, 2, 5, DSF_RASTER_POSTS, DSF_RASTER_POSTS, 1.0, 0.0
+)
+
+
+def _raster_sub_atoms(raster_int16) -> bytes:
+    """One raster as its IMED + DMED sub-atom byte string."""
+    data = raster_int16.tobytes()
+    return (
+        b"IMED"
+        + struct.pack("<I", 8 + len(_DSF_RASTER_HEADER))
+        + _DSF_RASTER_HEADER
+        + b"DMED"
+        + struct.pack("<I", 8 + len(data))
+        + data
+    )
+
+
+def _tile_elevation_post_grid(tile):
+    """The tile's smoothed base DEM on the DSF post grid (row 0 = south).
+
+    Reuses ``tile.dem`` when a step already loaded it; otherwise loads the
+    same source the masks step would (``custom_dem`` head, else the
+    default base).  Returns an int16 ``1201 x 1201`` array or ``None``.
+    """
+    dem = getattr(tile, "dem", None)
+    if dem is None:
+        try:
+            fill_nodata = tile.fill_nodata or "to zero"
+            source = (
+                (";" in tile.custom_dem) and tile.custom_dem.split(";")[0]
+            ) or tile.custom_dem
+            dem = DEM.DEM(
+                tile.lat, tile.lon, source, fill_nodata, info_only=False
+            )
+        except Exception as error:
+            UI.vprint(
+                1,
+                "   WARNING: no elevation source for the synthesized DSF"
+                " raster:",
+                str(error),
+            )
+            return None
+    posts = DSF_RASTER_POSTS
+    # The DEM works in TILE-RELATIVE degree offsets (x, y in 0..1), not
+    # absolute coordinates — its extent is roughly -0.01..1.01.
+    post_positions = numpy.arange(posts) / (posts - 1)
+    relative_longitudes = numpy.tile(post_positions, posts)
+    relative_latitudes = numpy.repeat(post_positions, posts)
+    sample_points = numpy.column_stack(
+        (relative_longitudes, relative_latitudes)
+    )
+    elevations = numpy.asarray(dem.alt_vec(sample_points)).reshape(
+        posts, posts
+    )  # row 0 = south: relative latitudes repeat ascending
+    return numpy.clip(numpy.round(elevations), -32768, 32767).astype(
+        numpy.int16
+    )
+
+
+def synthesize_elevation_and_bathymetry_data(tile):
+    """Build the DSF ``elevation`` + ``sea_level`` rasters from scratch.
+
+    Used when no Global Scenery donor DSF is installed for the tile (the
+    Hawaii case): the elevation raster comes from the tile's base DEM and
+    the sea_level raster from the measured coastal bathymetry band, with
+    the donor's own ``elevation - 2`` convention wherever the band has no
+    data.  Returns ``(b"", b"")`` (the legacy no-donor result) when the
+    band or the DEM is unavailable.
+    """
+    import O4_Bathymetry_Band as BATHYBAND
+
+    band_vrt = BATHYBAND.ensure_bathymetry_band(tile)
+    if band_vrt is None:
+        return (b"", b"")
+    elevation = _tile_elevation_post_grid(tile)
+    if elevation is None:
+        return (b"", b"")
+    UI.vprint(
+        1,
+        "     Synthesizing the DSF elevation and sea_level rasters from"
+        " measured bathymetry.",
+    )
+    sea_level = (elevation - 2).astype(numpy.int16)
+    measured = BATHYBAND.warp_band_to_post_grid(
+        band_vrt, tile.lat, tile.lon, DSF_RASTER_POSTS
+    )
+    if measured is not None:
+        valid_water = (measured > -32000.0) & (measured <= 0.0)
+        sea_level[valid_water] = numpy.clip(
+            numpy.round(
+                numpy.minimum(
+                    measured[valid_water],
+                    (elevation[valid_water] - 2).astype(numpy.float32),
+                )
+            ),
+            -32768,
+            32767,
+        ).astype(numpy.int16)
+    bDEMN = b"elevation\0sea_level\0"
+    bDEMS = _raster_sub_atoms(elevation) + _raster_sub_atoms(sea_level)
+    return (bDEMN, bDEMS)
+
+
+def splice_measured_bathymetry(tile, bDEMN, bDEMS):
+    """Replace the sea part of the donor's sea_level raster with measured
+    depths (``dsf_bathymetry=True``).  The donor blob's other rasters are
+    preserved byte-identically; on any mismatch (no band, unexpected
+    raster shape) the donor bytes are returned untouched.
+    """
+    import O4_Bathymetry_Band as BATHYBAND
+
+    band_vrt = BATHYBAND.ensure_bathymetry_band(tile)
+    if band_vrt is None or not bDEMS:
+        return (bDEMN, bDEMS)
+    measured = BATHYBAND.warp_band_to_post_grid(
+        band_vrt, tile.lat, tile.lon, DSF_RASTER_POSTS
+    )
+    if measured is None:
+        return (bDEMN, bDEMS)
+
+    # Walk the sub-atom concatenation exactly like the extraction loop:
+    # the first two large DMED payloads are elevation then sea_level.
+    expected_bytes = 2 * DSF_RASTER_POSTS * DSF_RASTER_POSTS
+    position = 0
+    large_payloads_seen = 0
+    elevation = None
+    rebuilt = b""
+    while position < len(bDEMS):
+        sub_atom_header = bDEMS[position : position + 4]
+        (sub_atom_length,) = struct.unpack(
+            "<I", bDEMS[position + 4 : position + 8]
+        )
+        payload = bDEMS[position + 8 : position + sub_atom_length]
+        if sub_atom_header == b"DMED" and len(payload) > 100:
+            large_payloads_seen += 1
+            if large_payloads_seen == 1 and len(payload) == expected_bytes:
+                elevation = numpy.frombuffer(
+                    payload, dtype=numpy.int16
+                ).reshape(DSF_RASTER_POSTS, DSF_RASTER_POSTS)
+            elif (
+                large_payloads_seen == 2
+                and len(payload) == expected_bytes
+                and elevation is not None
+            ):
+                sea_level = (
+                    numpy.frombuffer(payload, dtype=numpy.int16)
+                    .reshape(DSF_RASTER_POSTS, DSF_RASTER_POSTS)
+                    .copy()
+                )
+                valid_water = (measured > -32000.0) & (measured <= 0.0)
+                sea_level[valid_water] = numpy.clip(
+                    numpy.round(
+                        numpy.minimum(
+                            measured[valid_water],
+                            (elevation[valid_water] - 2).astype(
+                                numpy.float32
+                            ),
+                        )
+                    ),
+                    -32768,
+                    32767,
+                ).astype(numpy.int16)
+                payload = sea_level.tobytes()
+                UI.vprint(
+                    1,
+                    "     Splicing measured bathymetry into the donor"
+                    " sea_level raster.",
+                )
+        rebuilt += (
+            sub_atom_header
+            + struct.pack("<I", 8 + len(payload))
+            + payload
+        )
+        position += sub_atom_length
+    return (bDEMN, rebuilt)
+
+
+def _global_scenery_donor_exists(lat, lon) -> bool:
+    """Is a Global Scenery DSF installed for this tile (either source)?"""
+    for overlay_source in (
+        OVL.custom_overlay_src,
+        OVL.custom_overlay_src_alternate,
+    ):
+        if not overlay_source:
+            continue
+        if os.path.exists(
+            os.path.join(
+                overlay_source,
+                "Earth nav data",
+                FNAMES.long_latlon(lat, lon) + ".dsf",
+            )
+        ):
+            return True
+    return False
+
+
+def elevation_and_bathymetry_data(tile):
+    """Dispatch on ``dsf_bathymetry`` (spec section 5).
+
+    ``False``: donor copy exactly as before.  ``auto``: donor copy when
+    installed, synthesis from the bathymetry band when not.  ``True``:
+    donor copy with measured depths spliced over the sea, full synthesis
+    when no donor is installed.
+    """
+    setting = str(getattr(tile, "dsf_bathymetry", "auto"))
+    if setting == "False":
+        return extract_elevation_and_bathymetry_data(tile.lat, tile.lon)
+    if _global_scenery_donor_exists(tile.lat, tile.lon):
+        (bDEMN, bDEMS) = extract_elevation_and_bathymetry_data(
+            tile.lat, tile.lon
+        )
+        if setting == "True":
+            return splice_measured_bathymetry(tile, bDEMN, bDEMS)
+        return (bDEMN, bDEMS)
+    return synthesize_elevation_and_bathymetry_data(tile)
 
 
 ################################################################################
@@ -1436,8 +1663,10 @@ def build_dsf(tile, download_queue):
     else:
         bPROP += b"sim/creation_agent\0Patched by Ortho4XP\0"
 
-    # Transfer DEM and bathymetry raster from Global Scenery tiles
-    (bDEMN, bDEMS) = extract_elevation_and_bathymetry_data(tile.lat, tile.lon)
+    # Transfer DEM and bathymetry raster from Global Scenery tiles, or
+    # synthesize / splice them from measured coastal bathymetry
+    # (docs/specs/coastal-bathymetry-spec.md section 5).
+    (bDEMN, bDEMS) = elevation_and_bathymetry_data(tile)
 
     # Computation of intermediate and of total length
     size_of_head_atom = 16 + len(bPROP)

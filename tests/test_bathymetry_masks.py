@@ -1,0 +1,497 @@
+"""Contract tests for the masks-step half of coastal bathymetry.
+
+Pins ``docs/specs/coastal-bathymetry-spec.md`` sections 3-4 as they land
+in ``O4_Mask_Utils``:
+
+* ``build_bathymetry_arrays`` — the depth-graded water alpha and the
+  band's land refinement.  What is pinned and WHY: the mask must keep
+  imagery visible over shallow reefs (alpha 255 at the waterline) and
+  fade fully to X-Plane water at ``reef_visibility_depth`` (alpha 0, not
+  a grey floor — a floor would seam at the band edge, spec 4.2).  The
+  spline midpoint (depth D/2) must land mid-scale.  The band's topo side
+  additionally re-lands measured islets (values >= 0.5 m).  Numbers are
+  asserted through a *real* warp of a small GeoTIFF because the function
+  warps a VRT — there is nothing meaningful to monkeypatch.
+
+* ``masks_use_DEM_too`` tri-state resolution in ``build_masks`` — "auto"
+  fetches the band exactly once (and only then), "False" never touches
+  it, "True" both fetches the band AND loads the legacy custom-DEM
+  refinement.  Pinned because "auto" must be byte-identical to legacy
+  when no provider covers the tile, and the mesh-existence guard must
+  short-circuit BEFORE any band fetch so a broken tile never hits the
+  network.
+
+* Offshore-shallow early-return (spec 4.2) — a full-sea mask square whose
+  vector pre-mask is empty is still written when the depth ramp is
+  non-zero (an atoll in open water).
+
+Headless: ``tmp_path`` only, GDAL rasters built locally, the network
+band fetch always monkeypatched.  The whole module skips when the GDAL
+Python bindings are unavailable.
+"""
+
+import os
+import sys
+import types
+
+import numpy
+import pytest
+
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src")
+)
+
+pytest.importorskip("osgeo")
+from osgeo import gdal, osr  # noqa: E402
+
+import O4_Bathymetry_Band as BATHYBAND  # noqa: E402
+import O4_File_Names as FNAMES  # noqa: E402
+import O4_Geo_Utils as GEO  # noqa: E402
+import O4_Mask_Utils as MASK  # noqa: E402
+import O4_UI_Utils as UI  # noqa: E402
+
+
+REEF_DEPTH = 25.0  # reef_visibility_depth default (spec section 6)
+MASK_ZL = 16
+
+
+# ---------------------------------------------------------------------------
+# Geometry helpers shared by the numerics test
+# ---------------------------------------------------------------------------
+def _mask_square_window(til_x, til_y, mask_zl):
+    """The padded 6144-pixel warp window build_bathymetry_arrays reads,
+    returned as the WGS84 bbox (lon_min, lat_min, lon_max, lat_max)."""
+    (latm0, lonm0) = GEO.gtile_to_wgs84(til_x, til_y, mask_zl)
+    (px0, py0) = GEO.wgs84_to_pix(latm0, lonm0, mask_zl)
+    px0 -= 1024
+    py0 -= 1024
+    (latmax, lonmin) = GEO.pix_to_wgs84(px0, py0, mask_zl)
+    (latmin, lonmax) = GEO.pix_to_wgs84(px0 + 6144, py0 + 6144, mask_zl)
+    return (lonmin, latmin, lonmax, latmax)
+
+
+def _column_longitudes(window, columns):
+    """Longitude of each output column centre after the web-mercator warp
+    build_bathymetry_arrays performs (values depend on longitude only, so
+    this classifies every column into its source value band)."""
+    from pyproj import Transformer
+
+    (lonmin, latmin, lonmax, latmax) = window
+    (web_x_min, web_y_max) = GEO.geo_to_webm(lonmin, latmax)
+    (web_x_max, web_y_min) = GEO.geo_to_webm(lonmax, latmin)
+    indices = numpy.arange(columns)
+    web_x = web_x_min + (indices + 0.5) * (web_x_max - web_x_min) / columns
+    to_wgs84 = Transformer.from_crs(3857, 4326, always_xy=True)
+    longitudes, _ = to_wgs84.transform(
+        web_x, numpy.full(columns, (web_y_min + web_y_max) / 2)
+    )
+    return numpy.asarray(longitudes)
+
+
+# Six longitude bands across the middle of the mask square, each a
+# constant depth/height (spec section 4.2 value cases).
+_VALUE_BANDS = [
+    (0.20, 0.30, -32768.0),  # nodata
+    (0.30, 0.40, 10.0),      # land +10 m
+    (0.40, 0.50, 0.0),       # waterline
+    (0.50, 0.60, -REEF_DEPTH / 2),   # spline midpoint
+    (0.60, 0.70, -REEF_DEPTH),       # exactly D -> pure water
+    (0.70, 0.80, -100.0),    # far deeper than D
+]
+
+
+def _write_banded_geotiff(path, window):
+    """A 100 m-posting 4326 raster over ``window`` (+margin) whose value
+    depends only on longitude, split into the six ``_VALUE_BANDS``."""
+    (lonmin, latmin, lonmax, latmax) = window
+    span = lonmax - lonmin
+    margin = 0.02
+    west, east = lonmin - margin, lonmax + margin
+    south, north = latmin - margin, latmax + margin
+    degrees_per_100m = 100.0 / 111320.0
+    columns = int((east - west) / degrees_per_100m) + 1
+    rows = int((north - south) / degrees_per_100m) + 1
+
+    values = numpy.full((rows, columns), -32768.0, dtype=numpy.float32)
+    for column in range(columns):
+        longitude = west + (column + 0.5) * degrees_per_100m
+        fraction = (longitude - lonmin) / span
+        for low, high, value in _VALUE_BANDS:
+            if low <= fraction < high:
+                values[:, column] = value
+                break
+
+    driver = gdal.GetDriverByName("GTiff")
+    dataset = driver.Create(path, columns, rows, 1, gdal.GDT_Float32)
+    dataset.SetGeoTransform(
+        (west, degrees_per_100m, 0, north, 0, -degrees_per_100m)
+    )
+    spatial_reference = osr.SpatialReference()
+    spatial_reference.ImportFromEPSG(4326)
+    dataset.SetProjection(spatial_reference.ExportToWkt())
+    band = dataset.GetRasterBand(1)
+    band.WriteArray(values)
+    band.SetNoDataValue(-32768.0)
+    band.FlushCache()
+    dataset = None
+    return path
+
+
+# =====================================================================
+# 1. Depth ramp numerics (spec section 4.2)
+# =====================================================================
+def test_build_bathymetry_arrays_depth_ramp_numerics(tmp_path):
+    location_lat, location_lon = 21.35, -159.5  # off Kauai (CUDEM Hawaii)
+    (til_x, til_y) = GEO.wgs84_to_orthogrid(
+        location_lat, location_lon, MASK_ZL
+    )
+    window = _mask_square_window(til_x, til_y, MASK_ZL)
+    raster_path = str(tmp_path / "band.tif")
+    _write_banded_geotiff(raster_path, window)
+
+    tile = types.SimpleNamespace(
+        mask_zl=MASK_ZL, reef_visibility_depth=REEF_DEPTH
+    )
+    (land_array, water_alpha) = MASK.build_bathymetry_arrays(
+        til_x, til_y, tile, raster_path
+    )
+
+    # Both arrays exist and carry the spec's fixed geometry.
+    assert land_array is not None and water_alpha is not None
+    assert land_array.shape == (6144, 6144)
+    assert water_alpha.shape == (4096, 4096)
+
+    (lonmin, _latmin, lonmax, _latmax) = window
+    span = lonmax - lonmin
+    land_longitudes = _column_longitudes(window, 6144)
+    land_fraction = (land_longitudes - lonmin) / span
+    # water_alpha is the central crop [1024:5120] of the 6144 window.
+    alpha_fraction = land_fraction[1024 : 4096 + 1024]
+
+    def _core(fraction, low, high):
+        # Central slice of a band, one band-margin in from each edge so
+        # bilinear smear at the boundaries never contaminates the read.
+        return (fraction > low + 0.03) & (fraction < high - 0.03)
+
+    def _alpha_band(low, high):
+        return water_alpha[:, _core(alpha_fraction, low, high)]
+
+    def _land_band(low, high):
+        return land_array[:, _core(land_fraction, low, high)]
+
+    # Waterline (depth 0) -> imagery fully opaque.
+    assert numpy.all(_alpha_band(0.40, 0.50) == 255)
+    # Spline midpoint (depth D/2) -> mid-scale, strictly interior.
+    midpoint = _alpha_band(0.50, 0.60)
+    assert midpoint.size
+    assert midpoint.min() > 60 and midpoint.max() < 195
+    # At and beyond depth D -> pure X-Plane water (0, no grey floor).
+    assert numpy.all(_alpha_band(0.60, 0.70) == 0)
+    assert numpy.all(_alpha_band(0.70, 0.80) == 0)
+    # Land (+10 m) -> re-landed in land_array, contributes no water alpha.
+    assert numpy.all(_land_band(0.30, 0.40) == 255)
+    assert numpy.all(_alpha_band(0.30, 0.40) == 0)
+    # Nodata -> neither array.
+    assert numpy.all(_land_band(0.20, 0.30) == 0)
+    assert numpy.all(_alpha_band(0.20, 0.30) == 0)
+
+
+def test_build_bathymetry_arrays_returns_none_off_coverage(tmp_path):
+    """A window with no overlap onto the band returns (None, None) rather
+    than raising — the guard the build_mask early-return relies on."""
+    location_lat, location_lon = 21.35, -159.5
+    (til_x, til_y) = GEO.wgs84_to_orthogrid(
+        location_lat, location_lon, MASK_ZL
+    )
+    window = _mask_square_window(til_x, til_y, MASK_ZL)
+    raster_path = str(tmp_path / "band.tif")
+    _write_banded_geotiff(raster_path, window)
+
+    tile = types.SimpleNamespace(
+        mask_zl=MASK_ZL, reef_visibility_depth=REEF_DEPTH
+    )
+    # A square many tiles away — the raster does not cover it at all.
+    (land_array, water_alpha) = MASK.build_bathymetry_arrays(
+        til_x + 16 * 200, til_y, tile, raster_path
+    )
+    assert land_array is None and water_alpha is None
+
+
+# =====================================================================
+# Shared fixtures for the build_masks integration tests
+# =====================================================================
+@pytest.fixture
+def data_root(tmp_path, monkeypatch):
+    """Redirect every writable O4 directory under tmp_path and reset the
+    step's global is_working latch around the test."""
+    original_override = FNAMES._data_root_override
+    FNAMES.set_data_root(str(tmp_path))
+    UI.is_working = 0
+    try:
+        yield tmp_path
+    finally:
+        UI.is_working = 0
+        FNAMES._data_root_override = original_override
+        FNAMES._apply_data_root()
+
+
+def _make_tile(tmp_path, **overrides):
+    """A minimal tile object carrying every attribute the masks step
+    reads before (and during) the build_mask closure."""
+    build_dir = str(tmp_path / "build")
+    os.makedirs(build_dir, exist_ok=True)
+    attributes = dict(
+        lat=21,
+        lon=-160,
+        mask_zl=MASK_ZL,
+        build_dir=build_dir,
+        grouped=True,
+        ratio_water=0.3,
+        masks_custom_extent="",
+        masks_use_DEM_too="auto",
+        custom_dem="",
+        fill_nodata="",
+        masking_mode="sand",
+        masks_width=100.0,
+        distance_masks_too=False,
+        coastal_foam_edge=False,
+        use_masks_for_inland=False,
+        reef_visibility_depth=REEF_DEPTH,
+    )
+    attributes.update(overrides)
+    return types.SimpleNamespace(**attributes)
+
+
+def _write_minimal_mesh(tile, filler_count=150):
+    """A MeshVersionFormatted-2 mesh with one giant sea triangle covering
+    the tile (so the square holding its barycentre is FULL sea — an empty
+    vector pre-mask) plus a tiny land triangle.  Layout mirrors
+    tests/fixtures/mesh/synthetic_fan_three_triangles.mesh exactly."""
+    lat, lon = tile.lat, tile.lon
+    # A big triangle spanning most of the 1-degree tile, tag 2 = sea.
+    vertices = [
+        (lon + 0.05, lat + 0.05),
+        (lon + 0.95, lat + 0.05),
+        (lon + 0.50, lat + 0.95),
+    ]
+    lines = ["MeshVersionFormatted 2", "Dimension 3", "", "Vertices", "3"]
+    for (vertex_lon, vertex_lat) in vertices:
+        lines.append("%.9f %.9f 0.000000000 0" % (vertex_lon, vertex_lat))
+    lines += ["", "Normals", "3", "0.00 0.00 0", "0.00 0.00 0",
+              "0.00 0.00 0"]
+    # One giant sea triangle (tag 2) plus land-tag filler triangles
+    # keeping the default mesh realistically sized (real meshes carry
+    # thousands of triangles).  The fillers are tag 0 (land), skipped
+    # before any geometry is read.  The sub-100 regression test below
+    # passes a small filler_count on purpose.
+    triangle_lines = ["1 2 3 2"] + ["1 1 1 0"] * filler_count
+    lines += ["", "Triangles", str(len(triangle_lines))] + triangle_lines
+    mesh_path = FNAMES.mesh_file(tile.build_dir, lat, lon)
+    with open(mesh_path, "w") as mesh_file:
+        mesh_file.write("\n".join(lines) + "\n")
+    return mesh_path
+
+
+def test_record_water_tris_handles_sub_100_triangle_mesh(data_root):
+    """Regression: record_water_tris computes its progress step as
+    nbr_tri_in // 100 — a mesh with fewer than 100 triangles used to
+    raise ZeroDivisionError in the ``i % step_stones`` modulo (both the
+    sea pass and, with use_masks_for_inland False, the inland pass).
+    The clamp is now ``max(1, nbr_tri_in // 100)`` at both sites."""
+    UI.red_flag = False
+    tile = _make_tile(data_root, use_masks_for_inland=False)
+    _write_minimal_mesh(tile, filler_count=2)  # 3 triangles total
+
+    (dico_sea, dico_inland) = MASK.record_water_tris(tile)
+
+    assert dico_sea  # the sea triangle was still attributed
+    assert dico_inland == {}
+
+
+# =====================================================================
+# 2. masks_use_DEM_too tri-state resolution (spec section 4.1)
+# =====================================================================
+def test_build_masks_returns_zero_before_band_fetch_when_mesh_missing(
+    data_root, monkeypatch
+):
+    """The mesh-existence guard short-circuits BEFORE the band fetch: a
+    broken tile must never trigger a bathymetry download."""
+    calls = []
+    monkeypatch.setattr(
+        BATHYBAND, "ensure_bathymetry_band",
+        lambda tile, **keyword_arguments: calls.append(tile) or None,
+    )
+    tile = _make_tile(data_root, masks_use_DEM_too="auto")
+    # No mesh written -> mesh_file() does not exist.
+    assert not os.path.exists(
+        FNAMES.mesh_file(tile.build_dir, tile.lat, tile.lon)
+    )
+
+    result = MASK.build_masks(tile)
+
+    assert result == 0
+    assert calls == []  # the band fetch was never reached
+
+
+class _RecordingDEM:
+    """Stand-in for O4_DEM_Utils.DEM: records construction and offers the
+    build_dem_pre_mask contract (super_level_set -> empty array)."""
+
+    instances = []
+
+    def __init__(self, *args, **kwargs):
+        _RecordingDEM.instances.append((args, kwargs))
+
+    def super_level_set(self, level, bbox):
+        (lonmin, lonmax, latmin, latmax) = bbox
+        return (
+            (lonmin, lonmax, latmin, latmax),
+            numpy.zeros((4, 4), dtype=bool),
+        )
+
+
+@pytest.mark.parametrize(
+    "setting, expect_band_fetch, expect_dem_load",
+    [
+        ("auto", True, False),   # engages iff a band exists; no legacy DEM
+        ("False", False, False),  # pure vector fade, nothing fetched
+        ("True", True, True),     # legacy custom-DEM refinement + band
+    ],
+)
+def test_build_masks_dem_too_tristate_resolution(
+    data_root, monkeypatch, setting, expect_band_fetch, expect_dem_load
+):
+    """"auto"/"True"/"False" map to (band-fetch?, custom-DEM-load?) per
+    spec 4.1.  Exercised through build_masks with the water triangles
+    stubbed out so only the resolution logic runs."""
+    band_calls = []
+    monkeypatch.setattr(
+        BATHYBAND, "ensure_bathymetry_band",
+        lambda tile, **keyword_arguments: band_calls.append(tile) or None,  # no band available
+    )
+    _RecordingDEM.instances = []
+    monkeypatch.setattr(MASK.DEM, "DEM", _RecordingDEM)
+    # No mesh squares to process: the tri-state logic runs, the parallel
+    # build immediately drains an empty queue.
+    monkeypatch.setattr(MASK, "record_water_tris", lambda tile: ({}, {}))
+
+    tile = _make_tile(data_root, masks_use_DEM_too=setting)
+    _write_minimal_mesh(tile)  # mesh must exist to pass the guard
+
+    MASK.build_masks(tile)
+
+    assert (len(band_calls) == 1) is expect_band_fetch
+    assert (len(_RecordingDEM.instances) == 1) is expect_dem_load
+
+
+# =====================================================================
+# 3. Offshore-shallow full-sea square is still written (spec section 4.2)
+# =====================================================================
+def test_full_sea_square_written_when_depth_ramp_nonzero(
+    data_root, monkeypatch
+):
+    """A mask square whose vector pre-mask is entirely sea (empty) but
+    whose bathymetry alpha is non-zero must still produce a mask PNG —
+    the legacy early-return has to consult the depth ramp."""
+    tile = _make_tile(data_root, masks_use_DEM_too="auto")
+    _write_minimal_mesh(tile)
+
+    # The square holding the giant sea triangle's barycentre.
+    barycentre_lat = tile.lat + (0.05 + 0.05 + 0.95) / 3
+    barycentre_lon = tile.lon + (0.05 + 0.95 + 0.50) / 3
+    (til_x, til_y) = GEO.wgs84_to_orthogrid(
+        barycentre_lat, barycentre_lon, MASK_ZL
+    )
+
+    # A uniform shallow (-5 m -> alpha well above zero) band covering just
+    # that square's window.
+    window = _mask_square_window(til_x, til_y, MASK_ZL)
+    (lonmin, latmin, lonmax, latmax) = window
+    margin = 0.02
+    columns, rows = 64, 64
+    raster_path = str(data_root / "shallow_band.tif")
+    driver = gdal.GetDriverByName("GTiff")
+    dataset = driver.Create(raster_path, columns, rows, 1, gdal.GDT_Float32)
+    west, east = lonmin - margin, lonmax + margin
+    north, south = latmax + margin, latmin - margin
+    dataset.SetGeoTransform(
+        (west, (east - west) / columns, 0, north, 0, (south - north) / rows)
+    )
+    spatial_reference = osr.SpatialReference()
+    spatial_reference.ImportFromEPSG(4326)
+    dataset.SetProjection(spatial_reference.ExportToWkt())
+    band = dataset.GetRasterBand(1)
+    band.WriteArray(numpy.full((rows, columns), -5.0, dtype=numpy.float32))
+    band.SetNoDataValue(-32768.0)
+    band.FlushCache()
+    dataset = None
+
+    monkeypatch.setattr(
+        BATHYBAND, "ensure_bathymetry_band", lambda tile, **keyword_arguments: raster_path
+    )
+
+    MASK.build_masks(tile)
+
+    mask_png = os.path.join(
+        FNAMES.mask_dir(tile.lat, tile.lon),
+        FNAMES.legacy_mask(til_x, til_y),
+    )
+    assert os.path.isfile(mask_png), (
+        "the full-sea square carrying the shallow depth ramp must be "
+        "written despite an empty vector pre-mask"
+    )
+
+
+# =====================================================================
+# 4. Shallow-water fallback loading alongside the airport-gated band
+#    (spec sections 3 + 4.4, ruling 2026-07-16)
+# =====================================================================
+@pytest.mark.parametrize(
+    "setting, band_available, radius, expect_fallback_load",
+    [
+        # Auto + gated (partial) band: the fallback loads and fills the
+        # squares beyond the airport ring.
+        ("auto", True, 20.0, True),
+        # Auto + radius 0 = ungated full band: measured data covers the
+        # whole shoreline, nothing to fill.
+        ("auto", True, 0.0, False),
+        # Explicit True never gates, so never needs the fill.
+        ("True", True, 20.0, False),
+        # No band at all: the pre-existing fallback rule, unchanged.
+        ("auto", False, 20.0, True),
+    ],
+)
+def test_shallow_water_fallback_loads_alongside_gated_band(
+    data_root, monkeypatch, setting, band_available, radius,
+    expect_fallback_load,
+):
+    """The mapped shallow-water fallback loads exactly when squares can
+    exist that measured bathymetry deliberately left bare: alongside an
+    airport-gated band, or with no band at all."""
+    band_vrt = str(data_root / "band.vrt") if band_available else None
+    monkeypatch.setattr(
+        BATHYBAND,
+        "ensure_bathymetry_band",
+        lambda tile, **keyword_arguments: band_vrt,
+    )
+    monkeypatch.setattr(MASK.DEM, "DEM", _RecordingDEM)
+    _RecordingDEM.instances = []
+    fallback_loads = []
+    monkeypatch.setattr(
+        MASK,
+        "load_shallow_water_polygons",
+        lambda tile: fallback_loads.append(tile) or None,
+    )
+    # No mask squares to process: only the resolution logic runs.
+    monkeypatch.setattr(MASK, "record_water_tris", lambda tile: ({}, {}))
+
+    tile = _make_tile(
+        data_root,
+        masks_use_DEM_too=setting,
+        bathymetry_airport_radius_km=radius,
+    )
+    _write_minimal_mesh(tile)
+
+    MASK.build_masks(tile)
+
+    assert (len(fallback_loads) == 1) is expect_fallback_load

@@ -5,7 +5,10 @@ import queue
 from math import atan, ceil, floor
 import numpy
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
+from scipy.ndimage import uniform_filter1d
 import skfmm
+import O4_Bathymetry_Band as BATHYBAND
+import O4_Coastal_Foam_Edge as FOAM
 import O4_DEM_Utils as DEM
 import O4_File_Names as FNAMES
 import O4_UI_Utils as UI
@@ -17,7 +20,30 @@ import O4_Mesh_Utils as MESH
 from O4_Parallel_Utils import parallel_execute
 
 mask_altitude_above = 0.5
-masks_build_slots = 4
+
+# OpenStreetMap shallow-water fallback (spec section 4.4): where no fine
+# bathymetry covers a tile, mapped shallow-water polygons are treated as
+# water of an assumed constant depth per category, faded over
+# SHALLOW_WATER_EDGE_FADE_M at the polygon edge (the drop-off).  Each
+# category keeps its own cached Overpass query.  Reef flats are awash to
+# a couple of metres; tidal flats (lagoons like the Ria Formosa, the
+# Waddenzee) sit shallower still.
+SHALLOW_WATER_CATEGORIES = (
+    ("reef", ('way["natural"="reef"]', 'relation["natural"="reef"]'), 2.0),
+    (
+        "tidalflat",
+        (
+            'way["wetland"="tidalflat"]',
+            'relation["wetland"="tidalflat"]',
+        ),
+        1.0,
+    ),
+)
+SHALLOW_WATER_EDGE_FADE_M = 150.0
+# Mask workers spend nearly all their time in GIL-releasing numpy/scipy/PIL
+# calls (profiled 2026-07-15), so threads scale with cores; capped to keep
+# the per-worker image working set (a few hundred MB) in check.
+masks_build_slots = max(2, min(12, (os.cpu_count() or 4) - 2))
 
 ################################################################################
 def mask_name_for_texture(tile, til_x_left, til_y_top, zl, *args):
@@ -96,7 +122,21 @@ def build_masks(tile, for_imagery=False):
         UI.exit_message_and_bottom_line("")
         return 0
     
-    # Check or create dest dir 
+    # Custom extent: fall back to regular masks when the named extent is
+    # not installed under Extents/ — a stale tile config must not degrade
+    # the whole masks step (it used to warn once per mask square and, before
+    # 2026-07-16, crashed every mask worker).
+    custom_extent_code = tile.masks_custom_extent
+    if custom_extent_code and custom_extent_code not in IMG.extents_dict:
+        UI.lvprint(
+            0,
+            "WARNING: custom mask extent '" + str(custom_extent_code)
+            + "' was not found under Extents/; building regular masks"
+            + " instead.",
+        )
+        custom_extent_code = ""
+
+    # Check or create dest dir
     dest_dir = (
         FNAMES.mask_dir(tile.lat, tile.lon)
         if not for_imagery
@@ -120,7 +160,47 @@ def build_masks(tile, for_imagery=False):
 
     UI.vprint(1, "-> Construction of the masks")
 
-    if tile.masks_use_DEM_too:
+    # Bathymetry (docs/specs/coastal-bathymetry-spec.md sections 3-4):
+    # resolve the masks_use_DEM_too tri-state.  "auto" engages exactly
+    # when a bathymetry provider covers the tile (the band fetch answers
+    # that); legacy "True" keeps the custom_dem land refinement AND gets
+    # the depth ramp when a band exists; "False" is the pure vector fade.
+    masks_dem_setting = str(tile.masks_use_DEM_too)
+    bathymetry_band_vrt = None
+    if masks_dem_setting in ("auto", "True"):
+        # "auto" only engages on fine nearshore data; explicit True also
+        # accepts the coarse global fallbacks (GEBCO and friends).
+        bathymetry_band_vrt = BATHYBAND.ensure_bathymetry_band(
+            tile, fine_nearshore_only=(masks_dem_setting == "auto")
+        )
+    legacy_dem_refinement = masks_dem_setting == "True"
+
+    # OpenStreetMap shallow-water fallback (spec section 4.4): only where
+    # measured bathymetry is unavailable — atolls, reef coasts and tidal
+    # lagoons outside every fine provider's coverage still get their
+    # mapped reef flats and tidal flats.  With auto mode's airport-radius
+    # gate the band is deliberately partial, so the fallback also loads
+    # alongside a gated band and fills the squares beyond the radius
+    # (measured data still wins per square, below in build_mask).
+    airport_gated_band = (
+        bathymetry_band_vrt is not None
+        and masks_dem_setting == "auto"
+        and float(
+            getattr(
+                tile,
+                "bathymetry_airport_radius_km",
+                BATHYBAND.DEFAULT_AIRPORT_RADIUS_KM,
+            )
+        )
+        > 0
+    )
+    shallow_water_categories = None
+    if (bathymetry_band_vrt is None or airport_gated_band) and str(
+        getattr(tile, "osm_shallow_water_fallback", True)
+    ) == "True":
+        shallow_water_categories = load_shallow_water_polygons(tile)
+
+    if legacy_dem_refinement:
         try:
             fill_nodata = tile.fill_nodata or "to zero"
             source = (
@@ -148,17 +228,46 @@ def build_masks(tile, for_imagery=False):
             return 1
 
         pre_mask = build_water_pre_mask(til_x, til_y, mesh_list, dico_sea,
-                                         dico_inland, sea_level, tile) 
-        if tile.masks_use_DEM_too:
+                                         dico_inland, sea_level, tile)
+        if legacy_dem_refinement:
             dem_array = build_dem_pre_mask(til_x, til_y, tile)
             pre_mask = numpy.maximum(pre_mask, dem_array)
             del(dem_array)
 
-        if tile.masks_custom_extent:
-            custom_array = build_custom_pre_mask(til_x, til_y, sea_level, tile)
+        (bathymetry_land, bathymetry_alpha) = (None, None)
+        if bathymetry_band_vrt:
+            (bathymetry_land, bathymetry_alpha) = build_bathymetry_arrays(
+                til_x, til_y, tile, bathymetry_band_vrt)
+            if bathymetry_land is not None:
+                # The band's topo side refines the land pre-mask: measured
+                # islets survive even when the OSM coastline misses them.
+                pre_mask = numpy.maximum(pre_mask, bathymetry_land)
 
-        if (pre_mask.max() == 0) and (
-                not tile.masks_custom_extent or custom_array.max() == 0):
+        shallow_water_alpha = None
+        if shallow_water_categories is not None and (
+            bathymetry_land is None and bathymetry_alpha is None
+        ):
+            # Measured bathymetry always wins: the mapped fallback only
+            # fills squares the (possibly airport-gated) band left bare.
+            shallow_water_alpha = build_shallow_water_alpha(
+                til_x, til_y, tile, shallow_water_categories)
+
+        if custom_extent_code:
+            custom_array = build_custom_pre_mask(
+                til_x, til_y, sea_level, tile, custom_extent_code)
+
+        if (
+            (pre_mask.max() == 0)
+            and (not custom_extent_code or custom_array.max() == 0)
+            and (bathymetry_alpha is None or bathymetry_alpha.max() == 0)
+            and (
+                shallow_water_alpha is None
+                or shallow_water_alpha.max() == 0
+            )
+        ):
+            # Nothing to mask — but an offshore shallow (an atoll in a
+            # full-sea square) still deserves a mask via the depth ramp
+            # or the mapped shallow-water fallback.
             return 1
         
         
@@ -171,8 +280,42 @@ def build_masks(tile, for_imagery=False):
             blured_mask
         )[1024 : 4096 + 1024, 1024 : 4096 + 1024]
         
-        if tile.masks_custom_extent:
-            blured_mask = numpy.maximum(blured_mask, custom_mask)
+        if custom_extent_code:
+            blured_mask = numpy.maximum(blured_mask, custom_array)
+
+        if tile.coastal_foam_edge and not (
+            blured_mask.max() == 0 or blured_mask.min() == 255
+        ):
+            masks_width_meters = tile.masks_width
+            if isinstance(masks_width_meters, list):
+                masks_width_meters = sum(masks_width_meters)
+            mask_pixel_size_meters = GEO.webmercator_pixel_size(
+                tile.lat + 0.5, tile.mask_zl
+            )
+            foam_width_pixels = max(
+                30, int(masks_width_meters / mask_pixel_size_meters / 2)
+            )
+            foam_mask = FOAM.apply_coastal_foam_edge(
+                blured_mask,
+                foam_width_pixels=foam_width_pixels,
+                sea_transparency_gray=int(sea_level),
+                # Seed from the mask identity so rebuilds are reproducible.
+                random_seed=(til_x << 16) ^ til_y,
+            )
+            if foam_mask is not None:
+                blured_mask = foam_mask
+
+        if bathymetry_alpha is not None:
+            # Depth-graded water alpha (spec section 4.2), applied last:
+            # a maximum can only REVEAL imagery over measured shallows —
+            # reefs stay visible beyond masks_width and through the foam
+            # restyle — never cut visibility inside the distance fade.
+            blured_mask = numpy.maximum(blured_mask, bathymetry_alpha)
+
+        if shallow_water_alpha is not None:
+            # Mapped shallow-water fallback (spec section 4.4), same
+            # maximum semantics as the measured ramp.
+            blured_mask = numpy.maximum(blured_mask, shallow_water_alpha)
 
         if not (blured_mask.max() == 0 or blured_mask.min() == 255):
             mask_im = Image.fromarray(blured_mask)
@@ -369,14 +512,250 @@ def build_dem_pre_mask(til_x, til_y, tile):
 ################################################################################
 
 ################################################################################
-def build_custom_pre_mask(til_x, til_y, sea_level, tile):
+def load_shallow_water_polygons(tile):
+    """The tile's mapped shallow-water polygons, by category.
+
+    Fallback data source for the depth-graded masks (spec section 4.4):
+    coral reefs (``natural=reef`` — Funafuti carries 154 elements) and
+    tidal flats (``wetland=tidalflat`` — the Ria Formosa around Faro
+    carries 32) are frequently mapped in OpenStreetMap where no open
+    bathymetry exists.  Each category keeps its own cached Overpass
+    query; a failed category download is skipped loudly, an empty one
+    silently.  Returns a list of ``(multipolygon, assumed_depth_m)``
+    pairs in tile-relative degree offsets, or ``None`` when nothing is
+    mapped.
+    """
+    categories = []
+    for (cached_suffix, queries, assumed_depth_m) in (
+        SHALLOW_WATER_CATEGORIES
+    ):
+        layer = OSM.OSM_layer()
+        try:
+            if not OSM.OSM_queries_to_OSM_layer(
+                list(queries),
+                layer,
+                tile.lat,
+                tile.lon,
+                [],
+                cached_suffix=cached_suffix,
+            ):
+                UI.lvprint(
+                    0,
+                    "   WARNING: the",
+                    cached_suffix,
+                    "download for the shallow-water mask fallback failed;"
+                    " that category is skipped.",
+                )
+                continue
+            area = OSM.OSM_to_MultiPolygon(layer, tile.lat, tile.lon)
+        except Exception as error:
+            UI.vprint(
+                1,
+                "   WARNING: shallow-water fallback category",
+                cached_suffix,
+                "skipped:",
+                str(error),
+            )
+            continue
+        if area.is_empty:
+            continue
+        polygon_count = len(getattr(area, "geoms", []))
+        UI.vprint(
+            1,
+            "   Shallow-water mask fallback:",
+            polygon_count,
+            "OpenStreetMap",
+            cached_suffix,
+            "polygon(s).",
+        )
+        categories.append((area, assumed_depth_m))
+    return categories or None
+
+
+def build_shallow_water_alpha(til_x, til_y, tile, shallow_water_categories):
+    """Rasterize the mapped shallow-water alpha for one mask square.
+
+    Each category's polygons are treated as water of its assumed
+    constant depth through the same spline ramp as measured depths —
+    deeper categories draw first so shallower ones win on overlap —
+    then the whole canvas is softened over
+    :data:`SHALLOW_WATER_EDGE_FADE_M` at the polygon edges (the
+    drop-off).  Returns a 4096² uint8 array, or ``None`` when no polygon
+    touches the square.  Never raises.
+    """
+    from shapely.geometry import box as shapely_box
+
+    (latm0, lonm0) = GEO.gtile_to_wgs84(til_x, til_y, tile.mask_zl)
+    (latm1, lonm1) = GEO.gtile_to_wgs84(
+        til_x + 16, til_y + 16, tile.mask_zl
+    )
+    # Tile-relative degree bbox of the square, padded by the edge fade.
+    pad_degrees = 2 * SHALLOW_WATER_EDGE_FADE_M / GEO.lat_to_m
+    square = shapely_box(
+        lonm0 - tile.lon - pad_degrees,
+        latm1 - tile.lat - pad_degrees,
+        lonm1 - tile.lon + pad_degrees,
+        latm0 - tile.lat + pad_degrees,
+    )
+    depth_ceiling = max(
+        float(getattr(tile, "reef_visibility_depth", 25.0)), 0.01
+    )
+    (px0, py0) = GEO.wgs84_to_pix(latm0, lonm0, tile.mask_zl)
+    canvas = Image.new("L", (4096, 4096), "black")
+    canvas_draw = ImageDraw.Draw(canvas)
+    drawn = False
+    # Deeper categories first: on overlap the shallower (brighter) fill
+    # painted later wins.
+    for (polygons, assumed_depth_m) in sorted(
+        shallow_water_categories, key=lambda pair: -pair[1]
+    ):
+        if not polygons.intersects(square):
+            continue
+        try:
+            local_area = polygons.intersection(square)
+        except Exception:
+            local_area = polygons.buffer(0).intersection(square)
+        if local_area.is_empty:
+            continue
+        shallowness = max(
+            min(1.0 - assumed_depth_m / depth_ceiling, 1.0), 0.0
+        )
+        fill_alpha = int(
+            round(255 * shallowness * shallowness * (3 - 2 * shallowness))
+        )
+        if fill_alpha == 0:
+            continue
+        geometries = getattr(local_area, "geoms", [local_area])
+        rings = []  # (is_hole, ring)
+        for geometry in geometries:
+            if geometry.geom_type != "Polygon":
+                continue
+            rings.append((False, geometry.exterior))
+            for interior in geometry.interiors:
+                rings.append((True, interior))
+        for (is_hole, ring) in rings:
+            pixel_ring = [
+                tuple(
+                    numpy.array(
+                        GEO.wgs84_to_pix(
+                            tile.lat + y, tile.lon + x, tile.mask_zl
+                        )
+                    )
+                    - (px0, py0)
+                )
+                for (x, y) in zip(*ring.xy)
+            ]
+            if len(pixel_ring) >= 3:
+                canvas_draw.polygon(
+                    pixel_ring, fill=0 if is_hole else fill_alpha
+                )
+                drawn = True
+    del canvas_draw
+    if not drawn:
+        return None
+    fade_pixels = SHALLOW_WATER_EDGE_FADE_M / GEO.webmercator_pixel_size(
+        tile.lat + 0.5, tile.mask_zl
+    )
+    canvas = canvas.filter(ImageFilter.GaussianBlur(fade_pixels / 2))
+    shallow_water_alpha = numpy.array(canvas, dtype=numpy.uint8)
+    if not shallow_water_alpha.any():
+        return None
+    return shallow_water_alpha
+
+
+################################################################################
+def build_bathymetry_arrays(til_x, til_y, tile, band_vrt_path):
+    """Windowed read of the bathymetry band over one mask square.
+
+    Warps the band VRT to the square's padded web-mercator grid (6144²,
+    the pre-mask geometry) and derives two arrays
+    (docs/specs/coastal-bathymetry-spec.md section 4.2):
+
+    * ``land_array`` — 6144² uint8, 255 where the band's topo side is at
+      or above ``mask_altitude_above`` (joins the land pre-mask before
+      the blur), else 0; ``None`` when the square has no such pixel.
+    * ``water_alpha`` — 4096² uint8 (final mask geometry), the
+      depth-graded imagery visibility ``255 * spline(1 - depth / D)``
+      with ``D = tile.reef_visibility_depth``: opaque at the waterline,
+      0 at depth ``D`` and beyond (pure X-Plane water — a non-zero floor
+      would seam at the band edge); ``None`` when the square has none.
+
+    Returns ``(None, None)`` when the square lies outside the band's
+    coverage or the warp fails.  Never raises.
+    """
+    try:
+        from osgeo import gdal
+    except ImportError:
+        return (None, None)
+    (latm0, lonm0) = GEO.gtile_to_wgs84(til_x, til_y, tile.mask_zl)
+    (px0, py0) = GEO.wgs84_to_pix(latm0, lonm0, tile.mask_zl)
+    px0 -= 1024
+    py0 -= 1024
+    (latmax, lonmin) = GEO.pix_to_wgs84(px0, py0, tile.mask_zl)
+    (latmin, lonmax) = GEO.pix_to_wgs84(px0 + 6144, py0 + 6144, tile.mask_zl)
+    (web_x_min, web_y_max) = GEO.geo_to_webm(lonmin, latmax)
+    (web_x_max, web_y_min) = GEO.geo_to_webm(lonmax, latmin)
+    try:
+        gdal.UseExceptions()
+        warped = gdal.Warp(
+            "",
+            band_vrt_path,
+            options=gdal.WarpOptions(
+                format="MEM",
+                outputType=gdal.GDT_Float32,
+                dstSRS="EPSG:3857",
+                outputBounds=(web_x_min, web_y_min, web_x_max, web_y_max),
+                width=6144,
+                height=6144,
+                resampleAlg="bilinear",
+                dstNodata=-32768.0,
+            ),
+        )
+        if warped is None:
+            return (None, None)
+        values = warped.GetRasterBand(1).ReadAsArray()
+        warped = None
+    except Exception as error:
+        UI.vprint(
+            2, "   Bathymetry window read failed for one mask square:",
+            str(error),
+        )
+        return (None, None)
+    if values is None:
+        return (None, None)
+    valid = values > -32000.0
+    if not valid.any():
+        return (None, None)
+
+    land_array = (
+        ((values >= mask_altitude_above) & valid).astype(numpy.uint8) * 255
+    )
+    reef_depth = max(
+        float(getattr(tile, "reef_visibility_depth", 25.0)), 0.01
+    )
+    shallowness = numpy.clip(1.0 + values / reef_depth, 0.0, 1.0)
+    spline = shallowness * shallowness * (3.0 - 2.0 * shallowness)
+    water = valid & (values <= 0.0)
+    water_alpha = numpy.where(water, 255.0 * spline, 0.0)[
+        1024 : 4096 + 1024, 1024 : 4096 + 1024
+    ].astype(numpy.uint8)
+
+    if not land_array.any():
+        land_array = None
+    if not water_alpha.any():
+        water_alpha = None
+    return (land_array, water_alpha)
+################################################################################
+
+################################################################################
+def build_custom_pre_mask(til_x, til_y, sea_level, tile, extent_code):
     custom_mask_array = numpy.zeros((4096, 4096), dtype=numpy.uint8)
     (latm0, lonm0) = GEO.gtile_to_wgs84(til_x, til_y, tile.mask_zl)
     (latm1, lonm1) = GEO.gtile_to_wgs84(til_x + 16, til_y + 16, tile.mask_zl)
     bbox_4326 = (lonm0, latm0, lonm1, latm1)
     masks_im = IMG.has_data(
         bbox_4326,
-        tile.masks_custom_extent,
+        extent_code,
         True,
         mask_size=(4096, 4096),
         is_sharp_resize=False,
@@ -418,16 +797,6 @@ def record_water_tris(tile):
     [til_x_max, til_y_max] = GEO.wgs84_to_orthogrid(
         tile.lat, tile.lon + 1, tile.mask_zl
     )
-    UI.vprint(1, "-> Deleting existing masks")
-    for til_x in range(til_x_min, til_x_max + 1, 16):
-        for til_y in range(til_y_min, til_y_max + 1, 16):
-            try:
-                os.remove(
-                    os.path.join(dest_dir, FNAMES.legacy_mask(til_x, til_y))
-                )
-            except:
-                pass
-    UI.vprint(1, "-> Reading mesh data")
     for mesh_file_name in mesh_list:
         try:
             f_mesh = open(mesh_file_name, "r")
@@ -456,7 +825,7 @@ def record_water_tris(tile):
         for i in range(0, 2):  # skip 2 lines
             f_mesh.readline()
         nbr_tri_in = int(f_mesh.readline())  # read nbr of tris
-        step_stones = nbr_tri_in // 100
+        step_stones = max(1, nbr_tri_in // 100)
         percent = -1
         UI.vprint(
             2,
@@ -593,7 +962,7 @@ def record_water_tris(tile):
             for i in range(0, 2 * nbr_pt_in + 5):
                 f_mesh.readline()
             nbr_tri_in = int(f_mesh.readline())  # read nbr of tris
-            step_stones = nbr_tri_in // 100
+            step_stones = max(1, nbr_tri_in // 100)
             percent = -1
             for i in range(0, nbr_tri_in):
                 if i % step_stones == 0:
@@ -645,6 +1014,41 @@ def record_water_tris(tile):
 ################################################################################
         
 ################################################################################
+def triangular_blur_along_axis(img_array, width, axis, lines_per_chunk=512):
+    """Blur every line of ``img_array`` along ``axis`` with the triangular
+    kernel [1, 2, .., width, .., 2, 1] / width**2, zero padding at the array
+    boundary, floor-truncated to uint8 — the same output the legacy per-row
+    ``numpy.convolve(line, kernel, "same")`` assignment produced, computed
+    in O(n) per line instead of O(n * width).
+
+    A triangular kernel is a box kernel convolved with itself, so two
+    running-mean passes (``uniform_filter1d``) replace the convolution.
+    The input is zero-padded by ``width`` along the filtered axis so the
+    second pass sees the first pass's true out-of-bounds values (matching
+    the one-shot convolution near the boundary); for even ``width`` the two
+    passes use origins 0 and -1, whose half-sample offsets cancel.
+    Lines are processed in chunks to bound the float64 working set."""
+    output = numpy.empty(img_array.shape, dtype=numpy.uint8)
+    second_pass_origin = -1 if width % 2 == 0 else 0
+    padding = [(0, 0), (0, 0)]
+    padding[axis] = (width, width)
+    unpad = [slice(None), slice(None)]
+    unpad[axis] = slice(width, -width)
+    line_count = img_array.shape[1 - axis]
+    for start in range(0, line_count, lines_per_chunk):
+        chunk = [slice(None), slice(None)]
+        chunk[1 - axis] = slice(start, start + lines_per_chunk)
+        block = numpy.pad(
+            img_array[tuple(chunk)].astype(numpy.float64), padding)
+        block = uniform_filter1d(
+            block, width, axis=axis, mode="constant", origin=0)
+        block = uniform_filter1d(
+            block, width, axis=axis, mode="constant",
+            origin=second_pass_origin)
+        output[tuple(chunk)] = block[tuple(unpad)]
+    return output
+
+
 def blur_mask(img_array, tile, sea_level):
     ##########################################
     def transition_profile(ratio, ttype):
@@ -664,17 +1068,10 @@ def blur_mask(img_array, tile, sea_level):
         blur_width = [L / pxscal for L in tile.masks_width]
     # Sand mode
     if tile.masking_mode == "sand" and blur_width:
-        # convolution with a hat function
-        b_img_array = numpy.array(img_array)
-        kernel = numpy.array(range(1, 2 * blur_width))
-        kernel[blur_width:] = range(blur_width - 1, 0, -1)
-        kernel = kernel / blur_width ** 2
-        for i in range(0, len(b_img_array)):
-            b_img_array[i] = numpy.convolve(b_img_array[i], kernel, "same")
-        b_img_array = b_img_array.transpose()
-        for i in range(0, len(b_img_array)):
-            b_img_array[i] = numpy.convolve(b_img_array[i], kernel, "same")
-        b_img_array = b_img_array.transpose()
+        # convolution with a hat function (separable: rows then columns,
+        # uint8 truncation between the two axes as in the original)
+        b_img_array = triangular_blur_along_axis(img_array, blur_width, axis=1)
+        b_img_array = triangular_blur_along_axis(b_img_array, blur_width, axis=0)
         b_img_array = 2 * numpy.minimum(b_img_array, 127)
         b_img_array = numpy.array(b_img_array, dtype=numpy.uint8)
     # Rocks mode
