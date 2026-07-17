@@ -20,8 +20,14 @@ sys.path.append(os.path.join(Ortho4XP_dir, 'src'))
 # JSON-lines engine transport (docs/specs/engine-protocol-multi-gui.md §5):
 # a subprocess front end runs `Ortho4XP.py --engine-jsonl` and speaks the
 # protocol over stdio.  Handle it here, BEFORE any GUI toolkit import below,
-# so the engine-only path never pulls in Tkinter/PySide6.
-if '--engine-jsonl' in sys.argv:
+# so the engine-only path never pulls in Tkinter/PySide6.  The __name__
+# guard is LOAD-BEARING: multiprocessing spawn helpers (the auto-patch
+# airport pool and its Manager) re-import this module as "__mp_main__"
+# with the parent's argv restored — without the guard the helper becomes
+# a second engine server blocked on its pipe, the Manager handshake
+# never completes, and the build wedges at zero CPU (live 3-tile run,
+# 2026-07-17).
+if __name__ == '__main__' and '--engine-jsonl' in sys.argv:
     from o4_engine import jsonl
     # owns_process: the transport bounds this process's life — front-end
     # death (stdin EOF, SIGTERM, ppid change) stops any in-flight build
