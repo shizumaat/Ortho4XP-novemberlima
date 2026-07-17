@@ -46,7 +46,60 @@ from typing import Optional
 
 from . import events as EVENTS
 from .events import BuildDone, RunDone, RunEta, StepProgress, TileState
-from .session import plan_steps
+from .session import (
+    _predict_step_seconds, plan_steps, prediction_features,
+    reweight_plan_by_seconds,
+)
+
+
+def estimate_remaining_wall_seconds(estimates, program, queued_tiles,
+                                    next_step_index, in_flight_steps,
+                                    now, slots):
+    """Advisory wall-clock remaining estimate for a parallel run.
+
+    Work model: every queued tile contributes its full predicted plan;
+    every active tile contributes its remaining steps, the in-flight
+    step credited for its elapsed time.  The total work is divided by
+    the effective parallelism (``slots`` capped by the tiles still
+    holding work) — coarse (class limits and the memory gate are not
+    modelled) but a defensible estimate where there was previously an
+    honest dash.  Returns ``None`` when no work remains.
+
+    ``estimates``: ``{tile: {step: seconds}}``; ``next_step_index``:
+    ``{tile: index of the running-or-next step}``; ``in_flight_steps``:
+    ``{(tile, step): started_at}``.
+    """
+    total_work = 0.0
+    tiles_with_work = 0
+
+    def step_estimate(tile, key):
+        value = (estimates.get(tile) or {}).get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value)
+        return None
+
+    for tile in queued_tiles:
+        tiles_with_work += 1
+        for key in program:
+            estimate = step_estimate(tile, key)
+            if estimate is not None:
+                total_work += estimate
+    for tile, index in next_step_index.items():
+        tiles_with_work += 1
+        for position, key in enumerate(program):
+            if position < index:
+                continue
+            estimate = step_estimate(tile, key)
+            if estimate is None:
+                continue
+            started_at = in_flight_steps.get((tile, key))
+            if started_at is not None:
+                estimate = max(estimate - (now - started_at), 0.0)
+            total_work += estimate
+    if not tiles_with_work:
+        return None
+    parallelism = max(1, min(int(slots), tiles_with_work))
+    return total_work / parallelism
 
 # Seconds to wait for a freshly spawned worker's EngineHello line before
 # declaring the spawn failed (interpreter start + light imports only —
@@ -339,6 +392,30 @@ class ParallelBuildRun:
         self._step_windows = {
             key: (base, width) for (key, base, width) in full_plan
         }
+        # Learned per-tile step estimates (tile_time_model): drive the
+        # run clock (spec §3.3 upgraded from the honest dash) and
+        # re-scale each tile's percent windows to predicted seconds.
+        # Purely advisory — failure keeps the static windows and the
+        # dash.
+        self._estimates: dict = {}
+        self._tile_step_windows: dict = {}
+        self._step_started_at: dict = {}      # (tile, step) -> monotonic t
+        try:
+            for tile in tiles:
+                features = prediction_features(
+                    tile[0], tile[1], provider, zoomlevel,
+                    custom_build_dir)
+                estimates = _predict_step_seconds(
+                    tile[0], tile[1], features, self._program)
+                self._estimates[tile] = estimates
+                self._tile_step_windows[tile] = {
+                    key: (base, width)
+                    for (key, base, width) in reweight_plan_by_seconds(
+                        full_plan, estimates)
+                }
+        except Exception:
+            self._estimates = {}
+            self._tile_step_windows = {}
         self._class_limits = class_limits(slots)
         self._class_active = {name: 0 for name in self._class_limits}
         self._next_step_index: dict = {}
@@ -488,6 +565,7 @@ class ParallelBuildRun:
                 child.tile):
             return False
         if child.start_step(step_key, self._build_arguments):
+            self._step_started_at[(child.tile, step_key)] = time.time()
             self._class_active[step_class] += 1
             if step_key == "mesh":
                 self._meshing_tiles.add(child.tile)
@@ -501,6 +579,7 @@ class ParallelBuildRun:
         step_key = child.running_step
         if step_key is None:
             return
+        self._step_started_at.pop((child.tile, step_key), None)
         step_class = STEP_CLASSES.get(step_key, "compute")
         self._class_active[step_class] = max(
             0, self._class_active[step_class] - 1)
@@ -653,7 +732,8 @@ class ParallelBuildRun:
             # legacy bars oscillate within a step, and a per-tile bar
             # must fill smoothly, never slide back (each tile has one
             # child, so the per-key update is single-writer).
-            base, width = self._step_windows.get(
+            base, width = self._tile_step_windows.get(
+                tile, self._step_windows).get(
                 event.step_key, (0.0, 1.0))
             remapped = min(
                 100.0, (base + width * event.percent / 100.0) * 100.0)
@@ -840,15 +920,27 @@ class ParallelBuildRun:
                                     cancelled=cancelled))
 
     def _ticker(self):
-        """Run-level clock: elapsed + an honest dash (spec §3.3)."""
+        """Run-level clock: elapsed + the learned remaining estimate
+        (spec §3.3; a dash only when the time model has no basis)."""
         while True:
             with self._lock:
                 if self._finished:
                     return
                 completed = self._done + self._errors
+                queued_tiles = list(self._queue)
+                next_step_index = dict(self._next_step_index)
+                in_flight_steps = dict(self._step_started_at)
+            remaining = None
+            try:
+                remaining = estimate_remaining_wall_seconds(
+                    self._estimates, self._program, queued_tiles,
+                    next_step_index, in_flight_steps, time.time(),
+                    self._slots)
+            except Exception:
+                remaining = None
             self._session._emit(RunEta(
                 elapsed_seconds=time.time() - self._t0,
-                remaining_seconds=None,
+                remaining_seconds=remaining,
                 done_tiles=completed,
                 total_tiles=self._total))
             time.sleep(1.0)

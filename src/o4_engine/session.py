@@ -112,6 +112,54 @@ def _predict_step_seconds(lat, lon, features, steps):
         return {k: 600.0 * STEP_WEIGHTS[k] for k in steps}
 
 
+def prediction_features(lat, lon, provider, zoomlevel, custom_build_dir):
+    """The feature dictionary a build-time prediction runs on.
+
+    Provider and zoom identify the imagery bucket; the texture counts
+    (estimated from this tile's history plus the ``.dds`` files already
+    on disk) carry the cold/warm cache state, so a fully cached rebuild
+    predicts materially cheaper than a cold one.  Never raises.
+    """
+    features = {"zoomlevel": zoomlevel, "provider": provider}
+    try:
+        from . import tile_time_model
+        textures_directory = os.path.join(
+            FNAMES.build_dir(lat, lon, custom_build_dir), "textures")
+        features.update(tile_time_model.estimate_texture_features(
+            lat, lon, zoomlevel, provider, textures_directory))
+    except Exception:
+        pass
+    return features
+
+
+def reweight_plan_by_seconds(plan, estimated_seconds):
+    """The plan's step windows re-scaled by predicted per-step seconds.
+
+    The static :data:`STEP_WEIGHTS` say imagery is 60 % of every build —
+    wildly wrong for a cached rebuild or an auto-patch-heavy tile.  With
+    a per-step second estimate in hand, the whole-tile percent scale is
+    proportional to predicted time instead, so the bar moves at a
+    steady pace through the build.  Steps missing an estimate keep a
+    tiny floor so their window never vanishes.
+    """
+    keys = [key for (key, _base, _width) in plan]
+    seconds = {}
+    for key in keys:
+        estimate = (estimated_seconds or {}).get(key)
+        if not isinstance(estimate, (int, float)) or estimate <= 0:
+            estimate = None
+        seconds[key] = estimate if estimate is not None else 1.0
+    total = sum(seconds.values())
+    if total <= 0:
+        return list(plan)
+    reweighted, base = [], 0.0
+    for key in keys:
+        width = seconds[key] / total
+        reweighted.append((key, base, width))
+        base += width
+    return reweighted
+
+
 def _record_tile_build(lat, lon, features, step_seconds):
     try:
         from . import tile_time_model
@@ -426,14 +474,15 @@ class EngineSession:
                       "building tiles one at a time in this process "
                       "instead.")
                 self._prepare_in_process_eta(tiles, plan, provider,
-                                             zoomlevel)
+                                             zoomlevel, custom_build_dir)
                 self._build_worker(list(tiles), provider, zoomlevel,
                                    custom_build_dir, plan)
 
             threading.Thread(target=_start_parallel_or_fall_back,
                              daemon=True).start()
             return True
-        self._prepare_in_process_eta(tiles, plan, provider, zoomlevel)
+        self._prepare_in_process_eta(tiles, plan, provider, zoomlevel,
+                                     custom_build_dir)
         threading.Thread(
             target=self._build_worker,
             args=(list(tiles), provider, zoomlevel, custom_build_dir, plan),
@@ -441,12 +490,14 @@ class EngineSession:
         ).start()
         return True
 
-    def _prepare_in_process_eta(self, tiles, plan, provider, zoomlevel):
+    def _prepare_in_process_eta(self, tiles, plan, provider, zoomlevel,
+                                custom_build_dir):
         planned_keys = [k for (k, _b, _w) in plan]
         estimates = {
             t: _predict_step_seconds(
                 t[0], t[1],
-                {"zoomlevel": zoomlevel, "provider": provider},
+                prediction_features(
+                    t[0], t[1], provider, zoomlevel, custom_build_dir),
                 planned_keys)
             for t in tiles
         }
@@ -558,7 +609,14 @@ class EngineSession:
                 if any(k != "overlays" for k, _, _ in plan):
                     tile.make_dirs()
                 failed = False
-                for key, base, width in plan:
+                # Percent windows proportional to this tile's predicted
+                # step seconds (static weights are only the fallback).
+                tile_plan = plan
+                if self._eta is not None:
+                    estimates = self._eta.estimates.get((lat, lon))
+                    if estimates:
+                        tile_plan = reweight_plan_by_seconds(plan, estimates)
+                for key, base, width in tile_plan:
                     if UI.red_flag:
                         break
                     self._start_step((lat, lon), key, base, width)
@@ -599,7 +657,13 @@ class EngineSession:
                         {"zoomlevel": zoomlevel, "provider": provider,
                          "airports": autopatch_airports,
                          "autopatch_seconds":
-                             self._autopatch_elapsed_seconds()},
+                             self._autopatch_elapsed_seconds(),
+                         # Cold/warm cache state, measured by build_dsf
+                         # (zero when the imagery step did not run).
+                         "textures_total": int(getattr(
+                             tile, "textures_total_last_build", 0) or 0),
+                         "textures_missing": int(getattr(
+                             tile, "textures_missing_last_build", 0) or 0)},
                         step_seconds)
             except Exception:
                 import traceback

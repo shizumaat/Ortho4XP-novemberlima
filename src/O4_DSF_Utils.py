@@ -880,6 +880,12 @@ def build_dsf(tile, download_queue):
     dico_terrains = {}
     overlay_terrains = set()
     treated_textures = set()
+    # Cold/warm telemetry for the tile time model: how many of the
+    # distinct textures this DSF references were actually queued for
+    # download (missing on disk).  One-element list so the nested emit
+    # functions can increment it; stashed on the tile after the tri
+    # loops.  Purely advisory.
+    textures_queued_count = [0]
     skipped_terrains_for_masking = set()
     dsf_pools = {}
     # We need more pools for textured nodes than for nodes.  Each of the
@@ -1098,6 +1104,7 @@ def build_dsf(tile, download_queue):
                 )
                 if not os.path.isfile(target_tex):
                     download_queue.put(texture_attributes)
+                    textures_queued_count[0] += 1
                 else:
                     UI.vprint(
                         2,
@@ -1307,6 +1314,7 @@ def build_dsf(tile, download_queue):
 
                         if (rebuild):
                                 download_queue.put(texture_attributes)
+                                textures_queued_count[0] += 1
                         else:
                             UI.vprint(
                                 2,
@@ -1510,6 +1518,7 @@ def build_dsf(tile, download_queue):
                     rebuild = True
                 if (rebuild):
                     download_queue.put(texture_attributes)
+                    textures_queued_count[0] += 1
                 else:
                     UI.vprint(
                         2,
@@ -1626,6 +1635,11 @@ def build_dsf(tile, download_queue):
                 total_cross_pool += 1
                 textured_tris[0]["cross-pool"].extend(tri_p)
     
+    # Cold/warm telemetry for the tile time model (read by the engine
+    # session when it records this build's step timings).
+    tile.textures_total_last_build = len(treated_textures)
+    tile.textures_missing_last_build = textures_queued_count[0]
+
     UI.vprint(1, "-> Encoding of the DSF file")
     UI.vprint(1, "     Final nbr of nodes: " + str(len_textured_nodes))
     UI.vprint(2, "     Final nbr of cross pool tris: " + str(total_cross_pool))

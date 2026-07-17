@@ -108,6 +108,48 @@ def features_for_record(*, zoomlevel: int, provider: str,
     }
 
 
+def estimate_texture_features(lat: int, lon: int, zoomlevel: int,
+                              provider: str,
+                              textures_directory: str) -> dict:
+    """Pre-build ``textures_total`` / ``textures_missing`` estimate.
+
+    The cold/warm cache signal BEFORE the build runs: ``textures_total``
+    comes from this tile's newest record at the same provider and zoom
+    level (the DSF references the same textures build after build), and
+    ``textures_missing`` is that total minus the matching ``.dds`` files
+    already present in the tile's textures directory — a fully warm
+    rebuild estimates zero missing and collapses the imagery prediction
+    to convert-only time.  Both fall back to zero when unknown (a tile
+    never built at this provider/zoom), which the prediction model treats
+    as "no texture basis".  Never raises.
+    """
+    total = 0
+    try:
+        for record in reversed(_load_tile_records(lat, lon)):
+            record_features = record.get("features") or {}
+            if (record_features.get("provider") == provider
+                    and record_features.get("zoomlevel") == int(zoomlevel)):
+                candidate = record_features.get("textures_total")
+                if isinstance(candidate, (int, float)) and candidate > 0:
+                    total = int(candidate)
+                    break
+    except Exception:
+        total = 0
+    present = 0
+    try:
+        # Standard texture names end with "_<provider><zoomlevel>.dds"
+        # (O4_File_Names.dds_file_name_from_attributes).
+        suffix = "_%s%d.dds" % (provider, int(zoomlevel))
+        present = sum(
+            1 for file_name in os.listdir(textures_directory)
+            if file_name.endswith(suffix)
+        )
+    except Exception:
+        present = 0
+    missing = max(total - present, 0) if total else 0
+    return {"textures_total": total, "textures_missing": missing}
+
+
 def _tile_record_path(lat: int, lon: int) -> str:
     """Absolute path of the JSON history file for one tile.
 

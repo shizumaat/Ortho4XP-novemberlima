@@ -182,3 +182,52 @@ def test_features_for_record_tolerates_optional_absent():
     assert features["airports"] == 0
     assert features["autopatch_prediction_s"] == 0.0
     assert features["autopatch_seconds"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Pre-build texture-feature estimation (cold/warm cache signal, 2026-07-17)
+# ---------------------------------------------------------------------------
+
+def test_estimate_texture_features_warm_rebuild(store, tmp_path):
+    """A tile with every texture on disk estimates zero missing."""
+    features = _features(textures_total=40, textures_missing=40)
+    model.record_build(10, -20, features, {"imagery": 400.0})
+    textures = tmp_path / "textures"
+    textures.mkdir()
+    for index in range(40):
+        (textures / ("%d_%d_BI16.dds" % (100 + index, 200))).touch()
+    estimated = model.estimate_texture_features(
+        10, -20, 16, "BI", str(textures))
+    assert estimated == {"textures_total": 40, "textures_missing": 0}
+
+
+def test_estimate_texture_features_cold_tile(store, tmp_path):
+    """History total with an empty textures directory: all missing."""
+    model.record_build(10, -20, _features(textures_total=40),
+                       {"imagery": 400.0})
+    textures = tmp_path / "textures"
+    textures.mkdir()
+    estimated = model.estimate_texture_features(
+        10, -20, 16, "BI", str(textures))
+    assert estimated == {"textures_total": 40, "textures_missing": 40}
+
+
+def test_estimate_texture_features_ignores_other_bucket(store, tmp_path):
+    """Files of another provider/zoom never count as present, and a
+    record at a different zoom never supplies the total."""
+    model.record_build(10, -20, _features(zoomlevel=17, textures_total=160),
+                       {"imagery": 900.0})
+    textures = tmp_path / "textures"
+    textures.mkdir()
+    (textures / "100_200_BI17.dds").touch()
+    (textures / "100_200_GO216.dds").touch()
+    estimated = model.estimate_texture_features(
+        10, -20, 16, "BI", str(textures))
+    assert estimated == {"textures_total": 0, "textures_missing": 0}
+
+
+def test_estimate_texture_features_never_raises(store):
+    """Unknown tile and a nonexistent directory degrade to zeros."""
+    estimated = model.estimate_texture_features(
+        55, 55, 16, "BI", "/nonexistent/anywhere")
+    assert estimated == {"textures_total": 0, "textures_missing": 0}
