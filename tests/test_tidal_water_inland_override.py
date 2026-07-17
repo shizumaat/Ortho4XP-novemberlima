@@ -1,15 +1,22 @@
-"""SEA_EQUIV routing of tidal ponds and lagoons (LPFR salinas, 2026-07-17).
+"""Tidal / lagoon water stays INLAND and overrides the coastline
+(2026-07-17, second iteration).
 
-OpenStreetMap water polygons tagged ``tidal=yes`` or ``water=lagoon``
-must leave the classic inland-water class (constant ``ratio_water``
-alpha, depth ratio pinned deep) and join the SEA_EQUIV class, which is
-masked and depth-graded like the sea.  Headless: the layer is built by
-hand, no network, no tile build.
+OpenStreetMap maps the Ria Formosa both as a coastline that reaches
+through the inlets AND as a ``water=lagoon`` + ``tidal=yes`` relation.
+The contract under test: tidal water polygons keep the classic inland
+rendering (orthophoto at ``ratio_water`` transparency with X-Plane
+water on top), and the SEA attribute is never seeded inside them, so
+the deep-water fade begins at the true coast — never inside a lagoon.
+(The first iteration routed these polygons to SEA_EQUIV; that printed
+permanently wet water as opaque dark imagery and was reverted.)
+
+Headless: layers are built by hand, no network, no tile build.
 """
 
 from __future__ import annotations
 
 import pytest
+from shapely import geometry
 
 import O4_OSM_Utils as OSM
 import O4_Vector_Map as VMAP
@@ -67,8 +74,10 @@ class TestTidalPredicate:
         assert not VMAP.water_polygon_is_tidal(5, {5: {"tidal": "no"}})
 
 
-class TestMultiPolygonRouting:
-    def test_tidal_and_lagoon_split_from_inland(self):
+class TestTidalUnionExtraction:
+    def test_filter_splits_tidal_from_inland(self):
+        """The layer split _tidal_water_area relies on: tidal / lagoon
+        polygons separate cleanly from ordinary inland water."""
         layer = _layer_with_ponds(
             {
                 11: {"tidal": "yes", "water": "reservoir"},
@@ -77,7 +86,7 @@ class TestMultiPolygonRouting:
                 14: {},
             }
         )
-        (inland, sea_equivalent) = OSM.OSM_to_MultiPolygon(
+        (inland, tidal) = OSM.OSM_to_MultiPolygon(
             layer,
             37,
             -8,
@@ -85,8 +94,57 @@ class TestMultiPolygonRouting:
                 osmid, dicosmtags
             ),
         )
-        assert len(sea_equivalent.geoms) == 2
+        assert len(tidal.geoms) == 2
         assert len(inland.geoms) == 2
+
+
+class TestSeaSeedAreas:
+    """The coastline override: no SEA seed inside tidal water."""
+
+    def _lagoon_inside_sea(self):
+        # A sea polygon reaching through an inlet into a lagoon: two
+        # barrier strips leave a channel at x 0.45..0.55, and the lagoon
+        # body above them dominates the area, so the naive
+        # representative point of the contiguous sea lands inside it.
+        everything = geometry.box(0.0, 0.0, 1.0, 1.0)
+        barriers = geometry.MultiPolygon([
+            geometry.box(0.0, 0.10, 0.45, 0.14),
+            geometry.box(0.55, 0.10, 1.0, 0.14),
+        ])
+        sea = everything.difference(barriers)
+        lagoon = geometry.box(0.0, 0.14, 1.0, 1.0).intersection(sea)
+        as_multi = lambda shape: geometry.MultiPolygon(
+            [shape] if shape.geom_type == "Polygon" else list(shape.geoms)
+        )
+        return (as_multi(sea), as_multi(lagoon))
+
+    def test_seeds_avoid_the_lagoon(self):
+        (sea_area, lagoon) = self._lagoon_inside_sea()
+        seed_area = VMAP.sea_seed_areas(sea_area, lagoon)
+        assert not seed_area.is_empty
+        for piece in seed_area.geoms:
+            point = piece.representative_point()
+            assert not lagoon.contains(point)
+
+    def test_empty_tidal_water_changes_nothing(self):
+        (sea_area, _lagoon) = self._lagoon_inside_sea()
+        assert VMAP.sea_seed_areas(
+            sea_area, geometry.MultiPolygon()
+        ) is sea_area
+        assert VMAP.sea_seed_areas(sea_area, None) is sea_area
+
+    def test_fully_tidal_sea_yields_no_seeds(self):
+        (sea_area, _lagoon) = self._lagoon_inside_sea()
+        seed_area = VMAP.sea_seed_areas(sea_area, sea_area)
+        assert seed_area.is_empty
+
+    def test_geometry_failure_falls_back_to_the_sea(self):
+        (sea_area, _lagoon) = self._lagoon_inside_sea()
+
+        class _Broken:
+            is_empty = False
+
+        assert VMAP.sea_seed_areas(sea_area, _Broken()) is sea_area
 
 
 class TestCacheSchemaWiring:
