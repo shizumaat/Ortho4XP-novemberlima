@@ -661,6 +661,239 @@ def read_dsf_pavements(
     return _read_dsf_polys(dsf_path, _accept, cache_dir, bezier_segments)
 
 
+# ── Pavement BORDER-LINE strips (user 2026-07-16, KBNA) ─────────────
+# Some packs draw their pavement as a ``.pol`` polygon PLUS a wide
+# draped ``.lin`` "border" strip traced along the polygon outline
+# (KBNA: ``Lines/BordaTaxiway_*.lin``, 4-31 m wide).  X-Plane centers
+# the line texture on its path, so HALF the strip is rendered pavement
+# OUTSIDE the ``.pol`` — real surface a ``.pol``-only union misses
+# (the KBNA Donelson taxiway hole: a 10 m junction gap that the 27 m
+# concrete border fills in the sim).  The ``.lin`` resource declares
+# its drawn width:
+#
+#     width_m = SCALE_s × (s2 − s1) / TEX_WIDTH
+#
+# (``S_OFFSET <layer> <s1> <s_mid> <s2>`` gives the texture columns,
+# ``TEX_WIDTH`` the texture's total columns, ``SCALE <s> <t>`` the
+# real-world meters those columns span).  Only STRIP-class lines are
+# pavement candidates — painted markings are ~0.15-1 m wide, so the
+# width floor alone separates them; whether a candidate actually
+# borders pavement is the CALLER's geometric test (the pipeline checks
+# the path runs along the pavement-union boundary).
+_LIN_STRIP_MIN_WIDTH_M = 2.0
+
+# Memoized per (def_path, pack_root, xplane_root), like the SURFACE
+# attribute cache above.
+_lin_strip_width_cache: dict[tuple[str, str, str], float | None] = {}
+
+
+def _lin_strip_width_m(def_path: str,
+                       pack_root: str | None,
+                       xplane_root: str | None) -> float | None:
+    """Drawn width in meters a ``.lin`` resource declares, or ``None``
+    when the resource is not a ``.lin``, cannot be resolved to a file,
+    or lacks the SCALE / TEX_WIDTH / S_OFFSET triple."""
+    key = (def_path, pack_root or "", xplane_root or "")
+    if key in _lin_strip_width_cache:
+        return _lin_strip_width_cache[key]
+    width: float | None = None
+    if def_path.lower().endswith(".lin"):
+        physical = None
+        if pack_root:
+            candidate = os.path.join(pack_root, def_path)
+            if os.path.isfile(candidate):
+                physical = candidate
+        if physical is None and xplane_root:
+            try:
+                from .agp_reader import resolve_library_path
+                physical = resolve_library_path(def_path, xplane_root)
+            except (OSError, ValueError):
+                physical = None
+        if physical is not None and os.path.isfile(physical):
+            texture_columns = None
+            scale_s = None
+            s_low = s_high = None
+            try:
+                with open(physical, "r", errors="ignore") as handle:
+                    for line in handle:
+                        tokens = line.split()
+                        if not tokens:
+                            continue
+                        keyword = tokens[0].upper()
+                        try:
+                            if keyword == "TEX_WIDTH":
+                                texture_columns = float(tokens[1])
+                            elif keyword == "SCALE":
+                                scale_s = float(tokens[1])
+                            elif (keyword == "S_OFFSET"
+                                    and len(tokens) >= 5):
+                                s_low = float(tokens[2])
+                                s_high = float(tokens[4])
+                        except (ValueError, IndexError):
+                            continue
+            except OSError:
+                texture_columns = None
+            if (texture_columns and scale_s is not None
+                    and s_low is not None and s_high is not None):
+                width = scale_s * (s_high - s_low) / texture_columns
+    _lin_strip_width_cache[key] = width
+    return width
+
+
+def _interpolate_dsf_polyline(
+    nodes: list[tuple[tuple[float, float], tuple[float, float] | None]],
+    bezier_segments: int,
+) -> list[tuple[float, float]]:
+    """Open-polyline twin of ``_interpolate_dsf_ring``: same per-segment
+    bezier convention, but NO wraparound segment from the last node back
+    to the first (a line placement's winding is a path, not a ring)."""
+    n = len(nodes)
+    if n < 2:
+        return [a for a, _ in nodes]
+    out: list[tuple[float, float]] = []
+    for i in range(n - 1):
+        a_xy, a_ctrl = nodes[i]
+        b_xy, b_ctrl = nodes[i + 1]
+        if not out or out[-1] != a_xy:
+            out.append(a_xy)
+        if a_xy == b_xy:
+            continue
+        if a_ctrl is None and b_ctrl is None:
+            continue
+        if a_ctrl is not None and b_ctrl is None:
+            ctrl_eff = a_ctrl
+        elif a_ctrl is None and b_ctrl is not None:
+            ctrl_eff = _mirror(b_ctrl, b_xy)
+        else:
+            mirrored = _mirror(b_ctrl, b_xy)
+            mid = (0.5 * (a_xy[0] + b_xy[0]), 0.5 * (a_xy[1] + b_xy[1]))
+            d1 = math.hypot(a_ctrl[0] - mid[0], a_ctrl[1] - mid[1])
+            d2 = math.hypot(mirrored[0] - mid[0], mirrored[1] - mid[1])
+            if 0.5 * max(d1, d2) < BEZIER_FLATTEN_DEV_DEG:
+                continue
+            for pt in _cubic_bezier(a_xy, a_ctrl, mirrored, b_xy,
+                                    bezier_segments)[1:-1]:
+                if not out or out[-1] != pt:
+                    out.append(pt)
+            continue
+        mid = (0.5 * (a_xy[0] + b_xy[0]), 0.5 * (a_xy[1] + b_xy[1]))
+        if 0.5 * math.hypot(ctrl_eff[0] - mid[0],
+                            ctrl_eff[1] - mid[1]) < BEZIER_FLATTEN_DEV_DEG:
+            continue
+        for pt in _quadratic_bezier(a_xy, ctrl_eff, b_xy,
+                                    bezier_segments)[1:-1]:
+            if not out or out[-1] != pt:
+                out.append(pt)
+    last_xy = nodes[-1][0]
+    if not out or out[-1] != last_xy:
+        out.append(last_xy)
+    return out
+
+
+def read_dsf_pavement_border_lines(
+    dsf_path: str,
+    cache_dir: str | None = None,
+    bezier_segments: int = DEFAULT_BEZIER_SEGMENTS,
+    xplane_root: str | None = None,
+) -> list[tuple[list[tuple[float, float]], float, bool, str]]:
+    """Extract STRIP-class draped line placements from a DSF file.
+
+    Returns one ``(path_points, width_m, closed, def_path)`` per line
+    placement whose ``.lin`` def declares a drawn width ≥
+    ``_LIN_STRIP_MIN_WIDTH_M`` — ``path_points`` is the flattened
+    ``(lon, lat)`` polyline (bezier-tessellated, NOT closed), ``closed``
+    is the placement's closed-ring flag.  Whether the strip is actually
+    pavement (it borders the pavement union) is the caller's geometric
+    decision; this reader only separates strips from painted markings
+    by width.
+    """
+    lines = _load_dsf_text(dsf_path, cache_dir)
+    if not lines:
+        return []
+    pack_root = _pack_root_for_dsf(dsf_path)
+
+    strip_width_by_def_idx: dict[int, tuple[float, str]] = {}
+    def_idx = 0
+    for line in lines:
+        if line.startswith("POLYGON_DEF"):
+            tok = line.strip().split(maxsplit=1)
+            path = tok[1].strip() if len(tok) > 1 else ""
+            if path.lower().endswith(".lin"):
+                width = _lin_strip_width_m(path, pack_root, xplane_root)
+                if width is not None and width >= _LIN_STRIP_MIN_WIDTH_M:
+                    strip_width_by_def_idx[def_idx] = (width, path)
+            def_idx += 1
+    if not strip_width_by_def_idx:
+        return []
+
+    out: list[tuple[list[tuple[float, float]], float, bool, str]] = []
+    in_strip = False
+    cur_width = 0.0
+    cur_def_path = ""
+    cur_closed = False
+    cur_depth = 2
+    current_path: list[tuple[tuple[float, float],
+                             tuple[float, float] | None]] | None = None
+    for line in lines:
+        if line.startswith("BEGIN_POLYGON"):
+            tok = line.split()
+            try:
+                idx = int(tok[1])
+            except (ValueError, IndexError):
+                idx = -1
+            in_strip = idx in strip_width_by_def_idx
+            if in_strip:
+                cur_width, cur_def_path = strip_width_by_def_idx[idx]
+                # For a ``.lin`` placement the BEGIN_POLYGON param is
+                # the closed-ring flag (0 open path / 1 closed loop).
+                try:
+                    cur_closed = int(tok[2]) == 1
+                except (ValueError, IndexError):
+                    cur_closed = False
+                try:
+                    cur_depth = int(tok[3])
+                except (ValueError, IndexError):
+                    cur_depth = 2
+            current_path = None
+            continue
+        if not in_strip:
+            continue
+        if line.startswith("BEGIN_WINDING"):
+            current_path = []
+            continue
+        if line.startswith("END_WINDING"):
+            if current_path and len(current_path) >= 2:
+                flat = _interpolate_dsf_polyline(current_path,
+                                                 bezier_segments)
+                if len(flat) >= 2:
+                    out.append((flat, cur_width, cur_closed,
+                                cur_def_path))
+            current_path = None
+            continue
+        if line.startswith("END_POLYGON"):
+            in_strip = False
+            current_path = None
+            continue
+        if current_path is not None and line.startswith("POLYGON_POINT"):
+            tok = line.split()
+            try:
+                lon = float(tok[1])
+                lat = float(tok[2])
+            except (ValueError, IndexError):
+                continue
+            ctrl = None
+            if cur_depth >= 4:
+                try:
+                    cx = float(tok[cur_depth - 1])
+                    cy = float(tok[cur_depth])
+                    if cx != lon or cy != lat:
+                        ctrl = (cx, cy)
+                except (ValueError, IndexError):
+                    ctrl = None
+            current_path.append(((lon, lat), ctrl))
+    return out
+
+
 # Building-facade detector: X-Plane places airport TERMINAL and HANGAR
 # buildings as draped FACADE polygons (``.fac``) in the DSF.  The
 # library virtual paths name the building class:

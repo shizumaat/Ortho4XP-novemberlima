@@ -1098,6 +1098,11 @@ def build_airport_pavement(icao: str, xplane_root: str,
         except _GEOM_EXC:
             apt_bbox_m = None
     third_party_pav_ids: set = set()
+    # Wide draped ``.lin`` border-strip placements collected in the DSF
+    # sweep: ``(path_line_m, width_m, closed, def_path)``.  Filtered
+    # after the sweep by the wraps-pavement test and unioned into the
+    # pavement (user 2026-07-16, KBNA BordaTaxiway_* strips).
+    dsf_border_line_candidates: List[tuple] = []
     # DSF terminal/hangar building footprints (meter space), collected
     # in the same DSF sweep as pavement and unioned with the OSM
     # building outlines at terminal-pad construction below.
@@ -1272,6 +1277,32 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     n_dsf_kept += 1
                 except _GEOM_EXC:
                     continue
+            # Wide ``.lin`` border strips from the SAME DSF (bbox-gated
+            # here; the wraps-pavement test runs after the sweep, once
+            # the full pavement union exists to test against).
+            if os.environ.get("O4_DSF_BORDER_LINE_PAVEMENT", "1") == "1":
+                for _bl_pts, _bl_width, _bl_closed, _bl_def in \
+                        _DSFR.read_dsf_pavement_border_lines(
+                            dsf, xplane_root=xplane_root):
+                    if len(_bl_pts) < 2:
+                        continue
+                    try:
+                        _bl_line = LineString(
+                            [to_m(lon, lat) for (lon, lat) in _bl_pts])
+                    except _GEOM_EXC:
+                        continue
+                    if _bl_line.is_empty or _bl_line.length < 5.0:
+                        continue
+                    if apt_bbox_m is not None:
+                        _bx_min, _by_min, _bx_max, _by_max = \
+                            _bl_line.bounds
+                        if (_bx_max < apt_bbox_m[0]
+                                or _bx_min > apt_bbox_m[2]
+                                or _by_max < apt_bbox_m[1]
+                                or _by_min > apt_bbox_m[3]):
+                            continue
+                    dsf_border_line_candidates.append(
+                        (_bl_line, _bl_width, _bl_closed, _bl_def))
             # Terminal / hangar building footprints from the SAME DSF.
             # Same projection + distance + boundary gates as pavement,
             # but a CENTROID-in-boundary gate (keep the whole footprint
@@ -1336,6 +1367,83 @@ def build_airport_pavement(icao: str, xplane_root: str,
             pass
     except _GEOM_EXC:
         pass
+
+    # ── Pavement border-line strips (user 2026-07-16, KBNA hole) ─────
+    # Construction style: a pack draws pavement as ``.pol`` polygons
+    # PLUS wide draped ``.lin`` borders traced ALONG the polygon
+    # outlines (KBNA ``BordaTaxiway_*``: 4-31 m wide, declared by the
+    # resource's SCALE/TEX_WIDTH/S_OFFSET).  X-Plane centers the strip
+    # on its path, so half of it is rendered pavement OUTSIDE the
+    # ``.pol`` union — at KBNA that outer half is the missing 5-13 m
+    # edge band plus the whole junction gap at 36.1156,-86.6682 (two
+    # taxiways' 27 m concrete borders meet there).  A candidate strip
+    # is included as pavement only when its path WRAPS the pavement:
+    # at least half its sampled length runs within a few meters of the
+    # pavement-union boundary.  Painted markings never qualify (the
+    # reader's ≥ 2 m width floor), and a strip elsewhere on the field
+    # (not along pavement) fails the wrap test.  Gate
+    # O4_DSF_BORDER_LINE_PAVEMENT=0 restores the ``.pol``-only union.
+    _BORDER_WRAP_SAMPLE_STEP_M = 5.0
+    _BORDER_WRAP_EDGE_TOL_M = 3.0
+    _BORDER_WRAP_MIN_FRACTION = 0.5
+    if dsf_border_line_candidates:
+        try:
+            _border_reference = unary_union(
+                [g for g in (list(pav_polys) + list(runway_polys))
+                 if g is not None and not g.is_empty])
+            _border_boundary = (_border_reference.boundary
+                                if not _border_reference.is_empty
+                                else None)
+            _n_border_kept = 0
+            _border_area = 0.0
+            for (_bl_line, _bl_width, _bl_closed,
+                 _bl_def) in dsf_border_line_candidates:
+                if _border_boundary is None or _border_boundary.is_empty:
+                    break
+                try:
+                    _n_samples = max(
+                        2, int(_bl_line.length
+                               / _BORDER_WRAP_SAMPLE_STEP_M))
+                    _n_on_edge = sum(
+                        1 for k in range(_n_samples)
+                        if _border_boundary.distance(_bl_line.interpolate(
+                            (k + 0.5) / _n_samples, normalized=True))
+                        <= _BORDER_WRAP_EDGE_TOL_M)
+                    if (_n_on_edge / _n_samples
+                            < _BORDER_WRAP_MIN_FRACTION):
+                        continue
+                    _line_eff = _bl_line
+                    if _bl_closed:
+                        _coords = list(_bl_line.coords)
+                        if _coords[0] != _coords[-1]:
+                            _line_eff = LineString(
+                                _coords + [_coords[0]])
+                    _strip = _line_eff.buffer(_bl_width / 2.0,
+                                              cap_style=2)
+                    if boundary_gate_m is not None:
+                        _strip = _strip.intersection(boundary_gate_m)
+                except _GEOM_EXC:
+                    continue
+                for _piece in (_strip.geoms
+                               if hasattr(_strip, "geoms")
+                               else [_strip]):
+                    if (_piece.geom_type == "Polygon"
+                            and not _piece.is_empty
+                            and _piece.area >= 25.0):
+                        pav_polys.append(_piece)
+                        third_party_pav_ids.add(id(_piece))
+                        _border_area += _piece.area
+                _n_border_kept += 1
+            if _n_border_kept:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: DSF border-line strips: "
+                    f"{_n_border_kept} of "
+                    f"{len(dsf_border_line_candidates)} wide .lin "
+                    f"path(s) wrap pavement — {_border_area:.0f} m2 "
+                    f"added as pavement.")
+        except _GEOM_EXC:
+            pass
+
     pav_union = unary_union(pav_polys) if pav_polys else None
     # Merge near-touching apt.dat polygons so the union is one big
     # coverage (with real holes only) — see ``_merge_near_touching``.
