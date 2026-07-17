@@ -56,10 +56,20 @@ __all__ = [
 # the header, recording every source file used to build the index so
 # :func:`index_is_stale` can tell when a rebuild is needed.
 _CACHE_MAGIC = "O4AIRPORTIDX"
-_CACHE_VERSION = 2
+_CACHE_VERSION = 3
 
-# Prefix marking a source-file provenance line in a v2 cache.
+# Prefix marking a source-file provenance line in a v2+ cache.
 _SRC_PREFIX = "#SRC"
+
+# The v3 per-airport category values (the bathymetry gate's anchor
+# checkboxes select among these):
+#   icao_airport  -- apt.dat type 1 with an ``icao_code`` metadata row
+#   airport       -- apt.dat type 1 without one (small strips, local IDs)
+#   seaplane_base -- apt.dat type 16
+#   heliport      -- apt.dat type 17
+AIRPORT_CATEGORIES = (
+    "icao_airport", "airport", "seaplane_base", "heliport",
+)
 
 
 @dataclass
@@ -74,6 +84,9 @@ class AirportEntry:
         country: Country the airport is in, or ``""`` if unknown.
         lat: Reference latitude in decimal degrees.
         lon: Reference longitude in decimal degrees.
+        category: One of :data:`AIRPORT_CATEGORIES`.  Rows loaded from a
+            pre-v3 cache carry the default (they predate the category
+            column; ``index_is_stale`` rebuilds such caches anyway).
     """
 
     code: str
@@ -82,6 +95,7 @@ class AirportEntry:
     country: str
     lat: float
     lon: float
+    category: str = "icao_airport"
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +134,16 @@ def find_apt_dats(xplane_dir: str) -> List[str]:
 _HEADER_CODES = frozenset(("1", "16", "17"))
 
 
+def _airport_category(header_code: str, saw_icao_code: bool) -> str:
+    """Map an apt.dat header row code (+ icao_code presence) to a
+    :data:`AIRPORT_CATEGORIES` value."""
+    if header_code == "16":
+        return "seaplane_base"
+    if header_code == "17":
+        return "heliport"
+    return "icao_airport" if saw_icao_code else "airport"
+
+
 def _flush_airport(
     code: Optional[str],
     name: str,
@@ -129,6 +153,7 @@ def _flush_airport(
     meta_lon: Optional[float],
     rwy_lat: Optional[float],
     rwy_lon: Optional[float],
+    category: str = "icao_airport",
 ) -> Optional[AirportEntry]:
     """Assemble an :class:`AirportEntry` from an airport's accumulated rows.
 
@@ -143,7 +168,7 @@ def _flush_airport(
     if lat is None or lon is None:
         return None
     return AirportEntry(code=code, name=name, city=city, country=country,
-                        lat=lat, lon=lon)
+                        lat=lat, lon=lon, category=category)
 
 
 def _parse_float(value: str) -> Optional[float]:
@@ -175,6 +200,8 @@ def _iter_airports(path: str) -> Iterator[AirportEntry]:
     name = ""
     city = ""
     country = ""
+    header_code = "1"
+    saw_icao_code = False
     meta_lat: Optional[float] = None
     meta_lon: Optional[float] = None
     rwy_lat: Optional[float] = None
@@ -193,13 +220,16 @@ def _iter_airports(path: str) -> Iterator[AirportEntry]:
                 if have_airport:
                     entry = _flush_airport(
                         code, name, city, country,
-                        meta_lat, meta_lon, rwy_lat, rwy_lon)
+                        meta_lat, meta_lon, rwy_lat, rwy_lon,
+                        _airport_category(header_code, saw_icao_code))
                     if entry is not None:
                         yield entry
                 # Reset accumulators for the new header.
                 have_airport = True
                 city = ""
                 country = ""
+                header_code = row_code
+                saw_icao_code = False
                 meta_lat = None
                 meta_lon = None
                 rwy_lat = None
@@ -220,6 +250,7 @@ def _iter_airports(path: str) -> Iterator[AirportEntry]:
                 if key == "icao_code":
                     if value:
                         code = value
+                        saw_icao_code = True
                 elif key == "city":
                     city = value
                 elif key == "country":
@@ -256,7 +287,8 @@ def _iter_airports(path: str) -> Iterator[AirportEntry]:
     if have_airport:
         entry = _flush_airport(
             code, name, city, country,
-            meta_lat, meta_lon, rwy_lat, rwy_lon)
+            meta_lat, meta_lon, rwy_lat, rwy_lon,
+            _airport_category(header_code, saw_icao_code))
         if entry is not None:
             yield entry
 
@@ -329,6 +361,7 @@ def build_index(apt_dat_paths: Iterable[str], cache_file: str) -> int:
                 _sanitize(e.country),
                 repr(e.lat),
                 repr(e.lon),
+                _sanitize(e.category),
             )) + "\n")
     os.replace(tmp_file, cache_file)
     return len(rows)
@@ -338,9 +371,11 @@ def load_index(cache_file: str) -> List[AirportEntry]:
     """Load airports from a cache written by :func:`build_index`.
 
     The cache is streamed line-by-line.  A missing file or a file without
-    the expected magic header yields an empty list.  Both v1 (no ``#SRC``
-    lines) and v2 caches are accepted; ``#SRC`` provenance lines are
-    skipped.  Malformed data rows are skipped rather than raising.
+    the expected magic header yields an empty list.  v1 (no ``#SRC``
+    lines), v2 and v3 caches are all accepted; ``#SRC`` provenance lines
+    are skipped, and pre-v3 rows (no category column) load with the
+    :class:`AirportEntry` category default.  Malformed data rows are
+    skipped rather than raising.
 
     Args:
         cache_file: Path to a cache produced by :func:`build_index`.
@@ -363,15 +398,18 @@ def load_index(cache_file: str) -> List[AirportEntry]:
                 # v2 source-provenance line -- not an airport entry.
                 continue
             parts = line.split("\t")
-            if len(parts) != 6:
+            if len(parts) not in (6, 7):
                 continue
             lat = _parse_float(parts[4])
             lon = _parse_float(parts[5])
             if lat is None or lon is None:
                 continue
-            entries.append(AirportEntry(
+            entry = AirportEntry(
                 code=parts[0], name=parts[1], city=parts[2],
-                country=parts[3], lat=lat, lon=lon))
+                country=parts[3], lat=lat, lon=lon)
+            if len(parts) == 7 and parts[6] in AIRPORT_CATEGORIES:
+                entry.category = parts[6]
+            entries.append(entry)
     return entries
 
 
@@ -385,7 +423,8 @@ def index_is_stale(apt_dat_paths: List[str], cache_file: str) -> bool:
 
     * the cache file is missing or unreadable;
     * the header is malformed (missing/incorrect magic or version);
-    * the header version is < 2 (v1 caches carry no source info);
+    * the header version is below the current one (v1 caches carry no
+      source info; pre-v3 caches carry no airport categories);
     * the set of recorded source paths differs from ``apt_dat_paths``
       (compared order-insensitively after :func:`os.path.abspath`);
     * a recorded source no longer exists on disk;
@@ -422,7 +461,9 @@ def index_is_stale(apt_dat_paths: List[str], cache_file: str) -> bool:
                 version = int(tokens[1])
             except ValueError:
                 return True
-            if version < 2:
+            if version < _CACHE_VERSION:
+                # Pre-v3 caches carry no airport categories (v1 also no
+                # source info): rebuild once to gain the new column.
                 return True
             # Read only the leading #SRC provenance lines.
             for line in handle:

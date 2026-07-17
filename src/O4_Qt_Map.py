@@ -154,6 +154,7 @@ class MapView(QGraphicsView):
         self._update_timer.timeout.connect(self._refresh_tiles)
 
         self._make_legend()
+        self._make_scan_status()
         self._apply_zoom()
 
     def _make_legend(self):
@@ -185,6 +186,61 @@ class MapView(QGraphicsView):
 
     def set_legend_visible(self, visible):
         self.legend.setVisible(bool(visible))
+
+    def _make_scan_status(self):
+        """Bottom-right overlay shown while installed scenery is being read
+        (a label + slim progress bar; hidden when no scan is running).  A
+        viewport child like the legend, so it must be re-pinned on resize
+        and after every scroll (QAbstractScrollArea drags viewport children
+        when panning)."""
+        from PySide6.QtWidgets import (QHBoxLayout, QLabel, QProgressBar,
+                                       QWidget)
+
+        self.scan_status = QWidget(self.viewport())
+        self.scan_status.setStyleSheet(
+            "background: rgba(17,24,32,190); border-radius: 6px;"
+        )
+        layout = QHBoxLayout(self.scan_status)
+        layout.setContentsMargins(8, 5, 8, 5)
+        layout.setSpacing(6)
+        self._scan_status_label = QLabel(self.scan_status)
+        self._scan_status_label.setStyleSheet(
+            "color: #E8EAED; font-size: 10px; background: transparent;"
+        )
+        self._scan_status_bar = QProgressBar(self.scan_status)
+        self._scan_status_bar.setTextVisible(False)
+        self._scan_status_bar.setFixedSize(120, 8)
+        self._scan_status_bar.setStyleSheet(
+            "QProgressBar { background: rgba(255,255,255,40);"
+            " border: none; border-radius: 4px; }"
+            "QProgressBar::chunk { background: #4C8DFF; border-radius: 4px; }"
+        )
+        layout.addWidget(self._scan_status_label)
+        layout.addWidget(self._scan_status_bar)
+        self.scan_status.hide()
+
+    def set_scan_status(self, text, done, total):
+        """Show/update the scan overlay.  ``total`` <= 0 means the extent is
+        not yet known — the bar goes indeterminate (busy) instead."""
+        self._scan_status_label.setText(str(text))
+        if total and total > 0:
+            self._scan_status_bar.setRange(0, int(total))
+            self._scan_status_bar.setValue(min(int(done), int(total)))
+        else:
+            self._scan_status_bar.setRange(0, 0)   # busy indicator
+        self.scan_status.adjustSize()
+        self._place_scan_status()
+        self.scan_status.show()
+
+    def clear_scan_status(self):
+        self.scan_status.hide()
+
+    def _place_scan_status(self):
+        self.scan_status.adjustSize()
+        self.scan_status.move(
+            self.viewport().width() - self.scan_status.width() - 10,
+            self.viewport().height() - self.scan_status.height() - 10,
+        )
 
     def _place_legend(self):
         self.legend.adjustSize()
@@ -245,6 +301,12 @@ class MapView(QGraphicsView):
             self._selection = {(lat, lon)}
             self.selection_changed.emit()
         self.active_changed.emit(self._active)
+        self.viewport().update()
+
+    def set_selection(self, tiles):
+        """Replace the selection wholesale (programmatic callers, tests)."""
+        self._selection = {(int(lat), int(lon)) for (lat, lon) in tiles}
+        self.selection_changed.emit()
         self.viewport().update()
 
     def clear_selection(self):
@@ -413,6 +475,14 @@ class MapView(QGraphicsView):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._place_legend()
+        self._place_scan_status()
+
+    def scrollContentsBy(self, dx, dy):
+        # QAbstractScrollArea pans by scrolling the whole viewport,
+        # dragging child widgets (the legend) along — re-pin it after.
+        super().scrollContentsBy(dx, dy)
+        self._place_legend()
+        self._place_scan_status()
         self._schedule_refresh()
 
     # ------------------------------------------------------------------

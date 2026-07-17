@@ -131,8 +131,8 @@ def test_cache_header_line(apt1, tmp_path):
     AI.build_index([apt1], cache)
     with open(cache, encoding="utf-8") as fh:
         header = fh.readline().strip()
-    # Cache format v2: the version integer is now 2.
-    assert header == "O4AIRPORTIDX 2 3"
+    # Cache format v3: the version integer is now 3.
+    assert header == "O4AIRPORTIDX 3 3"
 
 
 def test_field_integrity_roundtrip(apt1, tmp_path):
@@ -160,6 +160,12 @@ def test_field_integrity_roundtrip(apt1, tmp_path):
     # Helipad-102 fallback (fields 2,3).
     assert h.lat == pytest.approx(51.5000)
     assert h.lon == pytest.approx(-0.1000)
+
+    # v3 category column: icao_code metadata makes AAAA an icao_airport,
+    # BBBB (no metadata) a plain airport, header code 17 a heliport.
+    assert a.category == "icao_airport"
+    assert b.category == "airport"
+    assert h.category == "heliport"
 
 
 def test_load_missing_cache(tmp_path):
@@ -322,7 +328,7 @@ def test_v2_header_and_src_lines_written(apt1, tmp_path):
     cache = str(tmp_path / "index.tsv")
     AI.build_index([apt1], cache)
     lines = _read_lines(cache)
-    assert lines[0] == "O4AIRPORTIDX 2 3"
+    assert lines[0] == "O4AIRPORTIDX 3 3"
     # Exactly one source was read -> exactly one #SRC line, right after the
     # header and before the first data row.
     src_lines = [ln for ln in lines if ln.startswith("#SRC")]
@@ -386,6 +392,8 @@ def test_load_index_reads_handwritten_v1(tmp_path):
     assert by_code["AAAA"].city == "Aville"
     assert by_code["AAAA"].lat == pytest.approx(48.5)
     assert by_code["BBBB"].lon == pytest.approx(77.7)
+    # Pre-v3 rows carry no category column: the default applies.
+    assert by_code["AAAA"].category == "icao_airport"
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +494,36 @@ def test_stale_empty_paths_v2_empty_sources_is_false(tmp_path):
     count = AI.build_index([], cache)
     assert count == 0
     lines = _read_lines(cache)
-    assert lines[0] == "O4AIRPORTIDX 2 0"
+    assert lines[0] == "O4AIRPORTIDX 3 0"
     assert not any(ln.startswith("#SRC") for ln in lines)
     assert AI.index_is_stale([], cache) is False
+
+
+def test_stale_v2_cache_is_true(apt1, tmp_path):
+    # A v2 cache predates the category column and must rebuild once.
+    cache = str(tmp_path / "v2.tsv")
+    stat = os.stat(apt1)
+    with open(cache, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("O4AIRPORTIDX 2 1\n")
+        fh.write("#SRC %d %d %s\n" % (stat.st_mtime_ns, stat.st_size, apt1))
+        fh.write("\t".join(("AAAA", "Alpha", "", "",
+                            repr(48.5), repr(-6.25))) + "\n")
+    assert AI.index_is_stale([apt1], cache) is True
+
+
+def test_seaplane_base_category_with_datum(tmp_path):
+    # A seaplane base (header 16) with datum metadata gets its category;
+    # the fixture SSSS is skipped only for lacking coordinates.
+    apt = _write(tmp_path / "apt_sea.dat", """I
+1000 Generter apt.dat
+
+16   0 0 0 SEAA Seaplane With Datum
+1302 icao_code SEAA
+1302 datum_lat 59.0
+1302 datum_lon 10.0
+""")
+    cache = str(tmp_path / "index.tsv")
+    AI.build_index([apt], cache)
+    (entry,) = AI.load_index(cache)
+    # Header code 16 wins over icao presence: floats anchor differently.
+    assert entry.category == "seaplane_base"
