@@ -393,3 +393,38 @@ def test_step_progress_never_slides_backward():
     assert len(set(percents)) >= 2, "the bar must still advance"
     # A later, genuinely higher value still moves the bar.
     assert percents[-1] >= percents[1]
+
+
+def test_sibling_count_broadcast_when_a_tile_finishes():
+    """When a child runs out of work, survivors get a "siblings"
+    message so their Auto slot resolutions stop sharing the machine
+    with ghosts (live case: one tile's imagery fully cached and done
+    in seconds, the other throttled to half download throughput for
+    its entire 17-minute cold download)."""
+    run = _bare_run([(10, 10), (11, 11)], 2)
+
+    class _SendingChild(_FakeChild):
+        def __init__(self):
+            super().__init__()
+            self.sent = []
+
+        def send(self, payload):
+            self.sent.append(payload)
+            return True
+
+    finished, survivor = _SendingChild(), _SendingChild()
+    finished.tile, survivor.tile = (10, 10), (11, 11)
+    run._children = [finished, survivor]
+    run._queue.clear()
+    # The finished child's tile is on its last step.
+    run._next_step_index[(10, 10)] = len(run._program) - 1
+    run._next_step_index[(11, 11)] = 0
+    finished.running_step = run._program[-1]
+    run._child_step_done(finished)
+    assert finished.tile is None
+    assert {"cmd": "siblings", "count": 1} in survivor.sent
+    assert not finished.sent
+    # No further change: no duplicate broadcast.
+    survivor.sent.clear()
+    run._broadcast_sibling_count()
+    assert survivor.sent == []

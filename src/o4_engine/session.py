@@ -582,6 +582,19 @@ class EngineSession:
         if parallel_run is not None:
             parallel_run.shutdown_workers()
 
+    def set_parallel_siblings(self, count):
+        """Parallel-run parent notice: how many worker siblings still
+        hold work.  Auto slot resolutions (download workers above all)
+        read this from the environment, so a child outliving its
+        siblings stops sharing the machine with ghosts — the download
+        engine re-reads it mid-step and raises its worker count.
+        """
+        from O4_Parallel_Utils import PARALLEL_SIBLINGS_ENVIRONMENT_KEY
+
+        os.environ[PARALLEL_SIBLINGS_ENVIRONMENT_KEY] = str(
+            max(1, int(count)))
+        return True
+
     def cancel_tile(self, lat, lon):
         """Cancel one tile of the current run (spec §3.4).
 

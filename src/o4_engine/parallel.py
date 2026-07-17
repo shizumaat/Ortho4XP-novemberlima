@@ -424,6 +424,10 @@ class ParallelBuildRun:
         self._class_limits = class_limits(slots)
         self._class_active = {name: 0 for name in self._class_limits}
         self._next_step_index: dict = {}
+        # Children spawn believing `slots` siblings share the machine;
+        # broadcasts below shrink that as tiles finish (see
+        # _broadcast_sibling_count).
+        self._sibling_broadcast = slots
         # Memory-aware mesh admission (spec §3.8): per-tile estimates
         # from each tile's configured elevation detail level, admitted
         # against the machine's budget (at least one mesh always runs).
@@ -784,7 +788,30 @@ class ParallelBuildRun:
             if replacement is not None:
                 with self._lock:
                     self._dispatch_locked()
+        self._broadcast_sibling_count()
         self._maybe_finish()
+
+    def _broadcast_sibling_count(self):
+        """Tell surviving children how many siblings still hold work.
+
+        Children spawn with the slot count in their environment and
+        use it to share the machine (download slots above all).  That
+        static count over-throttles survivors once siblings finish:
+        live case — a two-tile run where one tile's imagery was fully
+        cached and done in seconds while the other spent a 17-minute
+        cold download at HALF throughput, sharing with a ghost.  The
+        child updates its environment (set_parallel_siblings) and the
+        download engine re-reads it mid-step to raise its workers.
+        """
+        with self._lock:
+            holders = [child for child in self._children
+                       if child.tile is not None and not child.retired]
+            count = max(1, len(holders) + len(self._queue))
+            if count == self._sibling_broadcast:
+                return
+            self._sibling_broadcast = count
+        for child in holders:
+            child.send({"cmd": "siblings", "count": count})
 
     def _on_child_exit(self, child):
         """The child's stdout closed: normal retirement or a crash."""
@@ -816,6 +843,7 @@ class ParallelBuildRun:
             if replacement is not None:
                 with self._lock:
                     self._dispatch_locked()
+        self._broadcast_sibling_count()
         self._maybe_finish()
 
     # -- OpenStreetMap cache warmer (spec §3.7) ---------------------------

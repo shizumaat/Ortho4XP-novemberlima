@@ -22,6 +22,10 @@ from O4_Parallel_Utils import (
 
 max_download_slots = 1
 max_convert_slots = 4
+
+# How often a running download queue re-resolves its Auto worker count
+# (a parallel sibling finishing frees download slots mid-step).
+DOWNLOAD_WORKER_RECHECK_SECONDS = 5.0
 skip_downloads = False
 skip_converts = False
 
@@ -42,6 +46,7 @@ def download_textures(
         1, workers or effective_download_slots(max_download_slots)
     )
     UI.vprint(1, f"-> Opening download queue with {worker_count} worker(s).")
+    worker_count_pinned = workers is not None
 
     progress_lock = threading.Lock()
     progress_state = {"done": 0, "pending": 0, "failed": 0}
@@ -115,8 +120,35 @@ def download_textures(
         producer_done_event.set()
 
     workers_list = parallel_launch(_download_task, download_queue, worker_count)
+    next_worker_recheck = time.time() + DOWNLOAD_WORKER_RECHECK_SECONDS
+
+    def _raise_worker_count_if_siblings_finished():
+        """Re-resolve the Auto download slots mid-step.
+
+        A parallel-run child spawns sharing the machine with its
+        siblings; when they finish, the parent broadcasts the shrunken
+        count and this step's remaining downloads deserve the freed
+        slots (a cold ZL18 tile otherwise spends a whole long step at
+        the shared rate, throttled for nobody).  Workers are only ever
+        added — the quit tokens below use the final count.
+        """
+        nonlocal worker_count, next_worker_recheck
+        if worker_count_pinned or time.time() < next_worker_recheck:
+            return
+        next_worker_recheck = time.time() + DOWNLOAD_WORKER_RECHECK_SECONDS
+        resolved = max(1, effective_download_slots(max_download_slots))
+        if resolved > worker_count:
+            UI.vprint(
+                1,
+                f"-> Raising download workers {worker_count} -> {resolved} "
+                "(parallel siblings finished).",
+            )
+            workers_list.extend(parallel_launch(
+                _download_task, download_queue, resolved - worker_count))
+            worker_count = resolved
 
     while not producer_done_event.is_set() and not UI.red_flag:
+        _raise_worker_count_if_siblings_finished()
         time.sleep(0.05)
 
     while not UI.red_flag:
@@ -124,6 +156,7 @@ def download_textures(
             pending = progress_state["pending"]
         if download_queue.empty() and pending == 0:
             break
+        _raise_worker_count_if_siblings_finished()
         time.sleep(0.05)
 
     for _ in range(worker_count):

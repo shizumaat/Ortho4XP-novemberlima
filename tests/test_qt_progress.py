@@ -226,6 +226,20 @@ def test_run_eta_autopatch_overrun_keeps_receding(session):
     assert 175.0 < remaining < 195.0
 
 
+def test_set_parallel_siblings_updates_environment(session, monkeypatch):
+    """The jsonl "siblings" command lands here: the child's Auto slot
+    resolutions read the count from the environment."""
+    from O4_Parallel_Utils import PARALLEL_SIBLINGS_ENVIRONMENT_KEY
+    import os
+
+    s, events = session
+    monkeypatch.setenv(PARALLEL_SIBLINGS_ENVIRONMENT_KEY, "2")
+    assert s.set_parallel_siblings(1) is True
+    assert os.environ[PARALLEL_SIBLINGS_ENVIRONMENT_KEY] == "1"
+    s.set_parallel_siblings(0)   # floor at one
+    assert os.environ[PARALLEL_SIBLINGS_ENVIRONMENT_KEY] == "1"
+
+
 def test_run_eta_live_rate_engages_on_slow_steps(session, monkeypatch):
     """The old fixed 20 s sample window could never accumulate the
     0.5 % gain an hours-long download step needs, so the live rate

@@ -156,6 +156,7 @@ def _build_handlers(session: EngineSession) -> Dict[str, Callable]:
         "build": session.build,
         "cancel": session.cancel,
         "cancel_tile": session.cancel_tile,
+        "siblings": session.set_parallel_siblings,
         "tile_info": session.tile_info,
         "config_describe": session.config_describe,
         "links_status": session.links_status,
@@ -373,7 +374,7 @@ def serve(stdin: TextIO, stdout: TextIO, owns_process: bool = False) -> None:
         write_obj(serialize_event(EngineHello(
             ortho4xp_version=_ortho4xp_version(),
             capabilities=("scan", "build", "cancel", "tile_info",
-                          "config", "links"))))
+                          "config", "links", "siblings"))))
 
         handlers = _build_handlers(session)
         for raw_line in stdin:
