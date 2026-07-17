@@ -17,7 +17,7 @@ import sys
 import threading
 import traceback
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -37,6 +38,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QStatusBar,
@@ -135,6 +137,63 @@ class _StdoutTee:
             pass
 
 
+class TwoLineElidedLabel(QLabel):
+    """Value label capped at two wrapped lines.
+
+    Text that would need a third line is elided in the MIDDLE so both
+    the head and the tail stay readable (elevation source lists carry
+    their most specific parts at both ends); the full text moves to the
+    tooltip.  The horizontal size policy is Ignored so a long value can
+    never widen its panel — extra length costs ellipsis, not width.
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self.setWordWrap(True)
+        policy = self.sizePolicy()
+        policy.setHorizontalPolicy(QSizePolicy.Ignored)
+        self.setSizePolicy(policy)
+        self._full_text = ""
+        self.setText(text)
+
+    def setText(self, text):
+        self._full_text = str(text)
+        self._refresh_elision()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh_elision()
+
+    def _fits_two_lines(self, candidate, width):
+        rect = self.fontMetrics().boundingRect(
+            0, 0, width, 100000, Qt.TextWordWrap, candidate
+        )
+        return rect.height() <= 2 * self.fontMetrics().lineSpacing() + 2
+
+    def _refresh_elision(self):
+        width = max(self.contentsRect().width(), 10)
+        text = self._full_text
+        if self._fits_two_lines(text, width):
+            display = text
+        else:
+            # Largest kept-character count whose head…tail split fits.
+            low, high = 0, len(text)
+            while low < high:
+                mid = (low + high + 1) // 2
+                head = text[: (mid + 1) // 2]
+                tail = text[len(text) - mid // 2 :]
+                if self._fits_two_lines(head + "…" + tail, width):
+                    low = mid
+                else:
+                    high = mid - 1
+            head = text[: (low + 1) // 2]
+            tail = text[len(text) - low // 2 :] if low else ""
+            display = head + "…" + tail
+        if display != super().text():
+            super().setText(display)
+        self.setToolTip(self._full_text if display != self._full_text else "")
+
+
 class _EngineBridge(QObject):
     """Marshals engine-session events onto the GUI thread.
 
@@ -226,6 +285,28 @@ class MainWindow(QMainWindow):
         self._make_menus()
         self._apply_prefs(initial=True)
 
+        # Persisted window layout: geometry (size + position), console
+        # drawer visibility and splitter split, remembered across
+        # launches in the prefs file.
+        self._layout_restored = False
+        self._console_defaulted = False
+        self._console_height = 0  # remembered while the drawer is hidden
+        geometry_b64 = str(self.prefs.get("window_geometry", ""))
+        if geometry_b64:
+            self.restoreGeometry(
+                QByteArray.fromBase64(geometry_b64.encode("ascii"))
+            )
+        self.console.setVisible(
+            bool(self.prefs.get("console_visible", True))
+        )
+        splitter_b64 = str(self.prefs.get("splitter_state", ""))
+        if splitter_b64:
+            self._layout_restored = bool(
+                self.splitter.restoreState(
+                    QByteArray.fromBase64(splitter_b64.encode("ascii"))
+                )
+            )
+
         if self._first_run:
             QTimer.singleShot(200, self.run_wizard)
         QTimer.singleShot(300, self.refresh_tiles)
@@ -301,7 +382,6 @@ class MainWindow(QMainWindow):
         self.map.status_message.connect(self._status)
 
         panel = QWidget()
-        panel.setFixedWidth(280)
         pv = QVBoxLayout(panel)
         pv.setContentsMargins(10, 10, 10, 10)
 
@@ -317,11 +397,9 @@ class MainWindow(QMainWindow):
         ig.addRow("Mesh built:", self.info_mesh)
         self.info_imagery = QLabel("—")
         ig.addRow("Imagery updated:", self.info_imagery)
-        self.info_elevation = QLabel("—")
-        self.info_elevation.setWordWrap(True)
+        self.info_elevation = TwoLineElidedLabel("—")
         ig.addRow("Elevation:", self.info_elevation)
-        self.info_airport_lidar = QLabel("—")
-        self.info_airport_lidar.setWordWrap(True)
+        self.info_airport_lidar = TwoLineElidedLabel("—")
         ig.addRow("Airport lidar:", self.info_airport_lidar)
         # Manual-setup affordance (VIEW): shown by the controller when
         # the model reports manual-download sources that could serve
@@ -439,12 +517,24 @@ class MainWindow(QMainWindow):
         self._elapsed_timer.setInterval(1000)
         self._elapsed_timer.timeout.connect(self._update_build_clock)
 
+        # The panel scrolls vertically instead of imposing its full
+        # height on the window: without this its minimum propagates into
+        # the splitter, where it silently squeezes the console drawer
+        # whenever the panel content grows (e.g. the build progress
+        # page) — the "console resizes by itself" jump.
+        panel_scroll = QScrollArea()
+        panel_scroll.setWidget(panel)
+        panel_scroll.setWidgetResizable(True)
+        panel_scroll.setFrameShape(QFrame.NoFrame)
+        panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        panel_scroll.setFixedWidth(280)
+
         center = QWidget()
         ch = QHBoxLayout(center)
         ch.setContentsMargins(0, 0, 0, 0)
         ch.setSpacing(0)
         ch.addWidget(self.map, 1)
-        ch.addWidget(panel)
+        ch.addWidget(panel_scroll)
 
         # Console drawer
         self.console = QPlainTextEdit()
@@ -458,8 +548,13 @@ class MainWindow(QMainWindow):
         self.splitter = QSplitter(Qt.Vertical)
         self.splitter.addWidget(center)
         self.splitter.addWidget(self.console)
-        self.splitter.setStretchFactor(0, 4)
-        self.splitter.setStretchFactor(1, 1)
+        # The console drawer keeps ITS height when the window resizes
+        # (stretch 0: all growth goes to the map) and cannot be dragged
+        # to zero — it only changes size at the user's splitter handle,
+        # never by itself.
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 0)
+        self.splitter.setCollapsible(1, False)
         self.setCentralWidget(self.splitter)
 
         status = QStatusBar()
@@ -611,11 +706,19 @@ class MainWindow(QMainWindow):
             self.output_dir(),
             self,
         )
+        settings_geometry = str(self.prefs.get("settings_geometry", ""))
+        if settings_geometry:
+            dialog.restoreGeometry(
+                QByteArray.fromBase64(settings_geometry.encode("ascii"))
+            )
         dialog.exec()
         # Blended settings apply immediately (Option C): every close path
         # keeps the changes, so the result is consumed unconditionally.
         old_xplane = self.prefs.get("xplane_dir", "")
         self.prefs = dialog.result_prefs()
+        self.prefs["settings_geometry"] = bytes(
+            dialog.saveGeometry().toBase64()
+        ).decode("ascii")
         save_prefs(self.prefs)
         self._apply_prefs()
         if self.prefs.get("xplane_dir", "") != old_xplane:
@@ -1401,10 +1504,53 @@ class MainWindow(QMainWindow):
             self.console.insertPlainText(text)
             self.console.moveCursor(QTextCursor.End)
 
+    CONSOLE_DEFAULT_LINES = 6
+
+    def _console_default_height(self):
+        metrics = self.console.fontMetrics()
+        document_margin = int(self.console.document().documentMargin())
+        return (
+            self.CONSOLE_DEFAULT_LINES * metrics.lineSpacing()
+            + 2 * (self.console.frameWidth() + document_margin)
+        )
+
+    def _apply_console_height(self, height):
+        sizes = self.splitter.sizes()
+        total = sum(sizes)
+        if total <= 0:
+            return
+        height = max(0, min(int(height), total // 2))
+        self.splitter.setSizes([total - height, height])
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._console_defaulted:
+            self._console_defaulted = True
+            self._sync_console_button()
+            if not self._layout_restored and self.console.isVisible():
+                self._apply_console_height(self._console_default_height())
+
     def toggle_console(self):
-        visible = not self.console.isVisible()
-        self.console.setVisible(visible)
-        self.console_btn.setText("Console ▴" if visible else "Console ▾")
+        self.set_console_visible(not self.console.isVisible())
+
+    def set_console_visible(self, visible):
+        """Show or hide the console drawer at a STEADY size: re-opening
+        restores the height it had when hidden (default: 6 lines)."""
+        if visible != self.console.isVisible():
+            if visible:
+                self.console.setVisible(True)
+                self._apply_console_height(
+                    self._console_height or self._console_default_height()
+                )
+            else:
+                self._console_height = self.splitter.sizes()[1]
+                self.console.setVisible(False)
+        self._sync_console_button()
+
+    def _sync_console_button(self):
+        self.console_btn.setText(
+            "Console ▴" if self.console.isVisible() else "Console ▾"
+        )
 
     def _hover(self, lat, lon):
         self.coords_label.setText("%.3f°, %.3f°" % (lat, lon))
@@ -1443,6 +1589,13 @@ class MainWindow(QMainWindow):
             self.prefs["imagery"] = self.imagery_combo.currentText()
         if self.zl_combo.currentIndex() >= 0:
             self.prefs["zl"] = int(self.zl_combo.currentText())
+        self.prefs["window_geometry"] = bytes(
+            self.saveGeometry().toBase64()
+        ).decode("ascii")
+        self.prefs["splitter_state"] = bytes(
+            self.splitter.saveState().toBase64()
+        ).decode("ascii")
+        self.prefs["console_visible"] = self.console.isVisible()
         save_prefs(self.prefs)
         event.accept()
 
