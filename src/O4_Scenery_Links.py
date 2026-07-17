@@ -21,6 +21,10 @@ class LinkStatus(Enum):
     """Disk-derived state of a tile's (or group's) X-Plane link."""
 
     INSTALLED = "installed"
+    # The tile's build directory itself lives in the scenery folder (no link
+    # involved) — X-Plane loads it, but there is nothing for Ortho4XP to
+    # remove: uninstalling would mean deleting the user's tile data.
+    PHYSICAL = "physical"
     NOT_INSTALLED = "not_installed"
     BROKEN = "broken"
     CONFLICT = "conflict"
@@ -153,7 +157,10 @@ def _resolve_status(link_path: str, target_real: str) -> LinkStatus:
             return LinkStatus.INSTALLED
         # Link resolves somewhere else -- foreign, never overwritten.
         return LinkStatus.CONFLICT
-    # A real directory or file occupies the name.
+    if os.path.realpath(link_path) == target_real:
+        # Not a link: the build directory itself sits in the scenery folder.
+        return LinkStatus.PHYSICAL
+    # A foreign real directory or file occupies the name.
     return LinkStatus.CONFLICT
 
 
@@ -210,7 +217,7 @@ def install(
     ``OSError``.
     """
     status = link_status(lat, lon, build_dir, scenery_dir, grouped)
-    if status is LinkStatus.INSTALLED:
+    if status in (LinkStatus.INSTALLED, LinkStatus.PHYSICAL):
         return
     if status is LinkStatus.UNAVAILABLE:
         raise ValueError(
@@ -247,6 +254,13 @@ def uninstall(
     status = link_status(lat, lon, build_dir, scenery_dir, grouped)
     if status is LinkStatus.NOT_INSTALLED:
         return
+    if status is LinkStatus.PHYSICAL:
+        name, _ = _names_and_target(lat, lon, build_dir, grouped)
+        raise ValueError(
+            f"{name!r} is the tile's own folder inside Custom Scenery, not a "
+            "link — Ortho4XP will not delete tile data. Move the folder out "
+            "of Custom Scenery if you want it uninstalled."
+        )
     if status is LinkStatus.CONFLICT:
         name, _ = _names_and_target(lat, lon, build_dir, grouped)
         raise ValueError(
@@ -263,27 +277,44 @@ def uninstall(
     _remove_link(os.path.join(scenery_dir, name))
 
 
-def installed_tiles(scenery_dir: str) -> dict:
-    """Scan ``scenery_dir`` for resolving per-tile links.
+def iter_installed_tiles(scenery_dir: str):
+    """Incremental form of :func:`installed_tiles` for live UIs.
 
-    Returns ``{(lat, lon): target_path}`` for every link named
-    ``zOrtho4XP_±XX±YYY`` that is a symlink/junction and still resolves.  Broken
-    links, foreign names, group links, and plain directories are skipped.
+    Yields ``(done, total, key, target_path)`` after EVERY directory entry
+    examined — ``done``/``total`` drive a progress indicator over the whole
+    Custom Scenery listing, and ``key``/``target_path`` carry the
+    ``(lat, lon)`` and resolved path when the entry is an installed tile
+    (``None``/``None`` otherwise).  Acceptance is identical to
+    :func:`installed_tiles`, which is this generator drained.
+    """
+    if not scenery_dir or not os.path.isdir(scenery_dir):
+        return
+    entries = os.listdir(scenery_dir)
+    total = len(entries)
+    for done, entry in enumerate(entries, start=1):
+        key = target = None
+        parsed = _parse_tile_name(entry)
+        if parsed is not None:
+            path = os.path.join(scenery_dir, entry)
+            # not isdir: broken link, or a plain file squatting on the name.
+            if os.path.isdir(path):
+                key, target = parsed, os.path.realpath(path)
+        yield done, total, key, target
+
+
+def installed_tiles(scenery_dir: str) -> dict:
+    """Scan ``scenery_dir`` for per-tile entries X-Plane will load.
+
+    Returns ``{(lat, lon): target_path}`` for every entry named
+    ``zOrtho4XP_±XX±YYY`` that is either a resolving symlink/junction or a
+    plain directory (a tile folder living directly in Custom Scenery is just
+    as installed as a linked one).  Broken links, foreign names, and group
+    links are skipped.
     """
     result = {}
-    if not scenery_dir or not os.path.isdir(scenery_dir):
-        return result
-    for entry in os.listdir(scenery_dir):
-        parsed = _parse_tile_name(entry)
-        if parsed is None:
-            continue
-        path = os.path.join(scenery_dir, entry)
-        if not _is_link(path):
-            continue
-        if not os.path.exists(path):
-            # Broken link -- not an installed tile.
-            continue
-        result[parsed] = os.path.realpath(path)
+    for _done, _total, key, target in iter_installed_tiles(scenery_dir):
+        if key is not None:
+            result[key] = target
     return result
 
 

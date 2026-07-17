@@ -328,3 +328,84 @@ def test_paths_with_spaces(tmp_path):
     assert SL.link_status(LAT, LON, str(build), str(scenery)) is LinkStatus.INSTALLED
     SL.uninstall(LAT, LON, str(build), str(scenery))
     assert SL.link_status(LAT, LON, str(build), str(scenery)) is LinkStatus.NOT_INSTALLED
+
+# ---------------------------------------------------------------------------
+# PHYSICAL: the tile's build dir itself lives inside Custom Scenery
+# ---------------------------------------------------------------------------
+def test_status_physical_build_dir_inside_scenery(tmp_path):
+    scenery = tmp_path / "Custom Scenery"
+    scenery.mkdir()
+    build = scenery / "zOrtho4XP_+48-006"
+    build.mkdir()
+    assert (
+        SL.link_status(LAT, LON, str(build), str(scenery))
+        is LinkStatus.PHYSICAL
+    )
+
+
+def test_install_is_noop_on_physical(tmp_path):
+    scenery = tmp_path / "Custom Scenery"
+    scenery.mkdir()
+    build = scenery / "zOrtho4XP_+48-006"
+    build.mkdir()
+    SL.install(LAT, LON, str(build), str(scenery))  # must not raise
+    # Still the real directory — no link was created anywhere.
+    assert not SL._is_link(str(build))
+
+
+def test_uninstall_refuses_physical_and_data_survives(tmp_path):
+    scenery = tmp_path / "Custom Scenery"
+    scenery.mkdir()
+    build = scenery / "zOrtho4XP_+48-006"
+    (build / "Earth nav data").mkdir(parents=True)
+    (build / "Earth nav data" / "data.dsf").write_text("payload")
+    with pytest.raises(ValueError):
+        SL.uninstall(LAT, LON, str(build), str(scenery))
+    assert (build / "Earth nav data" / "data.dsf").read_text() == "payload"
+
+
+def test_installed_tiles_includes_plain_tile_dirs(tmp_path):
+    scenery = tmp_path / "Custom Scenery"
+    scenery.mkdir()
+    # Physically installed tile (plain directory).
+    plain = scenery / "zOrtho4XP_+36-087"
+    plain.mkdir()
+    # Linked tile.
+    target = tmp_path / "Tiles" / "zOrtho4XP_+48-006"
+    target.mkdir(parents=True)
+    SL.install(48, -6, str(target), str(scenery))
+    # A plain FILE squatting on a tile name must be skipped.
+    (scenery / "zOrtho4XP_+10+010").write_text("not a dir")
+
+    result = SL.installed_tiles(str(scenery))
+    assert set(result) == {(36, -87), (48, -6)}
+    assert result[(36, -87)] == os.path.realpath(str(plain))
+
+
+# ---------------------------------------------------------------------------
+# Incremental scan (iter_installed_tiles) — drives the live map progress
+# overlay
+# ---------------------------------------------------------------------------
+def test_iter_installed_matches_installed(dirs, tmp_path):
+    scenery, build = dirs
+    # An installed symlink, a plain tile directory, a broken link, and a
+    # foreign entry — the full acceptance mix.
+    SL.install(LAT, LON, build, scenery)
+    os.mkdir(os.path.join(scenery, "zOrtho4XP_+50+010"))
+    os.symlink(str(tmp_path / "gone"),
+               os.path.join(scenery, "zOrtho4XP_+51+011"))
+    os.mkdir(os.path.join(scenery, "SomeAirportPack"))
+
+    steps = list(SL.iter_installed_tiles(scenery))
+    total_entries = len(os.listdir(scenery))
+    assert [d for (d, _t, _k, _p) in steps] == list(
+        range(1, total_entries + 1))
+    assert all(t == total_entries for (_d, t, _k, _p) in steps)
+    streamed = {k: p for (_d, _t, k, p) in steps if k is not None}
+    assert streamed == SL.installed_tiles(scenery)
+    assert set(streamed) == {(LAT, LON), (50, 10)}
+
+
+def test_iter_installed_missing_dir_yields_nothing(tmp_path):
+    assert list(SL.iter_installed_tiles(str(tmp_path / "absent"))) == []
+    assert list(SL.iter_installed_tiles("")) == []
