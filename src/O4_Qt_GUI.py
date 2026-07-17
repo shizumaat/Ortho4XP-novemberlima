@@ -1717,7 +1717,11 @@ def _elevation_row_texts(lat, lon, tile_custom_dem=""):
             )
         lidar_text = " · ".join(pieces) if pieces else "no airports found"
     elif summary["inset_providers"]:
-        lidar_text = "available: " + ", ".join(
+        # Sources a build WOULD fetch from (nothing downloaded yet) —
+        # the fetched case above announces itself ("N airports
+        # fetched"), so the bare list is unambiguous and the narrow
+        # field spends its width on the source names.
+        lidar_text = ", ".join(
             "%s (%s m)"
             % (code, ("%g" % resolution) if resolution else "?")
             for (code, resolution) in summary["inset_providers"]
