@@ -381,7 +381,7 @@ class Ortho4XP_GUI(tk.Tk):
 
         # reinitialization from last visit
         try:
-            f = open(FNAMES.resource_path(".last_gui_params.txt"), "r")
+            f = open(FNAMES.data_path(".last_gui_params.txt"), "r")
             (lat, lon, default_website, default_zl) = f.readline().split()
             custom_build_dir = f.readline().strip()
             # Validate lat/lon are integer tiles BEFORE setting them — a corrupt
@@ -810,7 +810,7 @@ class Ortho4XP_GUI(tk.Tk):
             if result == "cancel":
                 return        
         try:
-            f = open(FNAMES.resource_path(".last_gui_params.txt"), "w")
+            f = open(FNAMES.data_path(".last_gui_params.txt"), "w")
             f.write(
                 self.lat.get()
                 + " "

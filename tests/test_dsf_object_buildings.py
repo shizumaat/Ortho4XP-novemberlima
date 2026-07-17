@@ -42,6 +42,19 @@ ANCHOR_LONGITUDE = -80.0
 
 
 @pytest.fixture(autouse=True)
+def sandbox_ortho4xp_data_root(tmp_path, monkeypatch):
+    """USER RULING 2026-07-15 moved the sidecar caches under the
+    Ortho4XP data root (``Airport_mod_cache/<pack>/``).  In a source
+    checkout the data root resolves to the current working directory, so
+    without this pin any test that exercises ``read_dsf_object_buildings``
+    would write ``Airport_mod_cache/`` into the repository.  Sandbox
+    every test in this module (``ORTHO4XP_DATA_ROOT`` wins
+    ``O4_File_Names.resolve_data_root``)."""
+    monkeypatch.setenv("ORTHO4XP_DATA_ROOT",
+                       str(tmp_path / "o4_data_root"))
+
+
+@pytest.fixture(autouse=True)
 def disable_minimum_building_height(monkeypatch):
     """The geometric fixtures in this file are deliberately FLAT slabs
     (walls would obscure the ring-shape assertions), which the
@@ -647,6 +660,140 @@ class TestReadDsfObjectBuildings:
             tmp_path, "POLYGON_DEF lib/airport/pavement/asphalt.pol\n")
         assert D.read_dsf_object_buildings(dsf_path,
                                            xplane_root=None) == []
+
+
+# ── footprint sidecar cache (data root Airport_mod_cache/<pack>/) ────
+
+_FOOTPRINT_LEGACY_SIDECAR_NAME = "o4_object_footprints.cache"
+
+
+class TestObjectFootprintCache:
+    """The sidecar cache around ``read_dsf_object_buildings`` — a warm
+    hit must skip the O(n^2) contact-graph partition entirely and
+    reproduce the ring set byte-for-byte, invalidate on any ``.obj``
+    edit, and degrade safely on a corrupt sidecar or a disabled gate.
+    Per the user ruling 2026-07-15 the sidecar lives under the data
+    root's ``Airport_mod_cache/<pack name>/`` — never inside the pack —
+    and any pre-ruling in-pack sidecar is removed on resolution."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_data_root(self, tmp_path, monkeypatch):
+        """Pin the data root under ``tmp_path`` — ``ORTHO4XP_DATA_ROOT``
+        wins ``O4_File_Names.resolve_data_root`` — so sidecars never
+        escape the test sandbox."""
+        self.data_root = tmp_path / "o4root"
+        monkeypatch.setenv("ORTHO4XP_DATA_ROOT", str(self.data_root))
+
+    def _sidecar_path(self, harness):
+        pack_name = os.path.basename(
+            os.path.abspath(harness.pack_root))
+        dsf_stem = os.path.splitext(
+            os.path.basename(harness.dsf_path))[0]
+        return os.path.join(
+            str(self.data_root), "Airport_mod_cache", pack_name,
+            f"o4_object_footprints_{dsf_stem}.cache")
+
+    def _bump_obj_mtime(self, harness, resource_relative_path):
+        obj_path = os.path.join(harness.pack_root,
+                                *resource_relative_path.split("/"))
+        file_stat = os.stat(obj_path)
+        os.utime(obj_path,
+                 (file_stat.st_atime + 100, file_stat.st_mtime + 100))
+
+    def test_warm_hit_returns_equal_and_skips_partition(
+            self, object_building_harness):
+        harness = object_building_harness
+        first = D.read_dsf_object_buildings(harness.dsf_path,
+                                            xplane_root=None)
+        partitions_after_first = len(harness.partition_calls)
+        assert partitions_after_first > 0
+        assert os.path.isfile(self._sidecar_path(harness))
+
+        second = D.read_dsf_object_buildings(harness.dsf_path,
+                                             xplane_root=None)
+        # Identical ring set …
+        assert second == first
+        # … produced WITHOUT re-running the partition (cache hit).
+        assert len(harness.partition_calls) == partitions_after_first
+
+    def test_touching_an_obj_invalidates(self, object_building_harness):
+        harness = object_building_harness
+        D.read_dsf_object_buildings(harness.dsf_path, xplane_root=None)
+        partitions_before = len(harness.partition_calls)
+        assert os.path.isfile(self._sidecar_path(harness))
+
+        self._bump_obj_mtime(harness, "Terminals/Hangar/big_bake.obj")
+        D.read_dsf_object_buildings(harness.dsf_path, xplane_root=None)
+        # Stale fingerprint forces a full recompute (partition ran again).
+        assert len(harness.partition_calls) > partitions_before
+
+    def test_gate_zero_disables_read_and_write(
+            self, object_building_harness, monkeypatch):
+        harness = object_building_harness
+        monkeypatch.setenv("O4_OBJECT_FOOTPRINT_CACHE", "0")
+        D.read_dsf_object_buildings(harness.dsf_path, xplane_root=None)
+        partitions_first = len(harness.partition_calls)
+        # No sidecar is written when the gate is off.
+        assert not os.path.isfile(self._sidecar_path(harness))
+        D.read_dsf_object_buildings(harness.dsf_path, xplane_root=None)
+        # And the second call recomputes rather than serving a cache.
+        assert len(harness.partition_calls) > partitions_first
+
+    def test_corrupt_sidecar_falls_back_to_recompute(
+            self, object_building_harness):
+        harness = object_building_harness
+        first = D.read_dsf_object_buildings(harness.dsf_path,
+                                            xplane_root=None)
+        sidecar = self._sidecar_path(harness)
+        assert os.path.isfile(sidecar)
+        with open(sidecar, "wb") as handle:
+            handle.write(b"not a valid pickle \x00\x01\x02")
+        partitions_before = len(harness.partition_calls)
+
+        second = D.read_dsf_object_buildings(harness.dsf_path,
+                                             xplane_root=None)
+        # A garbled sidecar never raises — it recomputes and rewrites …
+        assert second == first
+        assert len(harness.partition_calls) > partitions_before
+
+    def test_no_pack_root_disables_caching(self, tmp_path):
+        # With no resolvable pack root (None) or a non-directory, the
+        # sidecar helper declines — the reader then behaves as it did
+        # before the cache existed.
+        loose_dsf = tmp_path / "loose.dsf"
+        loose_dsf.write_text("binary-placeholder")
+        assert D._object_footprint_sidecar(
+            str(loose_dsf), None, 1.0, 25.0) == (None, None)
+        assert D._object_footprint_sidecar(
+            str(loose_dsf), str(tmp_path / "missing"), 1.0, 25.0) \
+            == (None, None)
+
+    def test_sidecar_lands_under_data_root_not_in_pack(
+            self, object_building_harness):
+        harness = object_building_harness
+        D.read_dsf_object_buildings(harness.dsf_path, xplane_root=None)
+        sidecar = self._sidecar_path(harness)
+        assert os.path.isfile(sidecar)
+        assert sidecar.startswith(
+            os.path.join(str(self.data_root), "Airport_mod_cache"))
+        # Nothing cache-shaped may land inside the scenery pack (user
+        # ruling 2026-07-15).
+        pack_files = []
+        for directory, _subdirectories, file_names in os.walk(
+                harness.pack_root):
+            pack_files.extend(file_names)
+        assert not any(name.endswith(".cache") for name in pack_files)
+
+    def test_stale_legacy_in_pack_sidecar_removed(
+            self, object_building_harness):
+        harness = object_building_harness
+        legacy = os.path.join(harness.pack_root,
+                              _FOOTPRINT_LEGACY_SIDECAR_NAME)
+        with open(legacy, "wb") as handle:
+            handle.write(b"pre-ruling in-pack sidecar")
+        D.read_dsf_object_buildings(harness.dsf_path, xplane_root=None)
+        # The old in-pack file was cleaned up on sidecar resolution.
+        assert not os.path.exists(legacy)
 
 
 # ── tier (b), real workstream-W2 reader ──────────────────────────────

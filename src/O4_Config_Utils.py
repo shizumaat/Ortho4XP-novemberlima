@@ -57,8 +57,8 @@ _LOGGER.setLevel(logging.INFO)
 handler = logging.StreamHandler()
 _LOGGER.addHandler(handler)
 
-global_cfg_file = FNAMES.resource_path("Ortho4XP.cfg")
-global_cfg_bak_file = FNAMES.resource_path("Ortho4XP.cfg.bak")
+global_cfg_file = FNAMES.data_path("Ortho4XP.cfg")
+global_cfg_bak_file = FNAMES.data_path("Ortho4XP.cfg.bak")
 
 
 def set_global_variables(var: str, value: str) -> None:
@@ -137,6 +137,7 @@ try:
     f.close()
 except FileNotFoundError:
     # Create a new global config file using default values
+    os.makedirs(os.path.dirname(global_cfg_file), exist_ok=True)
     with open(global_cfg_file, "w") as file:
         for var, value in cfg_global_tile_vars.items():
             # Remove global_ prefix from cfg_global_tile_vars since that's not

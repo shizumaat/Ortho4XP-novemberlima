@@ -1,0 +1,153 @@
+# Build downloadable, double-click-to-run Ortho4XP apps for macOS and Windows.
+#
+# No local Windows (or Intel Mac) machine is needed: GitHub's hosted runners
+# build on real macOS and Windows for us.
+#
+# Trigger:
+#   - manually from the GitHub "Actions" tab (workflow_dispatch), or
+#   - by pushing a tag like v1.50.1, which also attaches the zips to a
+#     GitHub Release so users can download them from the Releases page.
+#
+# Outputs (as workflow artifacts / release assets):
+#   Ortho4XP-macOS-arm64.zip      — Ortho4XP.app for Apple Silicon
+#   Ortho4XP-macOS-intel.zip      — Ortho4XP.app for Intel Macs
+#   Ortho4XP-Windows-x64.zip      — folder with Ortho4XP_Qt.exe
+#   Ortho4XP-Linux-x86_64.tar.gz  — folder with the Ortho4XP_Qt executable
+#
+# Everything (Python itself, PySide6, gdal, the Triangle4XP/DSFTool binaries
+# in Utils/) is bundled by PyInstaller, so users never touch a command line.
+
+name: Build apps
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15        # Apple Silicon
+            arch: arm64
+          - runner: macos-15-intel  # Intel; GitHub supports this label into 2027
+            arch: intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # gdal only powers the optional lidar elevation insets; if no wheel
+          # exists for this platform the app still works, so fall back to
+          # installing everything except gdal rather than failing the build.
+          python -m pip install -r requirements.txt || {
+            grep -viE '^gdal' requirements.txt > req-nogdal.txt
+            python -m pip install -r req-nogdal.txt
+          }
+          python -m pip install pyinstaller
+
+      - name: Build Ortho4XP.app
+        run: python -m PyInstaller Ortho4XP_Qt.spec --noconfirm
+
+      # Ad-hoc signature: lets the app launch on Apple Silicon at all.
+      # (A Developer ID + notarization step can replace this later so users
+      # don't need the right-click-Open / "Open Anyway" dance.)
+      - name: Sign (ad-hoc)
+        run: codesign --force --deep --sign - dist/Ortho4XP.app
+
+      - name: Zip
+        run: ditto -c -k --keepParent dist/Ortho4XP.app Ortho4XP-macOS-${{ matrix.arch }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Ortho4XP-macOS-${{ matrix.arch }}
+          path: Ortho4XP-macOS-${{ matrix.arch }}.zip
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"  # matches the cp313 wheels bundled in Utils/win
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install Utils\win\gdal-3.12.2-cp313-cp313-win_amd64.whl
+          python -m pip install Utils\win\scikit_fmm-2025.6.23-cp313-cp313-win_amd64.whl
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build Ortho4XP for Windows
+        run: python -m PyInstaller Ortho4XP_Qt.spec --noconfirm
+
+      - name: Zip
+        run: Compress-Archive -Path dist\Ortho4XP_Qt -DestinationPath Ortho4XP-Windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Ortho4XP-Windows-x64
+          path: Ortho4XP-Windows-x64.zip
+
+  build-linux:
+    # Build on the oldest supported Ubuntu: PyInstaller output needs the
+    # build machine's glibc or newer, so older build = wider compatibility.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y libegl1
+          python -m pip install --upgrade pip
+          # gdal only powers the optional lidar elevation insets; pip has no
+          # Linux wheel matching the system libgdal here, so build without it
+          # rather than failing (the app logs one line and disables insets).
+          python -m pip install -r requirements.txt || {
+            grep -viE '^gdal' requirements.txt > req-nogdal.txt
+            python -m pip install -r req-nogdal.txt
+          }
+          python -m pip install pyinstaller
+
+      - name: Build Ortho4XP for Linux
+        run: python -m PyInstaller Ortho4XP_Qt.spec --noconfirm
+
+      - name: Tar (preserves executable bits)
+        run: tar -czf Ortho4XP-Linux-x86_64.tar.gz -C dist Ortho4XP_Qt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Ortho4XP-Linux-x86_64
+          path: Ortho4XP-Linux-x86_64.tar.gz
+
+  release:
+    # Only on version tags: publish the zips on the Releases page.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-macos, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.zip
+            *.tar.gz

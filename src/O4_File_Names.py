@@ -101,6 +101,14 @@ def data_path(relative_path):
     return os.path.join(current_data_root(), relative_path)
 
 
+def airport_index_cache():
+    """The offline airport search index (O4_Airport_Index TSV cache).
+
+    Built by the map window from X-Plane's Global Airports apt.dat;
+    also read by the bathymetry band's airport-radius gate."""
+    return data_path(".airport_index.tsv")
+
+
 # Read-only, shipped with the app.
 Provider_dir = resource_path("Providers")
 Extent_dir = resource_path("Extents")
@@ -497,6 +505,122 @@ def airport_inset_provenance(lat, lon, icao, provider_code):
     return os.path.join(
         airport_inset_directory(lat, lon),
         icao + "_" + provider_code.lower() + ".json",
+    )
+
+
+def tile_overlay_directory(lat, lon):
+    """Directory holding the tile-wide elevation-level overlays for a tile.
+
+    Sibling of the airport-inset cache, e.g.
+    ``Elevation_data/+30-090/N36W087_tile_overlay/``.
+    """
+    return os.path.join(
+        Elevation_dir,
+        round_latlon(lat, lon),
+        hem_latlon(lat, lon) + "_tile_overlay",
+    )
+
+
+def tile_overlay_index(lat, lon):
+    """The per-tile overlay discovery index (including negative results)."""
+    return os.path.join(tile_overlay_directory(lat, lon), "index.json")
+
+
+def _tile_overlay_stem(provider_code, target_resolution_m):
+    """Cache stem keyed by provider and warp resolution, e.g.
+    ``usgs3dep_10.29m`` — changing the elevation level changes the target
+    resolution and therefore the cache key."""
+    resolution_token = ("%.2f" % float(target_resolution_m)).rstrip(
+        "0"
+    ).rstrip(".")
+    return provider_code.lower() + "_" + resolution_token + "m"
+
+
+def tile_overlay_dem(lat, lon, provider_code, target_resolution_m):
+    """The warped EPSG:4326 float32 GeoTIFF covering the whole tile."""
+    return os.path.join(
+        tile_overlay_directory(lat, lon),
+        _tile_overlay_stem(provider_code, target_resolution_m) + ".tif",
+    )
+
+
+def tile_overlay_provenance(lat, lon, provider_code, target_resolution_m):
+    """The provenance sidecar accompanying a tile-wide overlay GeoTIFF."""
+    return os.path.join(
+        tile_overlay_directory(lat, lon),
+        _tile_overlay_stem(provider_code, target_resolution_m) + ".json",
+    )
+
+
+def coastline_band_directory(lat, lon):
+    """Directory holding the coastline lidar band cells for a tile, e.g.
+    ``Elevation_data/+30-090/N36W087_coastline_band/``."""
+    return os.path.join(
+        Elevation_dir,
+        round_latlon(lat, lon),
+        hem_latlon(lat, lon) + "_coastline_band",
+    )
+
+
+def coastline_band_index(lat, lon):
+    """The band stamp: chosen grid factor + per-cell fetch outcomes."""
+    return os.path.join(coastline_band_directory(lat, lon), "index.json")
+
+
+def coastline_band_cell_dem(
+    lat, lon, cell_column, cell_row, provider_code, target_resolution_m
+):
+    """One warped band cell, keyed by cell indices, provider and warp
+    resolution, e.g. ``cell_03_07_usgs3dep_10.29m.tif``."""
+    return os.path.join(
+        coastline_band_directory(lat, lon),
+        "cell_%02d_%02d_" % (cell_column, cell_row)
+        + _tile_overlay_stem(provider_code, target_resolution_m)
+        + ".tif",
+    )
+
+
+def coastline_band_vrt(lat, lon, provider_code):
+    """The virtual mosaic of every fetched band cell (the bake input)."""
+    return os.path.join(
+        coastline_band_directory(lat, lon),
+        "band_" + provider_code.lower() + ".vrt",
+    )
+
+
+def bathymetry_band_directory(lat, lon):
+    """Directory holding the coastal bathymetry band cells for a tile, e.g.
+    ``Elevation_data/+20-160/N21W160_bathymetry_band/``."""
+    return os.path.join(
+        Elevation_dir,
+        round_latlon(lat, lon),
+        hem_latlon(lat, lon) + "_bathymetry_band",
+    )
+
+
+def bathymetry_band_index(lat, lon):
+    """The bathymetry band stamp: provider + per-cell fetch outcomes."""
+    return os.path.join(bathymetry_band_directory(lat, lon), "index.json")
+
+
+def bathymetry_band_cell(
+    lat, lon, cell_column, cell_row, provider_code, target_resolution_m
+):
+    """One warped bathymetry band cell, keyed like the coastline band's,
+    e.g. ``cell_03_07_cudemhawaii_10.0m.tif``."""
+    return os.path.join(
+        bathymetry_band_directory(lat, lon),
+        "cell_%02d_%02d_" % (cell_column, cell_row)
+        + _tile_overlay_stem(provider_code, target_resolution_m)
+        + ".tif",
+    )
+
+
+def bathymetry_band_vrt(lat, lon, provider_code):
+    """The virtual mosaic of every fetched bathymetry band cell."""
+    return os.path.join(
+        bathymetry_band_directory(lat, lon),
+        "band_" + provider_code.lower() + ".vrt",
     )
 
 
