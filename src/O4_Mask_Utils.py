@@ -219,9 +219,9 @@ def build_masks(tile, for_imagery=False):
         > 0
     )
     shallow_water_categories = None
-    if (bathymetry_band_vrt is None or airport_gated_band) and str(
-        getattr(tile, "osm_shallow_water_fallback", True)
-    ) == "True":
+    if shallow_water_fallback_wanted(
+        tile, dico_sea, bathymetry_band_vrt, airport_gated_band
+    ):
         shallow_water_categories = load_shallow_water_polygons(tile)
 
     if legacy_dem_refinement:
@@ -534,6 +534,26 @@ def build_dem_pre_mask(til_x, til_y, tile):
         dem_array = numpy.zeros((6144, 6144), dtype=numpy.uint8)
     return dem_array
 ################################################################################
+
+################################################################################
+def shallow_water_fallback_wanted(tile, dico_sea, bathymetry_band_vrt,
+                                  airport_gated_band):
+    """Whether the mapped shallow-water fallback should download at all.
+
+    Masks are only ever built for the squares in ``dico_sea``, so a
+    landlocked tile (no sea or sea-equivalent water in the mask region,
+    ``dico_sea`` empty) must not spend two Overpass round trips on reef
+    and tidal-flat queries whose result could never be rasterized.
+    Beyond that, the fallback loads when no measured band covers the
+    tile — or alongside an airport-gated band, whose beyond-the-radius
+    squares it fills — and only while the fallback setting is on.
+    """
+    if not dico_sea:
+        return False
+    if bathymetry_band_vrt is not None and not airport_gated_band:
+        return False
+    return str(getattr(tile, "osm_shallow_water_fallback", True)) == "True"
+
 
 ################################################################################
 def load_shallow_water_polygons(tile):

@@ -335,6 +335,40 @@ def test_shallow_water_fallback_query_uses_margin(monkeypatch):
         )
 
 
+def test_shallow_water_fallback_skipped_on_landlocked_tile():
+    """A tile with no sea in the mask region (``dico_sea`` empty) never
+    downloads the reef/tidal-flat fallback: masks are only built for
+    ``dico_sea`` squares, so the data could never be rasterized."""
+    tile = types.SimpleNamespace(lat=48, lon=8,
+                                 osm_shallow_water_fallback=True)
+    assert not MASK.shallow_water_fallback_wanted(
+        tile, dico_sea={}, bathymetry_band_vrt=None,
+        airport_gated_band=False)
+
+
+def test_shallow_water_fallback_gating_matrix():
+    """Coastal tiles keep the historic behavior: load with no band,
+    load alongside an airport-gated band, skip under a full band, and
+    honour the fallback setting."""
+    coastal_sea = {(0, 0): [(0.0,) * 6]}
+    tile = types.SimpleNamespace(lat=37, lon=-8,
+                                 osm_shallow_water_fallback=True)
+    assert MASK.shallow_water_fallback_wanted(
+        tile, coastal_sea, bathymetry_band_vrt=None,
+        airport_gated_band=False)
+    assert MASK.shallow_water_fallback_wanted(
+        tile, coastal_sea, bathymetry_band_vrt="band.vrt",
+        airport_gated_band=True)
+    assert not MASK.shallow_water_fallback_wanted(
+        tile, coastal_sea, bathymetry_band_vrt="band.vrt",
+        airport_gated_band=False)
+    tile_fallback_off = types.SimpleNamespace(
+        lat=37, lon=-8, osm_shallow_water_fallback=False)
+    assert not MASK.shallow_water_fallback_wanted(
+        tile_fallback_off, coastal_sea, bathymetry_band_vrt=None,
+        airport_gated_band=False)
+
+
 # =====================================================================
 # Shared fixtures for the build_masks integration tests
 # =====================================================================
@@ -607,8 +641,12 @@ def test_shallow_water_fallback_loads_alongside_gated_band(
         "load_shallow_water_polygons",
         lambda tile: fallback_loads.append(tile) or None,
     )
-    # No mask squares to process: only the resolution logic runs.
-    monkeypatch.setattr(MASK, "record_water_tris", lambda tile: ({}, {}))
+    # One out-of-range sea square: the tile counts as coastal for the
+    # landlocked gate (an empty dico_sea skips the fallback entirely),
+    # but build_mask returns immediately on it, so only the resolution
+    # logic actually runs.
+    monkeypatch.setattr(
+        MASK, "record_water_tris", lambda tile: ({(0, 0): []}, {}))
 
     tile = _make_tile(
         data_root,
