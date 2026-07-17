@@ -38,6 +38,7 @@ import O4_UI_Utils as UI
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from shapely.geometry.base import BaseGeometry
+from shapely.affinity import translate as shapely_translate
 from shapely.ops import linemerge, nearest_points, substring, unary_union
 from shapely.strtree import STRtree
 
@@ -162,6 +163,177 @@ def _carriageway_width_for(highway_type: str | None,
     return HIGHWAY_CARRIAGEWAY_WIDTH_M.get(highway_type, default_m)
 
 
+# Per-lane width for ``lanes=``-derived carriageway sizing (typical
+# rural/urban lane, between the 3.0 m urban minimum and the 3.65 m
+# trunk standard).
+LANE_WIDTH_M = 3.5
+
+
+def _carriageway_width_from_tags(highway_type: str | None,
+                                 tags: dict | None,
+                                 default_m: float) -> float:
+    """Carriageway width in metres for a road way, preferring the way's
+    own OSM measurements over the per-type table (user 2026-07-16,
+    EGPB: the table's 18 m ``primary`` entry sized the A970's ramps at
+    ~3× the mapped ~6.5 m single carriageway):
+
+      1. ``width=`` — metres (bare number, ``6.5 m``, or a comma
+         decimal), sanity-clamped to [2.5, 40] m;
+      2. ``lanes=`` × ``LANE_WIDTH_M``;
+      3. the ``HIGHWAY_CARRIAGEWAY_WIDTH_M`` table via
+         :func:`_carriageway_width_for` (which also serves the
+         ``railway`` / ``railway_twin`` pseudo-types).
+
+    Road caches written before the 2026-07-16 tag-schema bump carry
+    neither tag, so they fall through to the table unchanged.
+    """
+    if tags:
+        raw_width = tags.get("width")
+        if raw_width:
+            text = str(raw_width).strip().lower()
+            if text.endswith("m"):
+                text = text[:-1].strip()
+            try:
+                width_value = float(text.replace(",", "."))
+            except ValueError:
+                width_value = None
+            if width_value is not None and 2.5 <= width_value <= 40.0:
+                return width_value
+        raw_lanes = tags.get("lanes")
+        if raw_lanes:
+            try:
+                lane_count = int(str(raw_lanes).strip())
+            except ValueError:
+                lane_count = None
+            if lane_count is not None and 1 <= lane_count <= 10:
+                return max(4.0, lane_count * LANE_WIDTH_M)
+    return _carriageway_width_for(highway_type, default_m)
+
+
+# ── Portal OUTWARD ramp width (user ruling 2026-07-15, KBNA runway-02C,
+# supersedes the 2026-07-14c "as wide as the MOUTH FACE" rule) ────────
+# A tunnel-portal object whose sides slant up into retaining walls has a
+# footprint far wider than the DRIVABLE road that emerges from it (KBNA
+# portal 1: an 84 m footprint over a 6-lane, 21 m carriageway).  The
+# outward approach ramp must match the drivable road, never the full
+# footprint, resolved as the first available of:
+#   1. the mapped OSM carriageway width of the road crossing the
+#      footprint (``_carriageway_width_from_tags``) PLUS a small shoulder
+#      margin;
+#   2. else the classified deck cross-section width
+#      (``BridgeStructure.deck_width_m`` — the narrower rotated-rectangle
+#      dimension of the drivable deck surface);
+#   3. else the mouth-face width as a last resort.
+# The result is ALWAYS capped at the mouth-face width (never wider than
+# the object it emerges from).
+PORTAL_RAMP_SHOULDER_MARGIN_M = 2.0
+# A big-road highway way within this distance of the portal footprint is
+# the road the outward ramp follows; the draped/OSM centrelines the
+# corridor walks carry no tags, so the mapped width is re-associated to
+# the tagged big-road ways by geometry (the plumbing chosen 2026-07-15).
+PORTAL_ROAD_ASSOCIATION_M = 15.0
+
+
+def _mapped_osm_carriageway_width_m(layout, footprint, to_meters):
+    """Widest mapped OSM carriageway (via ``_carriageway_width_from_tags``)
+    of a big-road highway way crossing — within
+    :data:`PORTAL_ROAD_ASSOCIATION_M` of — the portal ``footprint``, in
+    metres.  ``None`` when no highway way is near the footprint or the
+    big-road cache is absent.
+
+    The draped road centrelines the corridor already walks
+    (``_draped_road_centerlines_meters``) come from the sibling DSF road
+    network and carry NO OSM tags, and the OSM fallback
+    (``_load_underpass_osm_road_lines``) drops the tags too — so the
+    mapped width cannot be read off the walked lines.  It is instead
+    re-associated by geometry to the tagged big-road ways
+    (``_load_osm_big_roads``), the same cache the level-crossing veto and
+    the underpass fallback read."""
+    try:
+        from .pipeline import _load_osm_big_roads
+        nodes_raw, ways_raw = _load_osm_big_roads(
+            layout.anchor[0], layout.anchor[1]
+        )
+    except Exception:
+        return None
+    if not ways_raw:
+        return None
+    nodes_meters: dict[str, tuple[float, float]] = {}
+    for node_id, (latitude, longitude) in nodes_raw.items():
+        nodes_meters[node_id] = to_meters(longitude, latitude)
+    best = None
+    for _way_id, node_refs, tags in ways_raw:
+        if tags.get("highway") is None:
+            continue  # railway ways carry no carriageway width
+        points = [nodes_meters[n] for n in node_refs if n in nodes_meters]
+        if len(points) < 2:
+            continue
+        try:
+            line = LineString(points)
+            if (line.is_empty
+                    or line.distance(footprint) > PORTAL_ROAD_ASSOCIATION_M):
+                continue
+        except _GEOM_EXC:
+            continue
+        # default 0.0 → an unknown highway type resolves to 0 and is
+        # skipped; width= / lanes= / a known type table entry all resolve
+        # to a positive carriageway width.
+        width = _carriageway_width_from_tags(tags.get("highway"), tags, 0.0)
+        if width > 0.0 and (best is None or width > best):
+            best = width
+    return best
+
+
+def _portal_outward_ramp_width_m(
+        layout, portal, footprint, to_meters, mouth_face_width_m):
+    """Resolve the portal OUTWARD ramp width (user ruling 2026-07-15):
+    mapped OSM carriageway + shoulder → classified deck-face width →
+    mouth-face width, always capped at the mouth-face width.  Returns
+    ``(width_m, provenance)``; ``width_m`` is ``None`` only when no source
+    resolves (no OSM road, no deck width, no mouth face)."""
+    cap = mouth_face_width_m
+    mapped = _mapped_osm_carriageway_width_m(layout, footprint, to_meters)
+    if mapped is not None and mapped > 0.0:
+        width = mapped + PORTAL_RAMP_SHOULDER_MARGIN_M
+        provenance = (
+            f"mapped OSM {mapped:.1f} m + "
+            f"{PORTAL_RAMP_SHOULDER_MARGIN_M:.0f} m shoulder")
+    else:
+        deck_face = getattr(portal["bridge"], "deck_width_m", None)
+        if deck_face is not None and deck_face > 0.0:
+            width = float(deck_face)
+            provenance = f"deck-face {deck_face:.1f} m"
+        elif cap is not None and cap > 0.0:
+            width = float(cap)
+            provenance = "mouth-face (last resort)"
+        else:
+            return None, "unresolved"
+    if cap is not None and cap > 0.0 and width > cap:
+        width = float(cap)
+        provenance += f" (capped at mouth face {cap:.1f} m)"
+    return width, provenance
+
+
+# ── At-grade level-crossing veto for IMPLIED bores (user 2026-07-16,
+# EGPB / Gibraltar) ──────────────────────────────────────────────────
+# A public through-road crossing runway pavement is normally assumed to
+# tunnel under it (``IMPLIED_CROSSING_TUNNELS``) — but a handful of
+# airports have a genuine GATED LEVEL CROSSING (Sumburgh's A970 across
+# runway 09/27, Gibraltar's Winston Churchill Avenue).  OSM maps these
+# with positive at-grade evidence on the crossing way's own nodes:
+# ``aeroway=aircraft_crossing`` (usually with ``crossing:aircraft=*``)
+# at the intersection, plus ``barrier`` gates / lift gates where the
+# road is closed for aircraft movements.  Evidence within the radii
+# below of a crossing segment vetoes the synthetic bore — the road
+# stays at grade.  Mapped ``tunnel=yes`` ways are never vetoed (the
+# mapper's word beats the heuristic in both directions).
+AIRCRAFT_CROSSING_VETO_DIST_M = 60.0    # tag sits ON the crossing
+LEVEL_CROSSING_GATE_VETO_DIST_M = 120.0  # gates flank the runway strip
+LEVEL_CROSSING_BARRIER_VALUES = frozenset((
+    "gate", "lift_gate", "swing_gate", "sliding_gate",
+))
+
+
 def _local_meter_projections(anchor: tuple[float, float]):
     """Return ``(to_meters, meters_to_lat_lon)`` closures converting
     between (lon, lat) degrees and the local-meter frame anchored at
@@ -211,21 +383,25 @@ PORTAL_TUNNEL_VALUES = {"yes"}
 def _load_tunnel_road_network(layout: "PavementLayout"):
     """Load the big-roads + small-roads OSM caches for the tile
     and merge them under namespaced ids.  Returns ``(nodes_r,
-    ways_r, big_way_ids)`` where ``big_way_ids`` is the id set of
-    the big-roads ways (pre-2026-06-12 candidate class).
+    ways_r, big_way_ids, node_tags_r)`` where ``big_way_ids`` is the
+    id set of the big-roads ways (pre-2026-06-12 candidate class) and
+    ``node_tags_r`` maps node id → tag dict for the (few) nodes whose
+    tags the road-layer download whitelist retained (level-crossing
+    evidence: ``aeroway=aircraft_crossing``, ``barrier`` gates —
+    empty for caches written before the tag-schema bump).
     """
-    from .pipeline import _load_osm_big_roads
+    from .osm_load import _load_osm_road_layer
     # Load big-roads OSM cache for this tile — AND small_roads (user
     # 2026-06-12, KPHL): the big/small highway split puts tertiary /
     # residential / service ways in small_roads, so a minor-road
     # tunnel bore (KPHL's road+rail tunnel under the RWY 26 hill:
     # highway=tertiary, 151 m past the threshold) was invisible to
     # this emitter even though its type is in HW_TUNNEL_TYPES.
-    nodes_r, ways_r = _load_osm_big_roads(
-        layout.anchor[0], layout.anchor[1])
+    nodes_r, ways_r, node_tags_r = _load_osm_road_layer(
+        "big_roads", layout.anchor[0], layout.anchor[1])
     _big_way_ids = {w[0] for w in ways_r}
-    from .osm_load import _load_osm_small_roads as _losr
-    nodes_s, ways_s = _losr(layout.anchor[0], layout.anchor[1])
+    nodes_s, ways_s, node_tags_s = _load_osm_road_layer(
+        "small_roads", layout.anchor[0], layout.anchor[1])
     if nodes_s:
         # ⚠ The road caches use SYNTHETIC per-layer negative ids:
         # ``r-13-078:-202`` in big_roads and in small_roads are
@@ -238,10 +414,13 @@ def _load_tunnel_road_network(layout: "PavementLayout"):
         for nid, ll in nodes_s.items():
             merged_n["S|" + nid] = ll
         nodes_r = merged_n
+        node_tags_r = dict(node_tags_r)
+        for nid, tags in node_tags_s.items():
+            node_tags_r["S|" + nid] = tags
         ways_r = list(ways_r) + [
             ("S|" + wid, ["S|" + n for n in nrefs], tags)
             for wid, nrefs, tags in ways_s]
-    return nodes_r, ways_r, _big_way_ids
+    return nodes_r, ways_r, _big_way_ids, node_tags_r
 
 
 def _synthesize_implied_crossing_bores(
@@ -249,11 +428,18 @@ def _synthesize_implied_crossing_bores(
         nodes_m: dict,
         ways_r: list,
         excluded_way_ids: set | None,
-        low_connector_max_gap_m: float = 0.0) -> tuple:
+        low_connector_max_gap_m: float = 0.0,
+        node_tags: dict | None = None) -> tuple:
     """Split public through-roads / railways that cross taxi/runway
     pavement into approach + synthetic ``tunnel=yes`` bore pieces.
     Mutates ``nodes_m`` (synthetic split nodes) and returns
     ``(ways_r, low_connector_gaps)``.
+
+    ``node_tags`` (node id → tag dict, from the road-layer caches)
+    carries the at-grade level-crossing evidence: a crossing with an
+    ``aeroway=aircraft_crossing`` node or nearby ``barrier`` gates is a
+    real gated level crossing (EGPB, Gibraltar — user 2026-07-16) and
+    gets NO implied bore.
 
     User 2026-07-04 (KDFW wide underpasses), three behaviours on top
     of the original implied-bore split:
@@ -364,6 +550,7 @@ def _synthesize_implied_crossing_bores(
                         continue
         _excluded_early = excluded_way_ids or set()
         _n_implied = 0
+        _n_level_crossings = 0
         if _cross_pav_u is not None:
             _split_ways: list = []
             for _wid, _nrefs, _tags in ways_r:
@@ -406,11 +593,44 @@ def _synthesize_implied_crossing_bores(
                 _parts = ([_inter] if _inter.geom_type == "LineString"
                           else [g for g in getattr(_inter, "geoms", ())
                                 if g.geom_type == "LineString"])
+                # At-grade level-crossing evidence on THIS way's nodes
+                # (user 2026-07-16, EGPB/Gibraltar): the crossing node
+                # itself (``aeroway=aircraft_crossing`` /
+                # ``crossing:aircraft``) or the barrier gates that close
+                # the road for aircraft movements.  Collected once per
+                # way, tested per crossing segment below.
+                _level_evidence: list = []   # (Point, is_crossing_tag)
+                if node_tags and not _had_tunnel:
+                    for _en, _ep in _present:
+                        _ent = node_tags.get(_en)
+                        if not _ent:
+                            continue
+                        if (_ent.get("aeroway") == "aircraft_crossing"
+                                or "crossing:aircraft" in _ent):
+                            _level_evidence.append((Point(_ep), True))
+                        elif (_ent.get("barrier")
+                                in LEVEL_CROSSING_BARRIER_VALUES):
+                            _level_evidence.append((Point(_ep), False))
                 _intervals: list = []
                 for _part in _parts:
                     if not (_IMPLIED_MIN_BORE_M <= _part.length
                             <= _IMPLIED_MAX_BORE_M):
                         continue
+                    if _level_evidence and not _had_tunnel:
+                        _veto = False
+                        for _epoint, _is_crossing_tag in _level_evidence:
+                            _radius = (AIRCRAFT_CROSSING_VETO_DIST_M
+                                       if _is_crossing_tag
+                                       else LEVEL_CROSSING_GATE_VETO_DIST_M)
+                            try:
+                                if _part.distance(_epoint) <= _radius:
+                                    _veto = True
+                                    break
+                            except _GEOM_EXC:
+                                continue
+                        if _veto:
+                            _n_level_crossings += 1
+                            continue
                     try:
                         _s1 = _line.project(Point(*_part.coords[0]))
                         _s2 = _line.project(Point(*_part.coords[-1]))
@@ -485,9 +705,9 @@ def _synthesize_implied_crossing_bores(
                             if (_gline is not None
                                     and _gline.geom_type == "LineString"
                                     and _gline.length > 1.0):
-                                _gw = _carriageway_width_for(
+                                _gw = _carriageway_width_from_tags(
                                     _tags.get("highway") or "railway",
-                                    22.0)
+                                    _tags, 22.0)
                                 low_connector_gaps.append((_gline, _gw))
                         _prev[1] = _iv[1]
                         _prev[3] = _iv[3]
@@ -572,6 +792,15 @@ def _synthesize_implied_crossing_bores(
                     f"  [pav-builder] implied {_n_implied} tunnel bore(s) "
                     f"under taxi/runway pavement (unmarked road/rail "
                     f"crossings).")
+            except _GEOM_EXC:
+                pass
+        if _n_level_crossings:
+            try:
+                UI.vprint(1,
+                    f"  [pav-builder] kept {_n_level_crossings} road/rail "
+                    f"crossing(s) AT GRADE — OSM level-crossing evidence "
+                    f"(aircraft-crossing node / barrier gates), no "
+                    f"implied tunnel.")
             except _GEOM_EXC:
                 pass
     return ways_r, low_connector_gaps
@@ -1023,9 +1252,11 @@ def _gather_portal_walks(
     per-portal gates, walk merge / densify / grade truncation).
     """
     # Collect portal data: (portal_node_id, tunnel_wid, walk_pts,
-    # hw_type, apt_elev_at_portal, dem_at_far_end, is_new_candidate).
+    # hw_type, apt_elev_at_portal, dem_at_far_end, is_new_candidate,
+    # carriageway_width_m — from the way's own ``width=`` / ``lanes=``
+    # tags when mapped, else the per-type table).
     portal_data: list[tuple[str, str, list[tuple[float, float]],
-                              str, float, float, bool]] = []
+                              str, float, float, bool, float]] = []
     # Rail tunnel lines, for the TWIN-corridor pairing below (user
     # 2026-07-04, KCLT: two parallel ``railway=rail`` tracks are one
     # double-track corridor — one wide bore, not two overlapping ones).
@@ -1078,6 +1309,13 @@ def _gather_portal_walks(
         # surface the dead-boundary-gate strays at KPHL.
         _is_new_cand = not (tw_id in big_way_ids
                             and hw in HW_TUNNEL_TYPES)
+        # Effective carriageway width: the way's own ``width=`` /
+        # ``lanes=`` measurements beat the per-type table (user
+        # 2026-07-16, EGPB).  Computed HERE — the only place the way's
+        # tags are in hand — and carried through ``portal_data`` for
+        # the cluster emit.
+        way_carriage_w = _carriageway_width_from_tags(
+            hw, t_tags, carriageway_width_m)
         if len(t_nrefs) < 2:
             continue
         # Skip OSM way IDs already handled by the through-
@@ -1127,7 +1365,7 @@ def _gather_portal_walks(
                     pass
             walk = _walk_surface(portal_nid, tw_id, arm_walk_max_m,
                                  nodes_m, way_by_id, node_to_ways,
-                                 carriageway_width_m)
+                                 way_carriage_w)
             if walk is None or len(walk) < 2:
                 if os.environ.get("O4_TUNNEL_DEBUG") == "1":
                     _px, _py = nodes_m[portal_nid]
@@ -1236,7 +1474,8 @@ def _gather_portal_walks(
                 far_dem = elev_low + max_drop
             portal_data.append(
                 (portal_nid, tw_id, walk, hw,
-                 float(apt_elev), float(far_dem), _is_new_cand))
+                 float(apt_elev), float(far_dem), _is_new_cand,
+                 float(way_carriage_w)))
     if _n_adj_skip:
         try:
             UI.vprint(1,
@@ -1350,15 +1589,15 @@ def _emit_portal_cluster(
     # arm path; combine widths for divided highways.
     head = portal_data[cl[0]]
     (portal_nid, _wid_unused, walk_pts, hw_type, apt_elev,
-     far_dem, _head_new) = head
+     far_dem, _head_new, head_carriage_w) = head
     _cl_all_new = all(portal_data[k][6] for k in cl)
     if len(walk_pts) < 2:
         return 0
-    # Per-OSM-highway-type carriageway width (user 2026-05-03):
-    # was a fixed 22 m default; now varies by classification
-    # so secondary tunnels are ~half the width of trunk tunnels.
-    carriage_w = _carriageway_width_for(
-        hw_type, carriageway_width_m)
+    # Carriageway width from the way's own ``width=`` / ``lanes=``
+    # tags when mapped, else the per-OSM-highway-type table (user
+    # 2026-05-03 / 2026-07-16) — computed in ``_gather_portal_walks``
+    # and carried per portal.
+    carriage_w = head_carriage_w
     half_carriage = 0.5 * carriage_w
     elev_low = apt_elev - tunnel_depth_m
     elev_high = far_dem
@@ -1413,8 +1652,7 @@ def _emit_portal_cluster(
         p = nodes_m[ni]
         proj = ((p[0] - walk_pts[0][0]) * first_perp[0]
                 + (p[1] - walk_pts[0][1]) * first_perp[1])
-        half_k = 0.5 * _carriageway_width_for(
-            portal_data[k][3], carriageway_width_m)
+        half_k = 0.5 * portal_data[k][7]
         spans.append(proj)
         _edges.append((proj - half_k, proj + half_k))
     cluster_span = max(spans) - min(spans) if spans else 0.0
@@ -1990,9 +2228,7 @@ def _emit_portal_cluster(
         # Per-member branches (widest first).
         ordered = []
         for k, w_k, c_k in member_chains:
-            hw_k = portal_data[k][3]
-            half_k = 0.5 * _carriageway_width_for(
-                hw_k, carriageway_width_m)
+            half_k = 0.5 * portal_data[k][7]
             ordered.append((half_k, k, w_k, c_k))
         ordered.sort(key=lambda t: -t[0])
         # Gate-on: arms start at the common station where every pair has
@@ -2858,8 +3094,8 @@ def _emit_tunnel_portals(
     Returns the number of tunnel PORTALS emitted (each contributing
     1 cap + 2 arm walls + a ramp chain).
     """
-    nodes_r, ways_r, _big_way_ids = _load_tunnel_road_network(
-        layout)
+    nodes_r, ways_r, _big_way_ids, _node_tags_r = (
+        _load_tunnel_road_network(layout))
     if not ways_r:
         return 0
     # Project nodes to meter space.
@@ -2905,7 +3141,8 @@ def _emit_tunnel_portals(
     low_connector_max_gap_m = 2.0 * tunnel_depth_m / plan_grade
     ways_r, low_connector_gaps = _synthesize_implied_crossing_bores(
         layout, nodes_m, ways_r, excluded_way_ids,
-        low_connector_max_gap_m=low_connector_max_gap_m)
+        low_connector_max_gap_m=low_connector_max_gap_m,
+        node_tags=_node_tags_r)
     way_by_id, node_to_ways = _build_surface_way_indices(ways_r)
     arm_walk_max_m = max(arm_max_length_m,
                          ramp_min_length_m,
@@ -4177,6 +4414,58 @@ def _split_portal_footprint(footprint, outward):
             mouth_half_plane)
 
 
+def _clip_collar_to_mouth_front(collar_geometry, footprint, outward):
+    """Remove any collar region on the ROAD side of the mouth face
+    (round-8 fact 3).
+
+    The mouth face is the plane through ``footprint``'s forward-most
+    extent along ``outward`` (the mouth->road direction), perpendicular
+    to it — ``footprint`` is whichever reference polygon defines the
+    face in the caller's frame (the object footprint against the pair
+    axis; the emitted mouth plate against the opening axis).  The mouth
+    plate and the road approaches own everything ahead of that face, so
+    the collar keeps only the back and the lateral flanks up to the
+    face.  The forward sweep already removes the band directly ahead of
+    the footprint, but a diagonal lateral lobe can round-buffer past its
+    end (measured KBNA 02C round-8 baseline: a 34 m2 collar lobe 46.7 m
+    in front of the west mouth, flat at the crown elevation — a
+    free-standing ~6 m face)."""
+    try:
+        front_extent = max(
+            vertex_x * outward[0] + vertex_y * outward[1]
+            for vertex_x, vertex_y in footprint.exterior.coords
+        ) + 1.0
+        centroid = footprint.centroid
+    except _GEOM_EXC:
+        return collar_geometry
+    perpendicular = (-outward[1], outward[0])
+    # Anchor the clip rectangle ON the footprint: project the centroid
+    # onto the front line.  ``outward * front_extent`` is on the same
+    # line but can sit KILOMETERS away laterally (layout meters are
+    # anchored at the airport reference, not the portal), leaving the
+    # finite rectangle to miss the site entirely — the exact silent
+    # no-op measured at KBNA 02C (footprint 2070 m lateral of that
+    # base point against a 2000 m reach).
+    centroid_forward = centroid.x * outward[0] + centroid.y * outward[1]
+    base = (centroid.x + outward[0] * (front_extent - centroid_forward),
+            centroid.y + outward[1] * (front_extent - centroid_forward))
+    reach = 2000.0
+    mouth_front_plane = Polygon([
+        (base[0] + perpendicular[0] * reach,
+         base[1] + perpendicular[1] * reach),
+        (base[0] - perpendicular[0] * reach,
+         base[1] - perpendicular[1] * reach),
+        (base[0] - perpendicular[0] * reach + outward[0] * reach,
+         base[1] - perpendicular[1] * reach + outward[1] * reach),
+        (base[0] + perpendicular[0] * reach + outward[0] * reach,
+         base[1] + perpendicular[1] * reach + outward[1] * reach),
+    ])
+    try:
+        return collar_geometry.difference(mouth_front_plane)
+    except _GEOM_EXC:
+        return collar_geometry
+
+
 def _portal_pair_owned_polygons(pairs):
     """Plan-space region a tunnel portal pair OWNS: both portal
     footprints plus the connecting band over the buried body.  Approach
@@ -4230,6 +4519,26 @@ def _classifier_owned_crossing_union(layout):
             polygons.append(box)
     pairs = getattr(layout, _TUNNEL_PORTAL_PAIRS_ATTRIBUTE, None) or []
     polygons.extend(_portal_pair_owned_polygons(pairs))
+    # The portal CROWN/COLLAR ring is the object's terrain story too: a
+    # transition from the crown height at the object back down to the
+    # surrounding ground.  Adjacent-ground bands and clearance cuts must
+    # be masked off it as well, or a band welds to the collar's outer rim
+    # and then cuts its own graded corridor DOWN to the law floor right
+    # beside it — reinstating the very cliff the collar exists to remove
+    # (measured KBNA 02C: a band dropping 6.9-7.8 m over ~1.3 m off the
+    # collar's welded edge).  Own a collar-reach ring around each portal
+    # footprint so those bands start OUTSIDE it, from the natural ground,
+    # instead of severing the collar's feather.
+    collar_ring_m = float(_CFG.TUNNEL_PORTAL_CROWN_COLLAR_M) + 2.0
+    for pair in pairs:
+        for portal in pair.get("portals", ()):  # type: ignore[union-attr]
+            footprint = portal.get("footprint")
+            if footprint is None or footprint.is_empty:
+                continue
+            try:
+                polygons.append(footprint.buffer(collar_ring_m))
+            except _GEOM_EXC:
+                continue
     if not polygons:
         return None
     try:
@@ -4598,10 +4907,9 @@ def _emit_object_sourced_bridge_corridors(
                     "corridor skipped",
                 )
                 continue
-            # User ruling 2026-07-14c: the outward ramp is as wide as
-            # the MOUTH FACE it emerges from (the footprint's extent
-            # perpendicular to the outward direction), not one
-            # carriageway — and one merged walk carries it.
+            # Mouth-face width (the footprint's extent perpendicular to
+            # the outward direction) — the CAP the ruling below enforces,
+            # not the ramp width itself.
             mouth_face_width_m = None
             outward_vector = portal.get("outward")
             if outward_vector is not None:
@@ -4620,6 +4928,18 @@ def _emit_object_sourced_bridge_corridors(
                     mouth_face_width_m = maximum_p - minimum_p
                 except _GEOM_EXC:
                     mouth_face_width_m = None
+            # User ruling 2026-07-15 (supersedes 2026-07-14c): the outward
+            # ramp matches the DRIVABLE road width, not the full portal
+            # footprint whose slanted wing walls flare far wider — mapped
+            # OSM carriageway + shoulder, else the classified deck-face
+            # width, else the mouth face, always capped at the mouth face.
+            ramp_width_m, width_provenance = _portal_outward_ramp_width_m(
+                layout, portal, footprint, to_meters, mouth_face_width_m)
+            if ramp_width_m is None:
+                ramp_width_m = mouth_face_width_m
+            # The parallel-carriageway dedup keeps the mouth-face reach so
+            # genuine twin carriageways still merge into one walk (the
+            # ramp is then narrowed to ``ramp_width_m`` by the override).
             road_lines = _dedup_parallel_road_lines(
                 road_lines,
                 (mouth_face_width_m or road_width_m) / 2.0,
@@ -4634,7 +4954,7 @@ def _emit_object_sourced_bridge_corridors(
                 crossing_union=all_crossings_union,
                 emitted_registry=emitted_registry,
                 outward=outward_vector,
-                width_override_m=mouth_face_width_m,
+                width_override_m=ramp_width_m,
             ):
                 n_emitted += 1
                 UI.vprint(
@@ -4757,25 +5077,150 @@ def _emit_corridor_for_footprint(
             else:
                 walk = LineString(list(reversed(coordinates)))
             walk_length = min(walk.length, approach_length_m)
+            # Plate weld (defect A, 2026-07-15): deck corridors register
+            # the chain's near edge on the corridor PLATE's exit edge —
+            # verbatim shared corner coordinates are the weld.  Portal
+            # mouths keep their own (untouched) geometry.
+            weld_edge = None
+            if outward is None:
+                weld_edge = _corridor_plate_exit_edge(
+                    layout, footprint, walk.coords[0], half_width
+                )
             if _emit_corridor_ramp_chain(
                 layout, dem, tile_lat, tile_lon, meters_to_lat_lon,
                 walk, walk_length, floor_elevation, half_width, ramp_step_m,
                 keep_out=keep_out,
                 emitted_registry=emitted_registry,
                 refuse_inverted=(outward is not None),
+                weld_edge=weld_edge,
             ):
                 emitted = True
     return emitted
 
 
+def _corridor_plate_exit_edge(layout, footprint, start_xy, half_width):
+    """The corridor PLATE's short-end edge nearest an approach walk's
+    start point, as the plate's two EXACT ring corner coordinates
+    ``((ax, ay), (bx, by))`` — the verbatim-shared-coordinate weld the
+    chain's first quad copies into its near edge (defect A, KBNA
+    2026-07-15: the chain started on the deck-box edge while the plate
+    lip sits ``_TRENCH_INSET_M`` inside it — a 1.09 m open seam at
+    36.12202,-86.66612 — with a 4-5 m lateral offset between the road
+    line and the plate axis).
+
+    Donelson-class only (guarded): the plate end must match the chain
+    width (the road runs ALONG the deck axis and exits the short end,
+    so the trench end edge and the trench-width approach are the same
+    span).  Roads exiting through a deck's LONG side keep the previous
+    behaviour.  ``None`` when there is no emitted plate, the geometry
+    is degenerate, or the guards fail."""
+    plate = None
+    best_area = 0.0
+    for shape in layout.shapes:
+        if getattr(shape, "ref", "") != "object_bridge_corridor":
+            continue
+        polygon = shape.polygon
+        if polygon is None or polygon.is_empty:
+            continue
+        try:
+            overlap_area = polygon.intersection(footprint).area
+        except _GEOM_EXC:
+            continue
+        if overlap_area > best_area:
+            best_area = overlap_area
+            plate = polygon
+    if plate is None:
+        return None
+    try:
+        rectangle_corners = list(
+            plate.minimum_rotated_rectangle.exterior.coords)[:4]
+    except _GEOM_EXC:
+        return None
+    if len(rectangle_corners) < 4:
+        return None
+    edges = [
+        (rectangle_corners[index], rectangle_corners[(index + 1) % 4])
+        for index in range(4)
+    ]
+    edges.sort(key=lambda edge: math.hypot(
+        edge[1][0] - edge[0][0], edge[1][1] - edge[0][1]))
+    short_edges = edges[:2]
+
+    def _midpoint_distance(edge):
+        return math.hypot(
+            (edge[0][0] + edge[1][0]) / 2.0 - start_xy[0],
+            (edge[0][1] + edge[1][1]) / 2.0 - start_xy[1],
+        )
+
+    exit_edge = min(short_edges, key=_midpoint_distance)
+    if _midpoint_distance(exit_edge) > 30.0:
+        return None
+    edge_length = math.hypot(
+        exit_edge[1][0] - exit_edge[0][0],
+        exit_edge[1][1] - exit_edge[0][1],
+    )
+    # Width guard: the plate end and the approach must be the same
+    # span for a two-corner verbatim copy to make sense.
+    if abs(edge_length - 2.0 * half_width) > 3.0:
+        return None
+    # Snap the rotated-rectangle corners to the plate's ACTUAL ring
+    # vertices — only exact ring coordinates intern into shared nodes.
+    ring = list(plate.exterior.coords)
+    snapped = []
+    for corner_x, corner_y in exit_edge:
+        nearest = min(
+            ring,
+            key=lambda vertex: (
+                (vertex[0] - corner_x) ** 2 + (vertex[1] - corner_y) ** 2
+            ),
+        )
+        if math.hypot(nearest[0] - corner_x, nearest[1] - corner_y) > 1.5:
+            return None
+        snapped.append((nearest[0], nearest[1]))
+    if math.hypot(
+        snapped[1][0] - snapped[0][0], snapped[1][1] - snapped[0][1]
+    ) < 1.0:
+        return None
+    return snapped[0], snapped[1]
+
+
 def _emit_corridor_ramp_chain(
         layout, dem, tile_lat, tile_lon, meters_to_lat_lon,
         walk, walk_length, floor_elevation, half_width, ramp_step_m,
-        keep_out=None, emitted_registry=None, refuse_inverted=False):
+        keep_out=None, emitted_registry=None, refuse_inverted=False,
+        weld_edge=None):
     """Step ``walk`` from the bridge edge (``floor_elevation``) out to the
     DEM in ``ramp_step_m`` increments, emitting one sloped
-    ``ROLE_TUNNEL_RAMP`` rect per step.  Returns True when any rect was
+    ``ROLE_TUNNEL_RAMP`` quad per step.  Returns True when any quad was
     emitted.
+
+    2026-07-15 rework (KBNA Donelson defects A+B, measured on the
+    emitted patch):
+
+    * **Shared facing edges.**  ONE corner pair is computed per chain
+      station and used verbatim by both adjoining quads — the chain is
+      contiguous by construction (zero facing gap, zero overlap on
+      curved roads; the per-step independent rects overlapped under
+      curvature and the registry then dropped every other step — the
+      six measured terrain holes).
+    * **Chain identity in the registry.**  A chain's quads are compared
+      only against pieces registered BEFORE this chain started; the
+      registry's purpose is cross-crossing / twin-carriageway
+      protection (audit invariant 1), never self-comparison.
+    * **[H,L,L,H] corner order.**  Quads are emitted with ring corners
+      0,3 at the HIGH end, matching ``corner_alts_from_high_low`` (the
+      legacy emitter's explicit reorder).  The fixed near-end-first
+      order shipped every climbing rect INVERTED — the floor value on
+      the FAR edge, a 2-4 m sawtooth per step (measured: rect -11066
+      carried 161.0 on the edge away from the 161.01 plate).
+    * **Plate weld** (``weld_edge``, deck corridors only): the first
+      quad's near edge copies the corridor plate's two exit-edge ring
+      coordinates VERBATIM (0.5 m interning makes them shared nodes —
+      the weld), and the lateral offset between the plate axis and the
+      road line decays linearly to zero over the next 3 stations so
+      curved roads still track.  The near edge keeps the plate's floor
+      elevation (fraction 0 of the floor→DEM interpolation); the far
+      edge keeps the chain's existing climb values.
 
     ``refuse_inverted`` — the tunnel-portal inversion guard (user
     2026-07-10, the runway-02C climb): the mouth floor must never sit
@@ -4804,64 +5249,136 @@ def _emit_corridor_ramp_chain(
                 f"adjacent grade {near_grade:.1f} m",
             )
             return False
-    emitted = False
-    previous = 0.0
-    while previous < walk_length - 1.0:
-        current = min(walk_length, previous + ramp_step_m)
-        p0 = walk.interpolate(previous)
-        p1 = walk.interpolate(current)
-        segment_length = math.hypot(p1.x - p0.x, p1.y - p0.y)
-        if segment_length < 1.0:
+    # ── Chain stations ──
+    stations = [0.0]
+    position = 0.0
+    while position < walk_length - 1.0:
+        position = min(walk_length, position + ramp_step_m)
+        stations.append(position)
+    if len(stations) < 2:
+        return False
+    station_points = [
+        (point.x, point.y)
+        for point in (walk.interpolate(s) for s in stations)
+    ]
+    # Plate-weld lateral registration: shift station 0 onto the plate
+    # exit edge's midpoint and decay the shift to zero over the next
+    # 3 stations (fully back on the road line from station 3 on).
+    weld_corners = None
+    if weld_edge is not None:
+        (weld_ax, weld_ay), (weld_bx, weld_by) = weld_edge
+        edge_mid_x = (weld_ax + weld_bx) / 2.0
+        edge_mid_y = (weld_ay + weld_by) / 2.0
+        shift_x = edge_mid_x - station_points[0][0]
+        shift_y = edge_mid_y - station_points[0][1]
+        decay_stations = 3.0
+        station_points = [
+            (
+                point_x + shift_x * max(0.0, 1.0 - index / decay_stations),
+                point_y + shift_y * max(0.0, 1.0 - index / decay_stations),
+            )
+            for index, (point_x, point_y) in enumerate(station_points)
+        ]
+        weld_corners = ((weld_ax, weld_ay), (weld_bx, weld_by))
+
+    # ── Per-station cross edges (bisector normals): ONE corner pair per
+    # station, shared verbatim by the two adjoining quads. ──
+    left_corners: list = []
+    right_corners: list = []
+    elevations: list = []
+    usable_stations = len(station_points)
+    for index, (point_x, point_y) in enumerate(station_points):
+        behind_x, behind_y = station_points[max(0, index - 1)]
+        ahead_x, ahead_y = station_points[
+            min(len(station_points) - 1, index + 1)]
+        tangent_x = ahead_x - behind_x
+        tangent_y = ahead_y - behind_y
+        tangent_norm = math.hypot(tangent_x, tangent_y)
+        if tangent_norm < 1.0:
+            usable_stations = index
             break
-        tangent_x = (p1.x - p0.x) / segment_length
-        tangent_y = (p1.y - p0.y) / segment_length
+        tangent_x /= tangent_norm
+        tangent_y /= tangent_norm
         normal_x = -tangent_y
         normal_y = tangent_x
-        fraction0 = previous / walk_length
-        fraction1 = current / walk_length
         try:
-            lat0, lon0 = meters_to_lat_lon(p0.x, p0.y)
-            lat1, lon1 = meters_to_lat_lon(p1.x, p1.y)
-            dem0 = _sample_dem(dem, tile_lat, tile_lon, lat0, lon0)
-            dem1 = _sample_dem(dem, tile_lat, tile_lon, lat1, lon1)
+            latitude, longitude = meters_to_lat_lon(point_x, point_y)
+            ground = _sample_dem(
+                dem, tile_lat, tile_lon, latitude, longitude)
         except _GEOM_EXC:
-            dem0 = dem1 = None
-        if dem0 is None or dem1 is None:
+            ground = None
+        if ground is None:
+            usable_stations = index
             break
-        elevation0 = (1.0 - fraction0) * floor_elevation + fraction0 * dem0
-        elevation1 = (1.0 - fraction1) * floor_elevation + fraction1 * dem1
-        corners = [
-            (p0.x + normal_x * half_width, p0.y + normal_y * half_width),
-            (p1.x + normal_x * half_width, p1.y + normal_y * half_width),
-            (p1.x - normal_x * half_width, p1.y - normal_y * half_width),
-            (p0.x - normal_x * half_width, p0.y - normal_y * half_width),
-        ]
+        fraction = stations[index] / walk_length
+        elevations.append(
+            (1.0 - fraction) * floor_elevation + fraction * ground)
+        left_corners.append((point_x + normal_x * half_width,
+                             point_y + normal_y * half_width))
+        right_corners.append((point_x - normal_x * half_width,
+                              point_y - normal_y * half_width))
+        if index == 0 and weld_corners is not None:
+            # Verbatim plate coordinates for the chain's near edge —
+            # exact shared coordinates are the weld.
+            corner_a, corner_b = weld_corners
+            side_a = ((corner_a[0] - point_x) * normal_x
+                      + (corner_a[1] - point_y) * normal_y)
+            side_b = ((corner_b[0] - point_x) * normal_x
+                      + (corner_b[1] - point_y) * normal_y)
+            if side_a > 0.0 > side_b:
+                left_corners[0], right_corners[0] = corner_a, corner_b
+            elif side_b > 0.0 > side_a:
+                left_corners[0], right_corners[0] = corner_b, corner_a
+    if usable_stations < 2:
+        return False
+
+    # Chain identity (defect B): quads of THIS chain are tested only
+    # against pieces registered before the chain started.
+    pre_chain_registry = (
+        list(emitted_registry) if emitted_registry is not None else [])
+
+    emitted = False
+    for index in range(usable_stations - 1):
+        elevation_near = elevations[index]
+        elevation_far = elevations[index + 1]
+        # [H,L,L,H]: ring corners 0,3 at the HIGH end (the convention
+        # ``corner_alts_from_high_low`` encodes; the legacy emitter's
+        # explicit reorder).
+        if elevation_far >= elevation_near:
+            corners = [
+                left_corners[index + 1], left_corners[index],
+                right_corners[index], right_corners[index + 1],
+            ]
+        else:
+            corners = [
+                left_corners[index], left_corners[index + 1],
+                right_corners[index + 1], right_corners[index],
+            ]
         try:
             polygon = Polygon(corners)
             if not polygon.is_valid:
                 polygon = polygon.buffer(0)
             if keep_out is not None and not polygon.is_empty:
-                # FRACTIONAL skip (user ruling 2026-07-14c): a rect
+                # FRACTIONAL skip (user ruling 2026-07-14c): a quad
                 # merely GRAZING a keep-out boundary is emitted — the
                 # absolute 0.5 m2 test dropped every leading rect at
                 # the KBNA portal mouths (ramps stopped one step short
                 # of the plate) and starved the wide Donelson chains.
-                # A rect genuinely landing on owned ground still skips.
+                # A quad genuinely landing on owned ground still skips.
                 try:
                     if (polygon.intersection(keep_out).area
                             > 0.25 * polygon.area):
-                        previous = current
                         continue
                 except _GEOM_EXC:
                     pass
             # Approach-versus-approach exclusivity (user 2026-07-10):
-            # a rect overlapping an EARLIER chain's rect is skipped —
-            # sloped rects can never be clipped without breaking their
+            # a quad overlapping an EARLIER CHAIN's quad is skipped —
+            # sloped quads can never be clipped without breaking their
             # two-corner altitude semantics, so overlap is prevented at
             # birth, not cleaned downstream.
-            if emitted_registry is not None and not polygon.is_empty:
+            if not polygon.is_empty:
                 overlapping = False
-                for earlier in emitted_registry:
+                for earlier in pre_chain_registry:
                     try:
                         if polygon.intersection(earlier).area > 0.5:
                             overlapping = True
@@ -4869,28 +5386,29 @@ def _emit_corridor_ramp_chain(
                     except _GEOM_EXC:
                         continue
                 if overlapping:
-                    previous = current
                     continue
             if polygon.geom_type == "Polygon" and not polygon.is_empty:
-                if abs(elevation0 - elevation1) >= 0.1:
+                if abs(elevation_near - elevation_far) >= 0.1:
                     layout.shapes.append(BuiltShape(
                         polygon=polygon,
                         role=ROLE_TUNNEL_RAMP,
                         ref="object_bridge_approach",
-                        altitude_high=round(max(elevation0, elevation1), 1),
-                        altitude_low=round(min(elevation0, elevation1), 1)))
+                        altitude_high=round(
+                            max(elevation_near, elevation_far), 1),
+                        altitude_low=round(
+                            min(elevation_near, elevation_far), 1)))
                 else:
                     layout.shapes.append(BuiltShape(
                         polygon=polygon,
                         role=ROLE_TUNNEL_RAMP,
                         ref="object_bridge_approach",
-                        altitude=round(0.5 * (elevation0 + elevation1), 1)))
+                        altitude=round(
+                            0.5 * (elevation_near + elevation_far), 1)))
                 if emitted_registry is not None:
                     emitted_registry.append(polygon)
                 emitted = True
         except _GEOM_EXC:
             pass
-        previous = current
     return emitted
 
 
@@ -4935,6 +5453,30 @@ _CAUSEWAY_INWARD_OVERLAP_M = 0.6
 # so the audit's line-END samples (t = 0 and t = 1, exactly at the deck
 # corners) stay inside the plate under coordinate wobble.
 _CAUSEWAY_WIDTH_MARGIN_M = 1.0
+
+# ── Deck-lip weld strips (user directive 2026-07-15: aircraft must taxi
+# SMOOTHLY onto the decks — the pavement must slightly OVERLAP the
+# deck-elevation terrain, not merely touch it; at mesh-triangulation
+# level edge-to-edge contact still leaves sliver triangles).  The R8
+# hard-deck cut trims pavement at the deck-box boundary while the trench
+# plate is ``deck_box.buffer(-_TRENCH_INSET_M)``, leaving a ~1.2 m ring
+# of raw mesh whose triangles dive to the trench floor right at the lip
+# (measured KBNA taxiway-L: pavement 167.0 pinned, plate edge 0.8-1.2 m
+# away at 161.01).  On every pavement-facing rim segment a WELD STRIP is
+# born at the deck-top profile law value, spanning from the causeway
+# inward depth (keeping the R2 node-split wall to the trench) out to
+# _DECK_WELD_OVERLAP_M INSIDE the pavement, whose fronting ring vertices
+# are pinned at the same law value — a coplanar, invisible overlap.
+# The depth must EXCEED to_osm's 0.5 m node interning (the audit-5
+# causeway lesson): a 0.4 m offset merges the strip boundary into the
+# pavement edge nodes and the written overlap collapses to contact
+# (measured KBNA: eroded-overlap coverage 22-66 % at 0.4 m); above the
+# 0.71 m worst-case bucket diagonal both rings survive verbatim.
+_DECK_WELD_OVERLAP_M = 0.8
+# Pavement within this reach OUTSIDE the deck box fronts the deck (the
+# measured pavement cut sits within ~0.4 m of the box under the 0.5 m
+# node-interning wobble; 2.5 m is generous without capturing bystanders).
+_DECK_WELD_FRONT_REACH_M = 2.5
 
 # Road-exit cut half-width (m) through a causeway plate (round 10): a
 # road that leaves the span THROUGH an abutment end (KBNA: Donelson
@@ -5309,6 +5851,178 @@ def insert_bridge_profile_pins(layout, dem, tile_lat, tile_lon) -> int:
     return total_pinned
 
 
+def _emit_deck_lip_weld_strips(layout, bridge, deck_box, trench_polygon,
+                               road_exit_corridor, causeway_parts, datum,
+                               born_graded) -> int:
+    """Deck-lip weld strips (user directive 2026-07-15: aircraft must
+    taxi SMOOTHLY onto the decks — the resumed pavement must slightly
+    OVERLAP the deck-elevation terrain, not merely touch it; at
+    mesh-triangulation level edge-to-edge contact still leaves sliver
+    triangles).
+
+    Hard decks only: ruling R8 cuts the pavement AT the deck-box
+    boundary while the trench plate is inset :data:`_TRENCH_INSET_M`,
+    leaving a ring of raw mesh whose triangles dive to the trench floor
+    right at the lip (measured KBNA taxiway-L: pavement pinned 167.0,
+    trench edge 0.8-1.2 m away at 161.01 — the owner-visible gap onto
+    the deck).  For every rim segment fronted by airside pavement
+    (:data:`_BRIDGE_PIN_ROLES` within :data:`_DECK_WELD_FRONT_REACH_M`
+    of the box — service roads descend through the road-exit cut and
+    never weld to the deck), a strip is born at the deck-top PROFILE
+    law value (``grade_law.bridge_profile_pin_elevation_m`` along the
+    abutment-to-abutment axis — the deck-end pin law at the ends by
+    construction), spanning from :data:`_CAUSEWAY_INWARD_OVERLAP_M`
+    inside the box (preserving the R2 node-split wall against the
+    trench) out to :data:`_DECK_WELD_OVERLAP_M` INSIDE the pavement.
+    The fronting pavement ring vertices inside the overlap band are
+    pinned at the same law value, so the overlap is coplanar and
+    invisible.  The emitted causeway plates are cut out (the plates
+    stay mutually exclusive); road faces get no strips by construction
+    (the zone is pavement-driven and roads never cross airside pavement
+    at grade), and pavement vertices inside the road-exit corridor are
+    never pinned.  Returns the number of strip parts."""
+    if not getattr(bridge, "hard_deck", False):
+        # Cosmetic decks keep their pavement over the box (R2 pavement
+        # wins) — no lip cut, nothing to weld.
+        return 0
+    from .grade_law import bridge_profile_pin_elevation_m
+    from .layout import ROLE_BRIDGE_CAUSEWAY
+    abutment_lines = _abutment_lines_layout_meters(
+        bridge, layout, extension_fraction=0.0)
+    if len(abutment_lines) < 2:
+        return 0
+    start_mid = abutment_lines[0].interpolate(0.5, normalized=True)
+    far_mid = abutment_lines[1].interpolate(0.5, normalized=True)
+    axis_x = far_mid.x - start_mid.x
+    axis_y = far_mid.y - start_mid.y
+    axis_norm = math.hypot(axis_x, axis_y)
+    if axis_norm < 1.0:
+        return 0
+    axis_x /= axis_norm
+    axis_y /= axis_norm
+    profile = list(bridge.deck_top_profile or [])
+
+    def _lip_value(x, y):
+        along = (x - start_mid.x) * axis_x + (y - start_mid.y) * axis_y
+        return bridge_profile_pin_elevation_m(datum, profile, along)
+
+    fronting_indices = []
+    for shape_index, shape in enumerate(layout.shapes):
+        if shape.role not in _BRIDGE_PIN_ROLES:
+            continue
+        if shape.polygon is None or shape.polygon.is_empty:
+            continue
+        try:
+            if (shape.polygon.distance(deck_box)
+                    > _DECK_WELD_FRONT_REACH_M):
+                continue
+        except _GEOM_EXC:
+            continue
+        fronting_indices.append(shape_index)
+    if not fronting_indices:
+        return 0
+    try:
+        pavement_union = unary_union(
+            [layout.shapes[i].polygon for i in fronting_indices])
+        # Rim inside the box, down to the causeway-inward depth — only
+        # the portions a fronting pavement edge actually faces.
+        inner_rim = deck_box.difference(
+            deck_box.buffer(-_CAUSEWAY_INWARD_OVERLAP_M))
+        inner_rim = inner_rim.intersection(
+            pavement_union.buffer(_DECK_WELD_FRONT_REACH_M))
+        # The coplanar overlap: reach into the pavement past its cut.
+        overlap_band = pavement_union.intersection(
+            deck_box.buffer(_DECK_WELD_OVERLAP_M))
+        strip = unary_union([inner_rim, overlap_band])
+        if trench_polygon is not None:
+            # R2 node-split wall: keep the same clearance to the trench
+            # the causeway keeps (> the 0.5 m node-interning tolerance).
+            strip = strip.difference(trench_polygon.buffer(
+                _TRENCH_INSET_M - _CAUSEWAY_INWARD_OVERLAP_M))
+        # The road-exit corridor is deliberately NOT subtracted from the
+        # strip geometry: under the deck the road runs on the trench
+        # floor a storey BELOW the lip strips (measured KBNA: the
+        # trench-width Donelson corridor covers the whole box interior
+        # and its polygon deleted every long-side strip), and the strip
+        # zone is pavement-driven — roads never cross airside pavement
+        # at grade, so no strip can land on the road's actual ground
+        # opening at the trench mouths.  The pin loop below still skips
+        # any pavement vertex inside the corridor (belt and braces).
+        for causeway_part in causeway_parts:
+            strip = strip.difference(causeway_part)
+    except _GEOM_EXC:
+        return 0
+    strip_parts = list(strip.geoms) if hasattr(strip, "geoms") else [strip]
+    # A strip wrapping the whole box is an ANNULUS (exterior + hole over
+    # the trench); ring emission is exterior-only and would fill the
+    # hole at the lip value, damming the corridor.  Break the loop with
+    # a hair-line cut along the deck axis (crosses the rim at both
+    # ends; the 0.1 m slot is negligible and object-hidden).
+    simply_connected = []
+    for part in strip_parts:
+        if part.geom_type == "Polygon" and part.interiors:
+            try:
+                axis_cut = LineString([
+                    (start_mid.x - axis_x * 5.0, start_mid.y - axis_y * 5.0),
+                    (far_mid.x + axis_x * 5.0, far_mid.y + axis_y * 5.0),
+                ]).buffer(0.05)
+                split = part.difference(axis_cut)
+                simply_connected.extend(
+                    split.geoms if hasattr(split, "geoms") else [split])
+                continue
+            except _GEOM_EXC:
+                continue
+        simply_connected.append(part)
+    emitted = 0
+    for part in simply_connected:
+        if (part.geom_type != "Polygon" or part.is_empty
+                or part.area < 1.0 or part.interiors):
+            continue
+        try:
+            born_graded(part, ROLE_BRIDGE_CAUSEWAY,
+                        "object_bridge_deck_weld", _lip_value)
+        except _GEOM_EXC:
+            continue
+        emitted += 1
+    if not emitted:
+        return 0
+    # Pin the fronting pavement ring vertices inside the overlap band at
+    # the same law value (node_altitudes stamp + solver pin registry) —
+    # both surfaces of the overlap are then coplanar by construction.
+    try:
+        pin_zone = deck_box.buffer(_DECK_WELD_OVERLAP_M + 0.05)
+    except _GEOM_EXC:
+        return emitted
+    for shape_index in fronting_indices:
+        shape = layout.shapes[shape_index]
+        try:
+            ring = list(shape.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        if ring and ring[0] == ring[-1]:
+            ring = ring[:-1]
+        node_altitudes = (
+            list(shape.node_altitudes[:len(ring)])
+            if shape.node_altitudes else None)
+        changed = False
+        for vertex_index, (x, y) in enumerate(ring):
+            vertex_point = Point(x, y)
+            if not pin_zone.covers(vertex_point):
+                continue
+            if (road_exit_corridor is not None
+                    and road_exit_corridor.covers(vertex_point)):
+                continue  # the road descends through the exit cut
+            value = round(float(_lip_value(x, y)), 2)
+            _record_pin(layout, x, y, value)
+            if (node_altitudes is not None
+                    and vertex_index < len(node_altitudes)):
+                node_altitudes[vertex_index] = value
+            changed = True
+        if changed and node_altitudes is not None:
+            shape.node_altitudes = node_altitudes + [node_altitudes[0]]
+    return emitted
+
+
 def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
     """User ruling R12 — bridge terrain as FIRST-CLASS layout shapes,
     born pre-solve with law values, immutable thereafter (the one-solve
@@ -5366,6 +6080,14 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
         if footprint is not None:
             all_footprints.append((bridge, footprint))
     pads_removed = 0
+    # Captured full-structure footprints (defect C, 2026-07-15): the
+    # removed pads ARE the objects' FULL solid footprints
+    # (``read_dsf_object_buildings`` → ``structure_ring``) — the portal
+    # collar needs that full lateral extent (the deck-face union is
+    # 6.3 m wide against the 13.3 m emitted back side at KBNA portal
+    # 0), so keep the polygons per matched bridge instead of dropping
+    # them on the floor.
+    full_footprints_by_bridge_id: dict[int, list] = {}
     if all_footprints:
         kept_shapes = []
         for shape in layout.shapes:
@@ -5389,6 +6111,8 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                         or overlap >= 0.3 * footprint.area):
                     pads_removed += 1
                     removed = True
+                    full_footprints_by_bridge_id.setdefault(
+                        id(bridge), []).append(shape.polygon)
                     UI.vprint(
                         1,
                         "   [object-bridge] removed building pad "
@@ -5458,6 +6182,41 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             * (vertex_count + 1)))
         return vertex_count
 
+    def _born_graded(polygon, role, ref, altitude_at):
+        """Like :func:`_born_flat`, but every ring vertex takes its OWN
+        law value from ``altitude_at(x, y)`` — a TRANSITION plate (the
+        portal collar): crown-high at the object-hidden inner face,
+        DEM-low at the exposed outer rim, so its perimeter feathers into
+        the surrounding ground instead of standing as a vertical
+        stretched-texture wall.  Each vertex is still registered as a
+        hard solver pin at its own value, exactly like ``_born_flat``."""
+        try:
+            dense = polygon.segmentize(3.0)
+        except (AttributeError, _GEOM_EXC):
+            dense = polygon
+        ring = list(dense.exterior.coords)
+        if len(ring) < 4:
+            return 0
+        node_altitudes = [
+            round(float(altitude_at(x, y)), 2) for x, y in ring
+        ]
+        # shapely closes exterior rings, so ring[0] == ring[-1]; keep the
+        # closing altitude byte-identical to the first vertex's.
+        if ring[0] == ring[-1]:
+            node_altitudes[-1] = node_altitudes[0]
+            vertex_count = len(ring) - 1
+        else:
+            vertex_count = len(ring)
+        for (x, y), altitude in zip(
+                ring[:vertex_count], node_altitudes[:vertex_count]):
+            _record_pin(layout, x, y, altitude)
+        layout.shapes.append(BuiltShape(
+            polygon=dense,
+            role=role,
+            ref=ref,
+            node_altitudes=node_altitudes))
+        return vertex_count
+
     maximum_length = float(_CFG.BRIDGE_CAUSEWAY_MAX_LENGTH_M)
     capture_band = float(_CFG.BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M)
     n_trench = 0
@@ -5498,6 +6257,38 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                         and buried_half.area >= 4.0):
                     mouth_geometry = mouth_half
                     crown_geometry = buried_half
+            # Defect C (2026-07-15): the collar derives its lateral
+            # extent from the object's FULL solid footprint (the
+            # captured never-stack building pad), not the deck-face
+            # union — measured KBNA: collars covered 86-87 % of the
+            # portal back width, one side truncated by up to 8 m.
+            # Clamped to the footprint's neighbourhood: the pads flow
+            # through the building CLUSTERING passes and may be merged
+            # with neighbours.
+            plain_mouth_geometry = mouth_geometry
+            anchor_disk = None
+            full_footprint = None
+            captured_pads = full_footprints_by_bridge_id.get(
+                id(portal["bridge"]), [])
+            if captured_pads:
+                try:
+                    candidate = unary_union(
+                        [footprint] + list(captured_pads)
+                    ).intersection(footprint.buffer(25.0))
+                    if candidate.geom_type == "MultiPolygon":
+                        candidate = max(
+                            candidate.geoms,
+                            key=lambda geometry: geometry.area)
+                    if (candidate.geom_type == "Polygon"
+                            and not candidate.is_empty):
+                        full_footprint = candidate
+                except _GEOM_EXC:
+                    full_footprint = None
+            # Persist on the cached pair record (crossing influence zone,
+            # spec Phase 1): the zone is published from the pairs AFTER
+            # this function returns, and its portal pieces / collar rings
+            # must reach the FULL solid extent the collar is cut from.
+            portal["full_footprint"] = full_footprint
             # X-Plane drapes the portal object at terrain(anchor) — the
             # ROAD-GRADE plate must COVER the anchor point, or the
             # object seats on whatever solves beside it (a crown plate
@@ -5551,10 +6342,22 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             # User correction 2026-07-14c: the object top includes a
             # parapet/safety wall, so ``mouth + deck_top`` overshoots
             # the ground (KBNA: structure tops 185.0/185.3 against real
-            # ground 174/177).  The crown/collar hold the TERRAIN's own
-            # height where it meets the portal back: sample the digital
-            # elevation model just beyond the footprint's buried edge,
-            # clamped to a sane band around the mouth.
+            # ground 174/177).  The crown holds the TERRAIN's own height
+            # over the buried body.
+            #
+            # Round-8 fact 2 — TERRAIN-TRUE crown from the SAME
+            # production inset DEM: the crown IS the runway embankment
+            # riding over the tunnel roof, so seat it at the inset DEM
+            # sampled over its OWN BURIED BODY (the crown geometry),
+            # NOT at a single point 4 m beyond the buried edge.  That
+            # prior mechanism read the mid-hill downslope on each
+            # portal's inner face and diverged the two crowns (measured
+            # KBNA 02C baseline: east crown 180.34 m vs west 181.32 m
+            # over one embankment, each 1.5-1.9 m above its mouth).
+            # Sample AT the crown centroid — the reported target — plus
+            # a tight interior disk so a lone nodata / spike cell cannot
+            # swing the plate, then clamp to a sane band around the
+            # mouth (never above the object top, never a DEM dropout).
             crown_elevation = mouth_floor + deck_top_metres
             burial_x = -portal["outward"][0]
             burial_y = -portal["outward"][1]
@@ -5570,6 +6373,9 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                         buried_extent = projection
             except _GEOM_EXC:
                 buried_extent = 0.0
+            # ``ground_behind`` is retained ONLY as the collar's
+            # outer-target fallback below (used when a collar vertex's
+            # own DEM disk is entirely nodata).
             try:
                 sample_lat, sample_lon = _meters_to_lat_lon(
                     centroid_point.x + burial_x * (buried_extent + 4.0),
@@ -5580,11 +6386,50 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                 )
             except _GEOM_EXC:
                 ground_behind = None
-            if ground_behind is not None:
+            crown_centroid = crown_geometry.centroid
+            crown_target = None
+            try:
+                target_lat, target_lon = _meters_to_lat_lon(
+                    crown_centroid.x, crown_centroid.y)
+                crown_target = _sample_dem(
+                    dem, tile_lat, tile_lon, target_lat, target_lon)
+            except _GEOM_EXC:
+                crown_target = None
+            disk_samples = []
+            for radius in (2.0, 4.0):
+                for step_index in range(6):
+                    angle = math.pi * step_index / 3.0
+                    try:
+                        probe_lat, probe_lon = _meters_to_lat_lon(
+                            crown_centroid.x + radius * math.cos(angle),
+                            crown_centroid.y + radius * math.sin(angle))
+                        sample = _sample_dem(
+                            dem, tile_lat, tile_lon, probe_lat, probe_lon)
+                    except (_GEOM_EXC, ValueError, TypeError):
+                        sample = None
+                    if sample is not None:
+                        disk_samples.append(float(sample))
+            crown_ground = (
+                float(crown_target) if crown_target is not None
+                else (sum(disk_samples) / len(disk_samples)
+                      if disk_samples else None))
+            if crown_ground is not None:
                 crown_elevation = min(
-                    max(float(ground_behind), mouth_floor - 8.0),
+                    max(crown_ground, mouth_floor - 8.0),
                     mouth_floor + deck_top_metres,
                 )
+            crown_centroid_lat, crown_centroid_lon = _meters_to_lat_lon(
+                crown_centroid.x, crown_centroid.y)
+            UI.vprint(
+                1,
+                "   [object-tunnel] crown target: inset DEM at crown "
+                f"centroid @{crown_centroid_lat:.5f},"
+                f"{crown_centroid_lon:.5f} = "
+                + (f"{crown_target:.2f} m" if crown_target is not None
+                   else "nodata")
+                + f" (mouth {mouth_floor:.2f}, object top "
+                f"{mouth_floor + deck_top_metres:.2f})",
+            )
             try:
                 crown_vertex_count = _born_flat(
                     crown_geometry, ROLE_BRIDGE_TRENCH,
@@ -5594,52 +6439,342 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             n_trench += 1
             UI.vprint(
                 1,
-                "   [object-tunnel] portal crown seated at object top "
+                "   [object-tunnel] portal crown seated TERRAIN-TRUE at "
                 f"{crown_elevation:.2f} m ({crown_vertex_count} "
                 "vertices) — the runway-side rim rides the tunnel "
                 "roof",
             )
-            # COLLAR (user ruling 2026-07-14): a band around the BACK
-            # and sides of the buried half, held at the crown
-            # elevation, so the ground behind the portal keeps the
-            # deck/roof height while the road grades down into the
-            # mouth on the other side.  Clipped to the buried side of
-            # the split, so it never reaches the road.
+            # COLLAR (user ruling 2026-07-14; reworked for defect C,
+            # 2026-07-15): a band around the BACK and sides of the
+            # buried half, held at the crown elevation, so the ground
+            # behind the portal keeps the deck/roof height while the
+            # road grades down into the mouth on the other side.
+            # Clipped to the buried side of the split, so it never
+            # reaches the road.
+            #
+            # Defect C rework — the collar must span the WHOLE back
+            # side of the portal OBJECT (measured KBNA: 86-87 %
+            # coverage, up to 8 m truncated on one side):
+            # * the band source is the FULL solid footprint (captured
+            #   never-stack pad), not the disk-bitten crown plate
+            #   built from the narrow deck-face union;
+            # * the mouth-side clip is a FORWARD SWEEP of the
+            #   footprint (translates along +outward over the collar
+            #   depth), not the centroid half-plane — the measured
+            #   KBNA portals are DIAGONAL bands relative to
+            #   ``outward``, so a single global split line leaves the
+            #   back side bare at one lateral end (the owner-observed
+            #   slivers) while the sweep hugs the band's actual back
+            #   edge and wraps the sides;
+            # * subtract the PLAIN mouth half plus the 5 m anchor
+            #   disk (both are the emitted road-grade seat) — never
+            #   the convex-hull-enlarged mouth, whose hull fill ate
+            #   up to 8 m of one collar side;
+            # * keep ALL parts >= 4 m² instead of largest-part-only —
+            #   coverage is the requirement; the largest-part rule
+            #   was defensive against slivers and the 4 m² floor
+            #   already handles those.
             if mouth_half_plane is None:
                 continue
-            try:
-                collar_geometry = (
-                    crown_geometry
-                    .buffer(float(_CFG.TUNNEL_PORTAL_CROWN_COLLAR_M))
-                    .difference(mouth_half_plane)
-                    .difference(footprint)
-                    .difference(mouth_geometry)
-                )
-            except _GEOM_EXC:
+            outward_vector = portal.get("outward")
+            if outward_vector is None:
                 continue
-            if collar_geometry.geom_type != "Polygon":
-                collar_parts = [
-                    part for part in getattr(collar_geometry, "geoms", [])
-                    if part.geom_type == "Polygon" and part.area >= 4.0
+            collar_footprint = (
+                full_footprint if full_footprint is not None
+                else footprint)
+            collar_reach = float(_CFG.TUNNEL_PORTAL_CROWN_COLLAR_M)
+            try:
+                # Sweep length covers the collar reach PLUS the
+                # footprint's own outward extent: on a diagonal band a
+                # 10 m round buffer near the high-outward corner spills
+                # 10-25 m forward of laterals whose own band column
+                # sits far back (measured KBNA portal 1: a forward
+                # wedge over the first approach quad).
+                outward_extent = 0.0
+                projections = [
+                    (vertex_x * outward_vector[0]
+                     + vertex_y * outward_vector[1])
+                    for vertex_x, vertex_y
+                    in collar_footprint.exterior.coords
                 ]
-                collar_geometry = max(
-                    collar_parts, key=lambda part: part.area,
-                    default=None)
-            if collar_geometry is None or collar_geometry.is_empty \
-                    or collar_geometry.area < 4.0:
-                continue
-            try:
-                collar_vertex_count = _born_flat(
-                    collar_geometry, ROLE_BRIDGE_TRENCH,
-                    "object_tunnel_portal_collar", crown_elevation)
+                outward_extent = max(projections) - min(projections)
+                sweep_length = collar_reach + outward_extent + 1.0
+                sweep_steps = max(8, int(math.ceil(sweep_length / 1.5)))
+                forward_sweep = unary_union([
+                    shapely_translate(
+                        collar_footprint,
+                        xoff=outward_vector[0]
+                        * sweep_length * step / sweep_steps,
+                        yoff=outward_vector[1]
+                        * sweep_length * step / sweep_steps,
+                    )
+                    for step in range(1, sweep_steps + 1)
+                ])
+                collar_geometry = (
+                    collar_footprint
+                    .buffer(collar_reach)
+                    .difference(collar_footprint)
+                    .difference(footprint)
+                    .difference(forward_sweep)
+                    .difference(plain_mouth_geometry)
+                )
+                if anchor_disk is not None:
+                    collar_geometry = collar_geometry.difference(
+                        anchor_disk)
+                # Round-8 fact 3 — NO collar part on the ROAD side of
+                # the mouth face (a diagonal lateral lobe can round-
+                # buffer past the forward sweep's end; measured KBNA 02C
+                # baseline: a 34 m² lobe 46.7 m in front of the west
+                # mouth @36.11196,-86.68564, flat at the crown height).
+                # Two frames, both required for a diagonal-band portal:
+                # * the PAIR AXIS (``outward``) against the footprint —
+                #   the plane of the physical portal face the road
+                #   emerges through;
+                # * the OPENING AXIS (crown centroid → emitted mouth
+                #   centroid) against the emitted MOUTH PLATE — a band
+                #   end-lobe hugs the band's own tip BEHIND the pair-
+                #   axis front line yet stands past the mouth plate over
+                #   the descending road (the measured 20 m² survivor of
+                #   the pair-axis clip alone).  Beyond the mouth plate's
+                #   own extent along the opening, the terrain belongs to
+                #   the road approaches, never the collar.
+                collar_geometry = _clip_collar_to_mouth_front(
+                    collar_geometry, footprint, outward_vector)
+                try:
+                    opening_x = (mouth_geometry.centroid.x
+                                 - crown_geometry.centroid.x)
+                    opening_y = (mouth_geometry.centroid.y
+                                 - crown_geometry.centroid.y)
+                    opening_norm = math.hypot(opening_x, opening_y)
+                    if opening_norm > 0.5:
+                        collar_geometry = _clip_collar_to_mouth_front(
+                            collar_geometry, mouth_geometry,
+                            (opening_x / opening_norm,
+                             opening_y / opening_norm))
+                except _GEOM_EXC:
+                    pass
+                # Road-lane clearance: the outward approach corridor —
+                # the draped road buffered to the MOUTH-FACE width,
+                # outward side only — is the approach chain's ground
+                # (the road is offset from the band's centre, so its
+                # lane reaches laterally past the band's end where no
+                # sweep can exclude it; measured KBNA portal 1: the
+                # collar end-lobe covered 201 m² of the first ramp
+                # quad and the downstream plate cut left a 13 m²
+                # quad-versus-quad overlap).  The collar yields the
+                # lane; its BACK band (outward of the centroid split)
+                # is untouched by the half-plane intersection.
+                lane_lines = _draped_road_centerlines_meters(
+                    portal["bridge"],
+                    _object_bridge_road_networks(layout),
+                    to_meters,
+                )
+                if lane_lines:
+                    centroid_point = footprint.centroid
+                    perpendicular = (-outward_vector[1],
+                                     outward_vector[0])
+                    face_projections = [
+                        ((vertex_x - centroid_point.x) * perpendicular[0]
+                         + (vertex_y - centroid_point.y)
+                         * perpendicular[1])
+                        for vertex_x, vertex_y
+                        in footprint.exterior.coords
+                    ]
+                    mouth_face_width = (
+                        max(face_projections) - min(face_projections))
+                    reach = 1000.0
+                    outward_half_plane = Polygon([
+                        (centroid_point.x + perpendicular[0] * reach,
+                         centroid_point.y + perpendicular[1] * reach),
+                        (centroid_point.x - perpendicular[0] * reach,
+                         centroid_point.y - perpendicular[1] * reach),
+                        (centroid_point.x - perpendicular[0] * reach
+                         + outward_vector[0] * 2.0 * reach,
+                         centroid_point.y - perpendicular[1] * reach
+                         + outward_vector[1] * 2.0 * reach),
+                        (centroid_point.x + perpendicular[0] * reach
+                         + outward_vector[0] * 2.0 * reach,
+                         centroid_point.y + perpendicular[1] * reach
+                         + outward_vector[1] * 2.0 * reach),
+                    ])
+                    lane_union = unary_union([
+                        line.buffer(mouth_face_width / 2.0 + 1.0)
+                        for line in lane_lines
+                    ])
+                    collar_geometry = collar_geometry.difference(
+                        lane_union.intersection(outward_half_plane))
             except _GEOM_EXC:
+                continue
+            collar_parts = [
+                part for part in (
+                    collar_geometry.geoms
+                    if hasattr(collar_geometry, "geoms")
+                    else [collar_geometry])
+                if part.geom_type == "Polygon" and not part.is_empty
+                and part.area >= 4.0
+            ]
+            if not collar_parts:
+                continue
+            # Defect (2026-07-15): the collar was emitted FLAT at the
+            # crown elevation, so its whole perimeter was a cliff (the
+            # measured 7.76/7.09 m steps to the approach, 4.44 m to the
+            # adjacent_ground band — vertical stretched-texture walls
+            # flanking the portal objects).  It must be a TRANSITION
+            # ring: the inner boundary meeting the crown keeps the crown
+            # altitude (and the object facade hides its vertical meeting
+            # with the low mouth — the by-design object-hidden face),
+            # while the exposed outer rim tracks the surrounding ground.
+            #
+            # Per-vertex law value: sample the DEM at the vertex (the
+            # smoothed tile DEM in production — the same source the crown
+            # samples for ``ground_behind``, consistent with any
+            # adjacent_ground band that abuts) and blend from the crown
+            # elevation to that ground by DISTANCE TO THE CROWN polygon
+            # (the buried half).  Vertices on the buried inner edge hug
+            # the crown (distance ~ 0); vertices on the outer rim, and
+            # everything laterally beyond the object where no facade
+            # hides a face, reach the ground within one collar reach —
+            # so no exposed vertical face survives.
+            crown_for_collar = crown_geometry
+            crown_reach = collar_reach if collar_reach > 1e-6 else 1.0
+            # Round-8 fact 4 — a lateral flank BEYOND the object's own
+            # width (the facade-hidden span) may not meet the low mouth
+            # plate vertically.  Only the object-hidden span — within the
+            # mouth face's lateral half-width — is allowed the by-design
+            # vertical meeting (the facade covers it); a flank sticking
+            # out sideways past the object must feather down to the mouth
+            # floor where it abuts the mouth plate, exactly as the outer
+            # rim feathers to the surrounding ground.  Measure the mouth
+            # face half-width (footprint extent perpendicular to
+            # ``outward``).
+            face_centroid = footprint.centroid
+            face_perpendicular = (-outward_vector[1], outward_vector[0])
+            _face_lateral = [
+                ((vertex_x - face_centroid.x) * face_perpendicular[0]
+                 + (vertex_y - face_centroid.y) * face_perpendicular[1])
+                for vertex_x, vertex_y in footprint.exterior.coords
+            ]
+            face_half_width = (
+                (max(_face_lateral) - min(_face_lateral)) / 2.0
+                if _face_lateral else 0.0)
+
+            def _collar_alt(vertex_x, vertex_y,
+                            _crown=crown_for_collar,
+                            _crown_elevation=crown_elevation,
+                            _mouth_floor=mouth_floor,
+                            _ground_behind=ground_behind,
+                            _reach=crown_reach,
+                            _mouth_geometry=plain_mouth_geometry,
+                            _face_centroid=face_centroid,
+                            _face_perpendicular=face_perpendicular,
+                            _face_half_width=face_half_width):
+                # The outer target is the ground the abutting
+                # adjacent_ground band will drop to — NOT the smoothed
+                # DEM AT the vertex.  Ortho4XP's airport-smoothed tile
+                # DEM FLATTENS the runway embankment, so it holds the
+                # crown height right up to the collar's outer edge and
+                # only drops at the LIP just beyond; sampling at the
+                # vertex therefore reads ~crown and the collar would
+                # stay a plateau (measured KBNA 02C: the band welded to
+                # a crown-high collar pin, then cliffed 6.9-7.8 m to the
+                # DEM < 1 m further out).  Sample the DEM over a small
+                # DISK around the vertex and take the MINIMUM, so the
+                # exposed rim reaches the true surrounding ground the
+                # band's first non-weld station reads — in whatever
+                # direction the lip falls (a single outward ray misses
+                # it: the drop is perpendicular to the collar arm, not
+                # radial from the footprint centroid).  The
+                # distance-to-crown blend below keeps the buried INNER
+                # face at the crown regardless, so lowering the disk
+                # target never disturbs the object-hidden meeting.
+                # A tight disk: the embankment lip abuts the collar's
+                # outer edge (measured KBNA: the DEM drop is < 1.5 m
+                # outside the rim), so a few metres in every direction
+                # catch it — while staying close enough that the collar
+                # never dives BELOW the ground the band welds to just
+                # outside it (a distant low would invert the step).
+                ground_here = None
+                offsets = [(0.0, 0.0)]
+                for radius in (1.5, 3.0, 5.0):
+                    for step_index in range(12):
+                        angle = math.pi * step_index / 6.0
+                        offsets.append((radius * math.cos(angle),
+                                        radius * math.sin(angle)))
+                for offset_x, offset_y in offsets:
+                    try:
+                        probe_lat, probe_lon = _meters_to_lat_lon(
+                            vertex_x + offset_x, vertex_y + offset_y)
+                        sample = _sample_dem(
+                            dem, tile_lat, tile_lon, probe_lat, probe_lon)
+                    except (_GEOM_EXC, ValueError, TypeError):
+                        sample = None
+                    if sample is not None:
+                        ground_here = (
+                            sample if ground_here is None
+                            else min(ground_here, float(sample)))
+                if ground_here is None:
+                    ground_here = (
+                        _ground_behind if _ground_behind is not None
+                        else _crown_elevation)
+                # Never above the crown, never an absurd DEM dropout
+                # (mirror the crown's own clamp band).
+                outer_target = min(
+                    max(float(ground_here), _mouth_floor - 12.0),
+                    _crown_elevation,
+                )
+                # Fact 4 flank transition: a vertex laterally BEYOND the
+                # object's facade-hidden span that abuts the low mouth
+                # plate feathers its outer target down to the mouth floor
+                # (nearest the plate) and back up to the ground target
+                # (one reach away) — so the exposed flank steps onto the
+                # mouth by at most the per-reach grade, never a cliff.
+                # Vertices within the object span, or far from the mouth
+                # plate, are untouched (the object hides the former; the
+                # ground target already governs the latter).
+                lateral = (
+                    (vertex_x - _face_centroid.x) * _face_perpendicular[0]
+                    + (vertex_y - _face_centroid.y) * _face_perpendicular[1])
+                if abs(lateral) > _face_half_width + 1.0:
+                    try:
+                        distance_to_mouth = _mouth_geometry.distance(
+                            Point(vertex_x, vertex_y))
+                    except (_GEOM_EXC, AttributeError):
+                        distance_to_mouth = _reach
+                    if distance_to_mouth < _reach:
+                        mouth_blend = max(
+                            0.0, min(1.0, distance_to_mouth / _reach))
+                        outer_target = min(
+                            outer_target,
+                            (1.0 - mouth_blend) * _mouth_floor
+                            + mouth_blend * outer_target)
+                try:
+                    distance_to_crown = _crown.distance(
+                        Point(vertex_x, vertex_y))
+                except (_GEOM_EXC, AttributeError):
+                    distance_to_crown = _reach
+                blend = max(0.0, min(1.0, distance_to_crown / _reach))
+                return ((1.0 - blend) * _crown_elevation
+                        + blend * outer_target)
+
+            collar_vertex_count = 0
+            emitted_collar_parts = 0
+            for collar_part in collar_parts:
+                try:
+                    collar_vertex_count += _born_graded(
+                        collar_part, ROLE_BRIDGE_TRENCH,
+                        "object_tunnel_portal_collar", _collar_alt)
+                except _GEOM_EXC:
+                    continue
+                emitted_collar_parts += 1
+            if not emitted_collar_parts:
                 continue
             n_trench += 1
             UI.vprint(
                 1,
-                "   [object-tunnel] portal collar holds "
-                f"{crown_elevation:.2f} m around the portal back "
-                f"({collar_vertex_count} vertices)",
+                "   [object-tunnel] portal collar feathers crown "
+                f"{crown_elevation:.2f} m to ground around the portal "
+                f"back ({emitted_collar_parts} part(s), "
+                f"{collar_vertex_count} vertices)",
             )
 
     for bridge in corridor_bridges:
@@ -5719,6 +6854,7 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                 pavement_kept_union = None
 
         # Trench (born flat at the law floor) — spans the deck BOX.
+        trench_polygon_emitted = None
         try:
             trench = deck_box.buffer(-_TRENCH_INSET_M)
             if pavement_kept_union is not None:
@@ -5729,6 +6865,7 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                 vertex_count = _born_flat(
                     trench, ROLE_BRIDGE_TRENCH,
                     "object_bridge_corridor", floor_elevation)
+                trench_polygon_emitted = trench
                 n_trench += 1
                 UI.vprint(
                     1,
@@ -5742,6 +6879,7 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
         # Causeway plates (born flat at the deck-end law value).
         pavement_union = _pavement_union()
         centroid = footprint.centroid
+        causeway_parts_emitted: list = []
         abutment_lines = _abutment_lines_layout_meters(
             bridge, layout, extension_fraction=0.0
         )
@@ -5824,6 +6962,7 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                         continue
                     _born_flat(part, ROLE_BRIDGE_CAUSEWAY,
                                "object_bridge_causeway", plate_elevation)
+                    causeway_parts_emitted.append(part)
                     emitted_parts += 1
                 # User ruling 2026-07-14b: the pavement the approach
                 # RESUMES on around the plate zone is anchored AT the
@@ -5888,6 +7027,34 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                 )
             except _GEOM_EXC:
                 continue
+
+        # ── Deck-lip weld strips (user directive 2026-07-15): the R8
+        # hard-deck cut trims pavement AT the deck box while the trench
+        # is inset _TRENCH_INSET_M, leaving a ring of raw mesh whose
+        # triangles dive to the trench floor right at the lip (measured
+        # KBNA taxiway-L: pavement pinned 167.0, plate edge 0.8-1.2 m
+        # away at 161.01 — the owner-visible gap onto the deck).  Every
+        # pavement-facing rim segment gets a strip at the deck-top
+        # PROFILE law value spanning from the causeway-inward depth
+        # (preserving the R2 node-split wall to the trench) to
+        # _DECK_WELD_OVERLAP_M INSIDE the pavement; the fronting
+        # pavement ring vertices are pinned at the same law value, so
+        # the overlap is coplanar and invisible.  Never on road faces:
+        # the strip zone is pavement-driven (taxi/runway/apron roles
+        # only — service roads descend through the road-exit cut) and
+        # the road-exit corridor is cut out, so the approach chains and
+        # their verbatim plate welds are untouched.
+        n_weld_strips = _emit_deck_lip_weld_strips(
+            layout, bridge, deck_box, trench_polygon_emitted,
+            road_exit_corridor, causeway_parts_emitted, datum,
+            _born_graded)
+        if n_weld_strips:
+            UI.vprint(
+                1,
+                f"   [object-bridge] {n_weld_strips} deck-lip weld "
+                "strip(s) overlap the resumed pavement at the deck "
+                f"profile value for {bridge.object_resources}",
+            )
     return n_trench, n_causeway, pads_removed
 
 

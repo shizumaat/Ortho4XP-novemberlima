@@ -510,6 +510,54 @@ class TestSkirtValidator(SkirtHarness):
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Crossing-zone clip: the skirt clears the published crossing influence
+# zone (Phase 1, docs/specs/crossing-terrain-ownership.md; supersedes
+# the round-8 road-lane clip)
+# ──────────────────────────────────────────────────────────────────────
+class TestSkirtCrossingZoneClip(SkirtHarness):
+    """A runway-end skirt is clipped out of the published crossing
+    influence zone (crossings, collar rings, and the depressed-road
+    corridor), so it never lays its floor across a depressed public road
+    (measured KBNA: 201 m² over an ``object_bridge_approach``).  The
+    skirt-airside precedence ruling (2026-07-10) does NOT extend into a
+    crossing's influence zone: the skirt clears it, exactly as it
+    already clears surface roads."""
+
+    def _zone_over_east_end(self):
+        from shapely.geometry import Polygon
+        # A band across the east skirt zone, just past the runway end.
+        return Polygon([
+            (self._RUNWAY_LEN + 15.0, -18.0),
+            (self._RUNWAY_LEN + 45.0, -18.0),
+            (self._RUNWAY_LEN + 45.0, 18.0),
+            (self._RUNWAY_LEN + 15.0, 18.0)])
+
+    def test_east_skirt_covers_zone_without_a_crossing(self, monkeypatch):
+        # Control: with nothing published the east skirt fills the region
+        # the zone would occupy, so the clip below is what removes it.
+        layout = self._make_layout()
+        self._emit(monkeypatch, layout, self._make_runway())
+        zone = self._zone_over_east_end()
+        skirts = [s for s in layout.shapes if s.ref == "runway_end_skirt"]
+        covered = sum(s.polygon.intersection(zone).area for s in skirts)
+        assert covered > 50.0
+
+    def test_skirt_clipped_out_of_crossing_zone(self, monkeypatch):
+        from auto_patch import crossing_terrain
+        zone = self._zone_over_east_end()
+        layout = self._make_layout()
+        setattr(layout,
+                crossing_terrain.CROSSING_INFLUENCE_ZONE_UNION_ATTRIBUTE,
+                zone)
+        self._emit(monkeypatch, layout, self._make_runway())
+        skirts = [s for s in layout.shapes if s.ref == "runway_end_skirt"]
+        # Skirts still emit (the west end, and the un-clipped east remainder).
+        assert skirts
+        overlap = sum(s.polygon.intersection(zone).area for s in skirts)
+        assert overlap <= 1.0
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Blast-pad flank wrap: lateral drops inside the governed end zone
 # ──────────────────────────────────────────────────────────────────────
 class TestBlastPadFlanks(SkirtHarness):
@@ -634,7 +682,7 @@ class TestRoadAwareness(SkirtHarness):
             ("bore", ["t1", "t2"], {"highway": "secondary",
                                     "tunnel": "yes"}),
         ]
-        return nodes, ways, {"road", "bore"}
+        return nodes, ways, {"road", "bore"}, {}
 
     def _emit(self, monkeypatch, layout, runway, gate_on=True):
         from auto_patch import bridges
@@ -698,7 +746,7 @@ class TestConstraintInference(SkirtHarness):
         nodes = {"r1": _ll(self._ROAD_X, -400.0),
                  "r2": _ll(self._ROAD_X, 400.0)}
         return nodes, [("road", ["r1", "r2"],
-                        {"highway": "service"})], {"road"}
+                        {"highway": "service"})], {"road"}, {}
 
     def _emit(self, monkeypatch, layout, runway, gate_on=True):
         from auto_patch import bridges
@@ -771,7 +819,8 @@ class TestConstraintInference(SkirtHarness):
         monkeypatch.setattr(
             osm_load, "_load_osm_road_layer",
             lambda layer, lat, lon, radius_deg=0.05:
-            (nodes, water_ways) if layer == "water" else ({}, []))
+            (nodes, water_ways, {}) if layer == "water"
+            else ({}, [], {}))
         layout = self._make_layout()
         SkirtHarness._emit(self, monkeypatch, layout,
                            self._make_runway(lights_b=2))

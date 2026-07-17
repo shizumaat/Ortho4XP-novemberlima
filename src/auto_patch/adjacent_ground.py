@@ -171,6 +171,16 @@ _END_WRAP = os.environ.get("O4_ADJACENT_GROUND_END_WRAP", "1") == "1"
 # fires only where tunnel ramps emit, e.g. the CYUL mapped-portal class.)
 _TUNNEL_STANDOFF = os.environ.get(
     "O4_ADJACENT_GROUND_TUNNEL_STANDOFF", "1") == "1"
+# CROSSING INFLUENCE ZONE (Phase 1, docs/specs/crossing-terrain-
+# ownership.md): every crossing-specific exclusion this module used to
+# build itself — the crossing-union branch of the standoff block, the
+# road-lane station drop and emit-time lane clip, and the buried-span
+# carve-out (O4_ADJACENT_GROUND_WRAP_LANE_EXCLUSION /
+# O4_ADJACENT_GROUND_BURIED_BODY_BAND, whose semantics now live in
+# ``crossing_terrain``) — is replaced by the ONE zone the pipeline
+# publishes pre-solve.  The march drops stations inside it and the
+# emitter differences band pieces against it; ``None`` (nothing
+# published — no crossings, no depressed road) is byte-inert.
 # Lab forensics: O4_ADJACENT_GROUND_DEBUG=1 logs per-shape band counts and
 # every dropped piece, for chasing validator coverage findings.
 _ADJACENT_DEBUG = os.environ.get("O4_ADJACENT_GROUND_DEBUG") == "1"
@@ -186,7 +196,6 @@ for _pair in (os.environ.get("O4_ADJACENT_GROUND_DEBUG_POINTS") or "") \
             _ADJACENT_DEBUG_POINTS.append((float(_px), float(_py)))
         except ValueError:
             pass
-
 __all__ = ["emit_adjacent_ground_bands"]
 
 # ── Apparatus hit counters (Slice B stage B3 order 2 instrumentation;
@@ -201,7 +210,8 @@ _APPARATUS_KEYS = (
     "seam_taper_flagged_stations", "solved_exact_variable",
     "solved_row_on", "solved_row_interpolated",
     "solved_beyond_coverage", "solved_analytic_fallback",
-    "solved_store_missing_shape",
+    "solved_store_missing_shape", "zone_static_keepout_dropped",
+    "static_edge_weld_vertices", "wrap_crossing_zone_excluded_stations",
 )
 _APPARATUS_HITS: dict[str, int] = {}
 
@@ -1184,6 +1194,24 @@ def _runway_end_skirt_prep(layout):
         return None
 
 
+def _crossing_zone_union(layout):
+    """The published crossing influence zone union, or ``None`` (Phase 1,
+    docs/specs/crossing-terrain-ownership.md).  Replaces every crossing
+    reconstruction this module used to do itself: the crossing-union
+    branch of the standoff block, the road-lane exclusion, and the
+    buried-span carve-out (the buried roof is bandable BY CONSTRUCTION —
+    the published zone contains only the road bore over the buried span)."""
+    from .crossing_terrain import crossing_influence_zone_union
+    return crossing_influence_zone_union(layout)
+
+
+def _crossing_zone_prep(layout):
+    """Prepared form of the published crossing zone for the march's
+    station test, or ``None``."""
+    from .crossing_terrain import crossing_influence_zone_prepared
+    return crossing_influence_zone_prepared(layout)
+
+
 def _tunnel_ramp_standoff_block(layout):
     """1 m buffered union of the tunnel mouth pieces to stand strips off
     (scope B), or ``None``.  The set is ``tunnel_ramp`` sloped rects + the
@@ -1194,22 +1222,14 @@ def _tunnel_ramp_standoff_block(layout):
     ``retaining_wall`` pieces ``_emit_apron_walls`` appends later are not yet
     present and are naturally excluded.
 
-    The OWNED CROSSING REGIONS join the block (user ruling 2026-07-14,
-    ``BRIDGE_CROSSING_MASK``): corridor deck boxes and tunnel-portal-pair
-    regions belong to the object story, and bands marching off the plate
-    edges INTO the crossing fought the object cut at the KBNA Donelson
-    Pike bridges.  The plates themselves remain graph members bands weld
-    TO from outside; only the crossing interior is masked."""
+    LEGACY pieces only: recognized crossings (corridor deck boxes,
+    tunnel-portal-pair regions, collar rings, the depressed-road corridor)
+    are covered by the published crossing influence zone
+    (``_crossing_zone_union``), not reconstructed here — Phase 1 of
+    docs/specs/crossing-terrain-ownership.md."""
     polys = [s.polygon for s in layout.shapes
              if s.role in (ROLE_TUNNEL_RAMP, ROLE_RETAINING_WALL)
              and s.polygon is not None and not s.polygon.is_empty]
-    crossing_union = None
-    from .config import BRIDGE_CROSSING_MASK
-    if BRIDGE_CROSSING_MASK:
-        from . import bridges as _BRIDGES
-        crossing_union = _BRIDGES._classifier_owned_crossing_union(layout)
-    if crossing_union is not None and not crossing_union.is_empty:
-        polys.append(crossing_union)
     if not polys:
         return None
     try:
@@ -1428,7 +1448,8 @@ def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
                                      step, prep_static, seam_keys,
                                      sample_dem, zone_rows_out=None,
                                      wrap_skirt_prep=None, ring_alts_fill=None,
-                                     coverage_grid=False):
+                                     coverage_grid=False,
+                                     crossing_zone_prep=None):
     """Frontage detection + corridor MARCH for one airside shape — the band
     FOOTPRINT geometry (everything that decides WHERE the bands are, given the
     edge-altitude references ``ring_alts``).  Returns
@@ -1463,7 +1484,17 @@ def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
     detection, while the positional ``ring_alts`` carries the reach-band
     FLOOR used for CUT detection (see ``_worst_case_ring_alts``).  ``None``
     (default; every post-solve/emit caller): both directions read the single
-    ``ring_alts`` — byte-identical to before order 3."""
+    ``ring_alts`` — byte-identical to before order 3.
+
+    ``crossing_zone_prep`` (Phase 1, docs/specs/crossing-terrain-
+    ownership.md; supersedes the round-6 road-lane exclusion): the
+    PREPARED published crossing influence zone (``_crossing_zone_prep``).
+    A station whose seed point OR outward probe falls inside the zone is
+    dropped exactly like the end-edge / covered-probe skips, so the
+    taxiway-end wrap fan never sweeps into a crossing or its depressed
+    road corridor (bands never wrap a ramp/approach end — user ruling
+    2026-07-15).  ``None`` (default; nothing published — no crossings, no
+    depressed road): no zone test — byte-identical."""
     if ring_alts_fill is None:
         ring_alts_fill = ring_alts
     def _station_reference(sx, sy, out, alt_value):
@@ -1478,6 +1509,16 @@ def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
             return None
         probe = Point(sx + out[0] * _RING_PROBE_M,
                       sy + out[1] * _RING_PROBE_M)
+        # CROSSING-ZONE EXCLUSION (Phase 1): a station whose seed or
+        # outward probe falls inside the published crossing influence
+        # zone is dropped — bands never wrap a ramp/approach end and
+        # never march into a crossing.  Inert without a published zone
+        # (``crossing_zone_prep is None``).
+        if crossing_zone_prep is not None and (
+                crossing_zone_prep.contains(Point(sx, sy))
+                or crossing_zone_prep.contains(probe)):
+            _APPARATUS_HITS["wrap_crossing_zone_excluded_stations"] += 1
+            return None
         if prep_static.contains(probe):
             # WRAP (scope A): a taxiway station whose outward probe lands
             # ONLY on a runway-END skirt is the JOIN target, not an
@@ -1645,6 +1686,63 @@ def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
     return fill_bands, cut_bands, stations, st_alts, outs
 
 
+def _split_zone_rows_off_static(zone_rows, prep_static, static_boundary):
+    """Drop every zone-row point that lies INSIDE static pavement or within
+    ``ADJACENT_GROUND_ZONE_STATIC_KEEPOUT_M`` of any static-shape boundary
+    (B4 flip defect 1 — see the constant's rationale in ``config.py``: such
+    a point can intern onto a pavement ring vertex's canonical bucket and
+    stamp its DEM-clamped value onto the pavement profile).  A row whose
+    interior points are dropped is SPLIT into its surviving contiguous runs
+    (one row dict per run) so the emit-time resampler never interpolates a
+    row polyline straight across the pavement it used to cross."""
+    from .config import ADJACENT_GROUND_ZONE_STATIC_KEEPOUT_M as _margin
+    import numpy as _np
+    from shapely import points as _sh_points, dwithin as _sh_dwithin
+    out: list[dict] = []
+    n_dropped = 0
+    for row in zone_rows:
+        pts = row.get("pts") or []
+        if not pts:
+            continue
+        arr = _sh_points(_np.asarray(pts, dtype=float))
+        try:
+            near = _sh_dwithin(static_boundary, arr, _margin)
+        except _GEOM_EXC:
+            near = _np.zeros(len(pts), dtype=bool)
+        runs: list[list[int]] = []
+        current: list[int] = []
+        for j in range(len(pts)):
+            bad = bool(near[j])
+            if not bad:
+                try:
+                    bad = prep_static.contains(arr[j])
+                except _GEOM_EXC:
+                    bad = False
+            if bad:
+                n_dropped += 1
+                if current:
+                    runs.append(current)
+                    current = []
+            else:
+                current.append(j)
+        if current:
+            runs.append(current)
+        if len(runs) == 1 and len(runs[0]) == len(pts):
+            out.append(row)
+            continue
+        depths = row.get("depths") or []
+        hosts = row.get("hosts") or []
+        for run in runs:
+            out.append({
+                "kind": row["kind"], "d0": row["d0"],
+                "pts": [pts[j] for j in run],
+                "depths": [depths[j] for j in run],
+                "hosts": [hosts[j] for j in run]})
+    if n_dropped:
+        _APPARATUS_HITS["zone_static_keepout_dropped"] += n_dropped
+    return out
+
+
 def construct_adjacent_ground_presolve(layout: PavementLayout, dem,
                                        tile_lat: int, tile_lon: int,
                                        source_runways=None) -> int:
@@ -1722,6 +1820,15 @@ def construct_adjacent_ground_presolve(layout: PavementLayout, dem,
     except _GEOM_EXC:
         layout.adjacent_ground_presolve = []
         return 0
+    # Zone-node static keep-out (B4 flip defect 1): the boundary of the
+    # SAME static block the march probes, prepared once for the vectorized
+    # dwithin test in ``_split_zone_rows_off_static``.
+    try:
+        from shapely import prepare as _sh_prepare
+        _zone_static_boundary = static_union.boundary
+        _sh_prepare(_zone_static_boundary)
+    except _GEOM_EXC:
+        _zone_static_boundary = None
 
     rw_axes: list[tuple] = []
     if source_runways:
@@ -1749,6 +1856,9 @@ def construct_adjacent_ground_presolve(layout: PavementLayout, dem,
     # taxiway shapes with the gate ON (byte-inert otherwise).
     wrap_skirt_prep = (_runway_end_skirt_prep(layout)
                        if _END_WRAP else None)
+    # Crossing-zone exclusion (Phase 1): the published zone, prepared
+    # once, passed for taxiway shapes (byte-inert when nothing published).
+    crossing_zone_prep = _crossing_zone_prep(layout)
 
     # ── ORDER 3 WORST-CASE COVERAGE (coverage-gap closure) ──────────────
     # The pre-solve march seeds unsolved pavement edges from the DEM, which
@@ -1805,9 +1915,16 @@ def construct_adjacent_ground_presolve(layout: PavementLayout, dem,
                 wrap_skirt_prep=(wrap_skirt_prep
                                  if family == "taxiway" else None),
                 ring_alts_fill=ring_alts_fill,
-                coverage_grid=_coverage_grid)
+                coverage_grid=_coverage_grid,
+                crossing_zone_prep=(crossing_zone_prep
+                                    if family == "taxiway" else None))
         if not fill_bands and not cut_bands:
             continue
+        # Zone-node static keep-out (B4 flip defect 1): no zone point on,
+        # inside, or hugging static pavement ever becomes a solver variable.
+        if zone_rows and _zone_static_boundary is not None:
+            zone_rows = _split_zone_rows_off_static(
+                zone_rows, prep_static, _zone_static_boundary)
         # ZONE-NODE GRID (order 2, schema split): the free-variable
         # admission list — one record per unique zone-row vertex
         # (millimetre dedup; a row vertex shared between two abutting
@@ -1949,6 +2066,38 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
     # only feeds the inline re-march; byte-inert with the gate OFF.
     wrap_skirt_prep = (_runway_end_skirt_prep(layout)
                        if _END_WRAP else None)
+    # CROSSING INFLUENCE ZONE (Phase 1, docs/specs/crossing-terrain-
+    # ownership.md): the ONE published zone replaces the crossing-union
+    # branch of the standoff block AND the road-lane exclusion — the band
+    # pieces are DIFFERENCED against it below and the station-level drop
+    # feeds the inline re-march path.  Published pre-solve, so construct
+    # and emit consult the identical geometry.  Byte-inert when nothing
+    # is published (both are None).
+    crossing_zone_union = _crossing_zone_union(layout)
+    crossing_zone_prep = (_crossing_zone_prep(layout)
+                          if crossing_zone_union is not None else None)
+    if (os.environ.get("O4_CROSSING_ZONE_DEBUG") == "1"
+            and crossing_zone_union is not None):
+        # (The zone WKT dump lives at PUBLICATION — O4_CROSSING_ZONE_DUMP
+        # in ``crossing_terrain`` — never here: two writers to one path
+        # clobbered the publication dump.)
+        _area = (crossing_zone_union.area
+                 if not crossing_zone_union.is_empty else 0.0)
+        print(f"  [crossing-zone-debug] band-emit crossing zone union "
+              f"area = {_area:.1f} m2")
+    # The clip block carries a margin over the zone itself (the buffered-
+    # standoff pattern, ``_PAVEMENT_GAP_M``): a band stands off the zone
+    # boundary rather than welding onto it, and the post-clip ring
+    # decimation/simplification cannot bow a long clipped edge back INTO
+    # the zone (measured KBNA: a 7 m2 sliver on a 36,000 m2 merged strip
+    # from a 0-margin lane clip).
+    crossing_zone_clip_block = None
+    if crossing_zone_union is not None:
+        try:
+            crossing_zone_clip_block = crossing_zone_union.buffer(
+                _PAVEMENT_GAP_M)
+        except _GEOM_EXC:
+            crossing_zone_clip_block = crossing_zone_union
 
     # CONFORM-TO-STATIC (chain identity, 2026-07-09): a band row that
     # runs just OUTSIDE a foreign shape's edge (10-15 cm — daylight
@@ -1970,6 +2119,7 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
     _SNAP_TO_STATIC_M = 0.2
     from shapely import STRtree as _STRtree
     _static_ext = []
+    _static_ext_shape = []   # owner shape per exterior (edge-weld values)
     for _s in layout.shapes:
         if _s.role == "groundside_pavement":
             continue        # never adopt groundside chains (ruling)
@@ -1978,6 +2128,7 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                 _static_ext.append(_s.polygon.exterior)
             except _GEOM_EXC:
                 continue
+            _static_ext_shape.append(_s)
     try:
         _static_ext_tree = _STRtree(_static_ext)
     except _GEOM_EXC:
@@ -2058,6 +2209,57 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
             else:
                 snapped.append((x, y))
         return snapped
+
+    # STATIC-EDGE VALUE WELD (B4 flip defect 2, 2026-07-15).  A band clip
+    # vertex lying ON a FOREIGN static shape's edge (the exact
+    # ``difference`` clip and ``_snap_ring_to_static`` both mint them) is
+    # part of THAT surface's chain — its value is that surface's solved
+    # edge altitude, never the band's own corridor/zone reading.  The
+    # solved-band resampler's weld test knows only the band's HOST ring,
+    # so before this weld a junction-edge clip vertex took a zone-row
+    # value up to the corridor envelope away from the junction's solved
+    # surface (CYXY: 709.8 vs 709.94), and the final epsilon-wedge weld
+    # then stamped that value into the junction ring — the B4 junction
+    # spine-grade violations the legacy clearance strips used to mask by
+    # occupying the ground.  Lazy per-exterior edge references (the same
+    # ``_ring_edge_reference`` read every resampler uses).
+    _STATIC_WELD_TOL_M = 0.02
+    _static_edge_ref_cache: dict = {}
+    # Value-donor scope: the surfaces the band law grades TO — airside
+    # pavement plus the pavement-pinned clearance family (runway-end
+    # skirts, legacy clearance strips).  Bridge plates, tunnel walls/
+    # ramps, pads, terminals never donate: a band meeting one of those is
+    # a DESIGNED split (deck cliff / wall / standoff), not a weld.
+    from .layout import (ROLE_RUNWAY_CLEARANCE as _R_RWCL,
+                         ROLE_TAXIWAY_CLEARANCE as _R_TWCL)
+    _WELD_DONOR_ROLES = frozenset(
+        _RUNWAY_ROLES + _TAXIWAY_ROLES + _APRON_ROLES
+        + (_R_RWCL, _R_TWCL))
+
+    def _static_edge_weld_alt(x, y):
+        if _static_ext_tree is None:
+            return None
+        pt = Point(x, y)
+        try:
+            cand = _static_ext_tree.query_nearest(
+                pt, max_distance=_STATIC_WELD_TOL_M)
+        except _GEOM_EXC:
+            return None
+        cand = [gi for gi in cand
+                if (_static_ext_shape[gi].role or "") in _WELD_DONOR_ROLES]
+        if not cand:
+            return None
+        best_gi = int(min(cand))    # deterministic among exact ties
+        ref = _static_edge_ref_cache.get(best_gi)
+        if ref is None:
+            ext_coords = list(_static_ext[best_gi].coords)
+            ref = _ring_edge_reference(
+                ext_coords,
+                _shape_ring_alts(_static_ext_shape[best_gi], ext_coords))
+            _static_edge_ref_cache[best_gi] = ref
+        ref_line, ref_alt_at = ref
+        alt = ref_alt_at(ref_line.project(pt))
+        return None if alt is None else float(alt)
 
     # Row-100 runway axes (authoritative length + direction) for runway
     # code-number keying and END-edge skipping — as the ring-edge sweep.
@@ -2318,7 +2520,9 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                 floor_depth, ceil_off, step, prep_static, seam_keys,
                 sample_dem,
                 wrap_skirt_prep=(wrap_skirt_prep
-                                 if family == "taxiway" else None))
+                                 if family == "taxiway" else None),
+                crossing_zone_prep=(crossing_zone_prep
+                                    if family == "taxiway" else None))
         if not fill_bands and not cut_bands:
             continue
 
@@ -2347,6 +2551,18 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                              f"zone values for shape role={s.role} "
                              f"ref={s.ref} — analytic valuation kept "
                              f"for this shape (degrade, counted).")
+        # STATIC-EDGE VALUE WELD (B4 flip defect 2): a band vertex ON any
+        # static shape's edge takes THAT surface's solved edge value
+        # (weld precedence), with the host-corridor/zone valuation above
+        # as the fallback for every off-edge vertex.
+        _corridor_resample = resample_alt
+
+        def resample_alt(vx, vy, kind, _base=_corridor_resample):
+            weld_alt = _static_edge_weld_alt(vx, vy)
+            if weld_alt is not None:
+                _APPARATUS_HITS["static_edge_weld_vertices"] += 1
+                return (weld_alt, True)
+            return _base(vx, vy, kind)
 
         if _ADJACENT_DEBUG and (fill_bands or cut_bands):
             UI.vprint(1, f"  [adjacent-debug] shape role={s.role} "
@@ -2434,6 +2650,15 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                         # onto its steep floor — the building standoff
                         # pattern.  A groove of raw DEM renders harmlessly.
                         poly = poly.difference(tunnel_ramp_block)
+                    if (crossing_zone_clip_block is not None
+                            and not crossing_zone_clip_block.is_empty):
+                        # CROSSING INFLUENCE ZONE (Phase 1): no band piece
+                        # may enter a published crossing zone — crossings,
+                        # collar rings, and the depressed-road corridor —
+                        # bands stay along the taxiway edge and never wrap
+                        # a ramp/approach end (user ruling 2026-07-15).
+                        # Same buffered-standoff render argument as above.
+                        poly = poly.difference(crossing_zone_clip_block)
                     if (previous_shapes_union is not None
                             and not previous_shapes_union.is_empty):
                         poly = poly.difference(previous_shapes_union)

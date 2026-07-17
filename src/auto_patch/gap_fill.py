@@ -1617,6 +1617,17 @@ def construct_gap_fill_presolve(layout) -> int:
                    and id(s) not in parent_ids
                    and s.polygon is not None and not s.polygon.is_empty
                    and s.polygon.geom_type in ("Polygon", "MultiPolygon")]
+    # CROSSING INFLUENCE ZONE (Phase 1, docs/specs/crossing-terrain-
+    # ownership.md): the published zone blocks a gap exactly like a
+    # foreign shape — a gap-fill face must never bury a crossing or its
+    # depressed public road (round-8 finding: gap-fill was the fourth
+    # corridor consumer, and the only one that never clipped).  Published
+    # pre-solve, so this construct pass and the emitter see the identical
+    # geometry (the coordinate-matching parity both rely on).
+    from .crossing_terrain import crossing_influence_zone_union
+    _crossing_zone = crossing_influence_zone_union(layout)
+    if _crossing_zone is not None:
+        other_polys.append((0, _crossing_zone))
     step = GAP_FILL_SPINE_STEP_M
     entries: list[dict] = []
     for comp in comps:
@@ -1836,6 +1847,18 @@ def emit_gap_fill_spines(layout, dem, tile_lat, tile_lon,
                    and id(s) not in parent_ids
                    and s.polygon is not None and not s.polygon.is_empty
                    and s.polygon.geom_type in ("Polygon", "MultiPolygon")]
+    # CROSSING INFLUENCE ZONE (Phase 1, docs/specs/crossing-terrain-
+    # ownership.md): the published zone blocks a gap exactly like a
+    # foreign shape, and the open-frontage path subtracts it so a
+    # corridor SPLITS around the depressed road instead of burying it
+    # (round-8 finding: a gap-fill strip buried the tunnel=yes road at
+    # 36.1106,-86.6834 — gap-fill was the only corridor consumer that
+    # never clipped).  Same published geometry the pre-solve construct
+    # pass consulted, so the coordinate-matching parity holds.
+    from .crossing_terrain import crossing_influence_zone_union
+    _crossing_zone = crossing_influence_zone_union(layout)
+    if _crossing_zone is not None:
+        other_polys.append((0, _crossing_zone))
 
     step = GAP_FILL_SPINE_STEP_M
     # Runway axes for the interior-ring width keying (gate-ON only —

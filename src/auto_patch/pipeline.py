@@ -259,9 +259,101 @@ def _unify_airside_geometry(layout, icao: str) -> None:
     _share_neighbour_corners_into_junctions(layout, icao=icao)
 
 
-def _dedup_coincident_ring_vertices(layout, icao: str, tol_m: float = 0.05):
+# Defect 4a (KBNA 2026-07-15) ring-needle collapse thresholds.  A needle is
+# a ring apex whose interior angle is below ``_NEEDLE_ANGLE_DEG`` while BOTH
+# bounding edges are longer than ``_NEEDLE_MIN_EDGE_M`` — a construction
+# artifact (the slice/weld/conformance chain folding a long thin tongue to a
+# near-collinear spike, e.g. KBNA junction 289's 2.8° apex between 48.6 m and
+# 57.6 m edges), NOT real geometry.  The min-edge guard protects a genuine
+# sharp corner built from short segments (a real taper toe carries a short
+# edge); only wide-edged spikes with no plausible physical width are dropped.
+#
+# WIDENED 2026-07-16 (KBNA Donelson round 8): 5°/10 m left surviving spikes at
+# 7.5°/7.6°/9.7° (edges 48/21 m) on junctions 289/290 and 4.4-14.9° apexes on
+# the adjacent-ground bands that inherit those rings.  A 10°/8 m band is still
+# firmly a degenerate spike: a 10° apex between two 8 m edges encloses only
+# 0.5·8·8·sin10° ≈ 5.6 m² and is < 1.4 m wide at its base — no plausible
+# real-pavement width, so no coverage is lost by collapsing it (the true
+# pavement is recovered upstream by the shared-vertex weld heal in
+# pavement.vertices, not by keeping these spikes).  Bands inherit the pavement
+# rings, so collapsing the pavement spike dissolves the band spike with it.
+_NEEDLE_ANGLE_DEG = 10.0
+_NEEDLE_MIN_EDGE_M = 8.0
+# A needle collapse deletes the apex, cutting the chord between its
+# neighbours — the area removed is the apex triangle.  A genuine
+# construction spike encloses almost nothing (KBNA 289/290's 7.5-9.7° apexes
+# between 48/21 m edges remove ≈ 85 m²), but the SAME angle/edge test also
+# matches the sharp TIP of a real (if thin) pavement wedge, where deleting the
+# apex would carve out live pavement (KBNA Donelson: a 159 m² tip at the
+# owner's spot).  Cap the CUMULATIVE per-ring removal at this floor — the same
+# floor _record_airside_drop treats as a real drop — so artifact spikes still
+# dissolve while no ring loses real pavement to the collapse (keeps the
+# build-time airside-drop counter at zero).
+_NEEDLE_MAX_DROP_AREA_M2 = 100.0
+
+
+def _collapse_ring_needles(coords_open, na_open):
+    """Drop degenerate needle apexes from an OPEN ring (no closing repeat).
+
+    Iterates to a fixed point (nested spikes / a newly-exposed apex after a
+    drop): at each vertex whose two bounding edges both exceed
+    ``_NEEDLE_MIN_EDGE_M`` and whose interior angle is below
+    ``_NEEDLE_ANGLE_DEG``, delete the apex (and its aligned altitude) —
+    UNLESS doing so would push the cumulative area removed from this ring
+    past ``_NEEDLE_MAX_DROP_AREA_M2`` (a real-pavement wedge tip, not a
+    zero-area artifact spike; kept so no coverage is lost).
+    Returns ``(coords_open, na_open, n_dropped)``; ``na_open`` may be
+    ``None`` (geometry-only)."""
+    import math as _math
+    angle_deg = _NEEDLE_ANGLE_DEG
+    min_edge = _NEEDLE_MIN_EDGE_M
+    max_drop = _NEEDLE_MAX_DROP_AREA_M2
+    coords = list(coords_open)
+    na = list(na_open) if na_open is not None else None
+    dropped = 0
+    area_removed = 0.0
+    changed = True
+    while changed and len(coords) > 3:
+        changed = False
+        n = len(coords)
+        for i in range(n):
+            ax, ay = coords[(i - 1) % n]
+            bx, by = coords[i]
+            cx, cy = coords[(i + 1) % n]
+            v1x, v1y = ax - bx, ay - by
+            v2x, v2y = cx - bx, cy - by
+            n1 = _math.hypot(v1x, v1y)
+            n2 = _math.hypot(v2x, v2y)
+            if n1 <= min_edge or n2 <= min_edge:
+                continue
+            cosv = max(-1.0, min(1.0, (v1x * v2x + v1y * v2y) / (n1 * n2)))
+            ang = _math.degrees(_math.acos(cosv))
+            if ang < angle_deg:
+                # Apex-triangle area (the pavement the chord cut removes).
+                apex_area = 0.5 * abs(v1x * v2y - v1y * v2x)
+                if (area_removed + apex_area
+                        > max_drop):
+                    continue          # real-pavement tip — keep it
+                del coords[i]
+                if na is not None:
+                    del na[i]
+                dropped += 1
+                area_removed += apex_area
+                changed = True
+                break
+    return coords, na, dropped
+
+
+def _dedup_coincident_ring_vertices(layout, icao: str, tol_m: float = 0.05,
+                                    collapse_needles: bool = False):
     """Drop consecutive coincident exterior-ring vertices (zero-length
     edges) from every shape, keeping ``node_altitudes`` aligned.
+
+    ``collapse_needles`` (defect 4a; passed True at the PRE-SOLVE call so
+    the collapse is baked before the solver/validator read the ring): also
+    drop degenerate ring-needle apexes (``_collapse_ring_needles``) from
+    AIRSIDE shapes.  Off (post-solve idempotent copy) it is a pure
+    zero-length dedup, byte-identical to before.
 
     The spine polygonize + weld/conformance can leave a vertex repeated at
     the same coordinate (SPJC: 44 zero-length edges).  X-Plane / Triangle4XP
@@ -273,11 +365,15 @@ def _dedup_coincident_ring_vertices(layout, icao: str, tol_m: float = 0.05):
     shapes cleaned."""
     import math as _math
     from shapely.geometry import Polygon as _Poly
+    from .clearance import _AIRSIDE_PAVEMENT_ROLES as _AIRSIDE_ROLES
     n_fixed = 0
+    n_needle_shapes = 0
+    n_needle_total = 0
     for s in layout.shapes:
         p = getattr(s, "polygon", None)
         if p is None or p.is_empty or p.geom_type != "Polygon":
             continue
+        _area_before = p.area
         coords = list(p.exterior.coords)            # includes closing repeat
         if len(coords) < 4:
             continue
@@ -316,7 +412,25 @@ def _dedup_coincident_ring_vertices(layout, icao: str, tol_m: float = 0.05):
                         del new_na[k:k + 2]
                     changed_spike = True
                     break
-        if len(new_coords) == len(coords):
+        # RING-NEEDLE COLLAPSE (defect 4a): drop degenerate wide-edged spike
+        # apexes from airside shapes, pre-solve.  Runs on the OPEN ring so the
+        # apex's aligned altitude is dropped with it.
+        n_needle = 0
+        if (collapse_needles
+                and getattr(s, "role", None) in _AIRSIDE_ROLES
+                and len(new_coords) >= 4):
+            has_close = new_coords[0] == new_coords[-1]
+            open_coords = new_coords[:-1] if has_close else list(new_coords)
+            open_na = None
+            if aligned:
+                open_na = new_na[:-1] if has_close else list(new_na)
+            open_coords, open_na, n_needle = _collapse_ring_needles(
+                open_coords, open_na)
+            if n_needle:
+                new_coords = list(open_coords) + [open_coords[0]]
+                if aligned:
+                    new_na = list(open_na) + [open_na[0]]
+        if len(new_coords) == len(coords) and n_needle == 0:
             continue                                # nothing removed
         # keep the ring closed
         if new_coords[0] != new_coords[-1]:
@@ -331,14 +445,32 @@ def _dedup_coincident_ring_vertices(layout, icao: str, tol_m: float = 0.05):
                 continue
         except Exception:
             continue
+        # A needle collapse should only ever shave a degenerate spike (a
+        # 10° apex between 8 m edges encloses < 6 m²); if a single shape
+        # loses more than the airside-drop floor to it, that is real
+        # pavement, not an artifact — record it as a loud build-time verify
+        # drop (must read ZERO on a healthy build).
+        if n_needle and (_area_before - np_.area) > 100.0:
+            from .pavement.vertices import _record_airside_drop
+            _record_airside_drop(
+                layout, s, p, _area_before - np_.area, "needle-collapse")
         s.polygon = np_
         if aligned:
             s.node_altitudes = new_na
         n_fixed += 1
+        if n_needle:
+            n_needle_shapes += 1
+            n_needle_total += n_needle
     if n_fixed:
         UI.vprint(1,
             f"  [pav-builder] {icao}: removed zero-length edge(s) "
             f"(duplicate ring vertices) from {n_fixed} shape(s).")
+    if n_needle_total:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: collapsed {n_needle_total} degenerate "
+            f"ring needle(s) (<{_NEEDLE_ANGLE_DEG:.0f} deg apex, edges "
+            f">{_NEEDLE_MIN_EDGE_M:.0f} m) from {n_needle_shapes} airside "
+            f"shape(s).")
     return n_fixed
 
 
@@ -4201,6 +4333,29 @@ def build_airport_pavement(icao: str, xplane_root: str,
                           "   [object-bridge] solve-side pins skipped:",
                           _object_bridge_error)
 
+            # CROSSING INFLUENCE ZONE (Phase 1, docs/specs/crossing-
+            # terrain-ownership.md): publish the ONE pre-solve zone every
+            # terrain writer honors — the portal pairs / classification it
+            # reads were cached by ``build_bridge_layout_shapes`` above,
+            # and every consumer construction (runway-end skirts, gap-fill
+            # spines, adjacent-ground bands, clearance) runs after this
+            # point and consults the published zone instead of
+            # reconstructing crossing geometry itself.
+            try:
+                from .crossing_terrain import (
+                    publish_crossing_influence_zones)
+                n_crossing_zones = publish_crossing_influence_zones(layout)
+                if n_crossing_zones:
+                    UI.vprint(1,
+                        f"  [pav-builder] {icao}: crossing influence "
+                        f"zone published — {n_crossing_zones} "
+                        f"component(s).")
+            except Exception as _crossing_zone_error:  # never fail the build
+                UI.vprint(1,
+                          "   [crossing-zone] publication FAILED — "
+                          "crossing keep-outs are INACTIVE this build:",
+                          _crossing_zone_error)
+
             # (session 51 single-solve) The first solver pass + the
             # grade-based `_subdivide_violating_junctions` loop were
             # REMOVED here.  The pipeline now finalizes ALL geometry
@@ -4764,45 +4919,17 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 f"  [pav-builder] {icao}: merged {_n_frag} small apron "
                 f"fragment(s) into their host apron (pre-solve).")
 
-        # ── Boundary-interior clip (refactor Phase 3, PRE-solve) ──────
-        # Clip airside pavement that STRADDLES the airport boundary back to
-        # the ribbon's inner edge BEFORE the solve, so the clipped pavement
-        # is graded by the solver (and no airside vertex is moved
-        # post-solve).  The interior is computed geometrically from row-130 +
-        # the ribbon strip offset (``_compute_boundary_ribbon_interior``) —
-        # the ribbon footprint is altitude-independent, so the post-solve
-        # ribbon emit reproduces the identical band and the clipped seam
-        # conforms.  Only airside roles are clipped here; post-solve-emitted
-        # features (clearance, etc.) are clipped by the post-solve call
-        # (which now SKIPS airside).
-        from .boundary import (
-            _compute_boundary_ribbon_interior,
-            _clip_pavement_to_boundary_interior as _clip_boundary_interior,
-            _conform_pavement_to_ribbon_inner_corners)
-        from .geom_guard import _AIRSIDE_ROLES as _AIRSIDE_CLIP_ROLES
-        _pre_interior = _compute_boundary_ribbon_interior(layout)
-        if _pre_interior is not None:
-            _n_clip, _n_out = _clip_boundary_interior(
-                layout, icao=icao, interior=_pre_interior,
-                roles=_AIRSIDE_CLIP_ROLES)
-            if _n_clip or _n_out:
-                UI.vprint(1,
-                    f"  [pav-builder] {icao}: pre-solve boundary clip — "
-                    f"clipped {_n_clip} straddling airside shape(s), "
-                    f"left {_n_out} external shape(s) untouched.")
-            # Pavement that HUGS the ribbon's inner edge (within the
-            # shared-vertex tolerance, but never outside it) is invisible
-            # to the straddle clip above; re-route those edges through the
-            # ribbon's inner-corner nodes so the seam shares nodes with
-            # the post-solve-emitted ribbon (no residual T-junctions —
-            # airside is frozen after the solve).
-            _n_seam = _conform_pavement_to_ribbon_inner_corners(
-                layout, roles=_AIRSIDE_CLIP_ROLES)
-            if _n_seam:
-                UI.vprint(1,
-                    f"  [pav-builder] {icao}: pre-solve ribbon-seam "
-                    f"conformance — re-routed {_n_seam} airside shape(s) "
-                    f"through ribbon inner-corner node(s).")
+        # ── Boundary-interior clip: RETIRED (user 2026-07-16) ─────────
+        # The "no shape may straddle the row-130 boundary" invariant
+        # (user 2026-05-22) served the boundary RIBBON: straddling
+        # pavement was clipped back to the ribbon's inner edge so the
+        # two tiled conformingly.  The adjacent-ground law superseded
+        # the ribbon (nothing emits ROLE_BOUNDARY shapes any more), and
+        # the clip actively harmed features that legitimately live
+        # across the line — EGPB's tunnel-ramp chain straddled row-130
+        # and the nearest-neighbour altitude resample flattened its
+        # sloped rects into a hump.  Shapes now simply keep their
+        # geometry wherever they land relative to row-130.
 
         # ── Groundside emit + absorb/reclassify (refactor Phase 4, PRE-solve) ─
         # Emit groundside pavement (DEM-following, solve-INDEPENDENT — the
@@ -5322,7 +5449,12 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # nothing to do (so the geom-guard reports 0 airside changes, modulo the
         # documented solve-dependent bridge-contact inserts).
         if os.environ.get("O4_PRESOLVE_CLEAN", "1") == "1":
-            _dedup_coincident_ring_vertices(layout, icao)
+            # O4_RING_NEEDLE_COLLAPSE=0 is the defect-4a A/B lever (keeps
+            # the zero-length dedup, skips only the needle collapse).
+            _dedup_coincident_ring_vertices(
+                layout, icao,
+                collapse_needles=os.environ.get(
+                    "O4_RING_NEEDLE_COLLAPSE", "1") == "1")
             from .flatedge_snap import drop_flatedge_nodes as _pre_flatedge
             _pre_flatedge(layout)
 
@@ -5820,34 +5952,15 @@ def build_airport_pavement(icao: str, xplane_root: str,
         except _GEOM_EXC:
             pass
 
-    # ── Boundary-interior clip (user 2026-05-22) ──────────────────────
-    # No emitted shape may CROSS the airport boundary.  The boundary
-    # ribbon now lies entirely INSIDE the row-130 line and owns the
-    # outer strip band; clip every shape that STRADDLES the boundary back
-    # to the ribbon's inner edge so pavement and ribbon tile conformingly
-    # (shared inner-edge nodes), instead of the ribbon overlaying pavement
-    # non-conformingly → Triangle4XP slivers (HEAZ 1.48M-triangle
-    # hotspot).  Shapes entirely outside the boundary (tunnel entrance
-    # ramps + their retaining walls) are left untouched, not dropped.
-    # Runs before the conformance pass below.
-    #
-    # (refactor Phase 3) AIRSIDE pavement is now clipped PRE-solve (above),
-    # so this post-solve pass SKIPS airside roles and handles only the
-    # post-solve-emitted features (clearance / groundside / etc.) that can
-    # straddle.  Skipping airside keeps the pre-solve-clipped + solver-graded
-    # geometry untouched post-solve (the invariant this refactor enforces).
-    from .boundary import (
-        _clip_pavement_to_boundary_interior,
-        _conform_ribbon_to_pavement_seam,
-    )
-    from .geom_guard import _AIRSIDE_ROLES as _AIRSIDE_SKIP_ROLES
-    n_clip, n_outside = _clip_pavement_to_boundary_interior(
-        layout, icao=icao, skip_roles=_AIRSIDE_SKIP_ROLES)
-    if n_clip or n_outside:
-        UI.vprint(1,
-            f"  [pav-builder] {icao}: boundary-interior clip — "
-            f"clipped {n_clip} straddling shape(s), "
-            f"left {n_outside} external shape(s) untouched.")
+    # ── Boundary-interior clip: RETIRED (user 2026-07-16) ─────────────
+    # The "no shape may straddle the row-130 boundary" invariant (user
+    # 2026-05-22) existed for the boundary ribbon, which the
+    # adjacent-ground law superseded — see the matching note at the
+    # (also retired) PRE-solve clip site.  Post-solve features
+    # (clearance / tunnel ramps / groundside) now keep their geometry
+    # across the row-130 line; EGPB's straddling tunnel-ramp rects were
+    # being flattened into a hump by this clip's altitude resample.
+    from .boundary import _conform_ribbon_to_pavement_seam
 
     # ── Boundary-conformance invariant (user 2026-05-22) ──────────────
     # RUNTIME requirement for EVERY airport: the emitted shapes must be a
@@ -6395,6 +6508,26 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 for _x, _y in (_res_tj + _res_x)[:10]:
                     _la, _lo = layout.m_to_ll(_x, _y)
                     UI.vprint(1, f"      @ {_la:.7f},{_lo:.7f}")
+        except _GEOM_EXC:
+            pass
+        # CROWN FIELD COMPLETION (B4 flip defect 2, 2026-07-15): the
+        # adjacent-ground band emit + the epsilon-wedge weld above mint
+        # pavement ring vertices AFTER ``final_grade_projection`` ran the
+        # crown field extension, so those vertices read crown drop 0 while
+        # a flanking solve-time vertex carries a real drop — the emitted
+        # validators then measure the pair against the WRONG crown target
+        # (CYXY junction: a lawful crown-ramp chord read as a 2.6 % spine
+        # step).  Re-run the value-derived extension on the FINAL rings;
+        # incremental — solve-time keys and already-extended keys are
+        # never recomputed, values no longer move after this point.
+        try:
+            from .crown import extend_field_to_new_ring_nodes as _crown_ext
+            _n_crown_ext = _crown_ext(layout, None)
+            if _n_crown_ext:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: crown field completion — "
+                    f"{_n_crown_ext} post-weld ring vertex(es) joined the "
+                    f"crown drop field.")
         except _GEOM_EXC:
             pass
 

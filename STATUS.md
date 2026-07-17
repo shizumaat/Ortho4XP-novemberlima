@@ -1,4 +1,31 @@
 # ══════════════════════════════════════════════════════════════════
+# 20260716 CROSSING-TERRAIN-OWNERSHIP PHASE 1 BUILT (working tree,
+# session: crossing-zone; spec docs/specs/crossing-terrain-ownership.md
+# §4 Phase 1, owner-reviewed 2026-07-16).  ONE influence zone per
+# recognized crossing, published PRE-solve on the layout
+# (src/auto_patch/crossing_terrain.py, called from pipeline.py right
+# after build_bridge_layout_shapes).  Consumers converted to consult it
+# (crossing carve-outs DELETED): adjacent_ground (standoff block now
+# legacy-shapes-only; road-lane exclusion + buried-span carve-out gone
+# — buried roof bandable BY CONSTRUCTION, O4_ADJACENT_GROUND_BURIED_
+# BODY_BAND now lives in crossing_terrain), clearance cuts, runway-end
+# skirts, gap_fill (round-8 finding: its clip had NEVER landed — the
+# tunnel=yes burial at 36.1106,-86.6834 is now FIXED, verified old
+# patch vs new).  road_lanes survives as the corridor loader feeding
+# the zone (new extra_seed_geometries param).  ACCEPTANCE ALL GREEN
+# (PYTHONHASHSEED=0): bridge audit 11/11 PASS, KBNA bands 663 (≥630),
+# round-5..8 coordinate probes parity-or-fixed, suites 372 passed /
+# only the 3 pre-existing failures.  CYXY provably inert (no
+# crossings ⇒ zone empty).  WATCH: band daylight-tear class relocates
+# with clip geometry (KBNA 6→7, all along the Donelson corridor edge)
+# — pre-existing class, Phase 2's one-height-model retires it; do NOT
+# patch pairwise.  New forensics: O4_CROSSING_ZONE_PROBE / _DUMP (at
+# publication) + tools/crossing_zone_conformance.py (patch-level
+# "nothing enters the zone" check).  Tests rewritten to the zone
+# contract in test_adjacent_ground_wrap_standoff / test_runway_end_
+# skirt / test_object_bridge_terrain; NEW tests/test_crossing_terrain.py.
+# ══════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 # 20260711 MERGED TO DEV (59ddde4, ON BY DEFAULT): airport elevation
 # insets — declarative Providers/Elevation/*.elv registry (USGS3DEP +
 # HRDEM lidar insets, legacy base sources refactored, base auto=NED1

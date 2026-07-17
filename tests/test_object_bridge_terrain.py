@@ -56,6 +56,19 @@ ANCHOR_LONGITUDE = -86.678
 ANCHOR = (ANCHOR_LATITUDE, ANCHOR_LONGITUDE)
 
 
+@pytest.fixture(autouse=True)
+def sandbox_ortho4xp_data_root(tmp_path, monkeypatch):
+    """USER RULING 2026-07-15 moved the sidecar caches under the
+    Ortho4XP data root (``Airport_mod_cache/<pack>/``).  In a source
+    checkout the data root resolves to the current working directory, so
+    without this pin any test that exercises the classification /
+    road-network cache paths would write ``Airport_mod_cache/`` into the
+    repository.  Sandbox every test in this module
+    (``ORTHO4XP_DATA_ROOT`` wins ``O4_File_Names.resolve_data_root``)."""
+    monkeypatch.setenv("ORTHO4XP_DATA_ROOT",
+                       str(tmp_path / "o4_data_root"))
+
+
 # ---------------------------------------------------------------------------
 # synthetic fixtures
 # ---------------------------------------------------------------------------
@@ -69,6 +82,32 @@ class _FakeDem:
 
     def alt(self, _xy) -> float:
         return self.elevation_m
+
+
+class _LateralRidgeDem:
+    """A DEM that drops off LATERALLY (north/south) from a flat crest.
+
+    The KBNA 02C portals sit on a hill that carries the runway over the
+    tunnel body but falls away to either SIDE of the object — so the
+    portal's back rides the crest while its flanks stand over lower
+    ground.  ``alt`` holds ``crest_m`` along the tunnel axis (north ~ 0)
+    and subtracts ``falloff_m_per_m`` per metre of |north|, giving the
+    collar's exposed flank rim a demonstrably lower ground to feather
+    into than its crown.  Frame: ``xy`` is ``(lon - tile_lon,
+    lat - tile_lat)`` (see ``_sample_dem``); tile is (36, -87)."""
+
+    nodata = -32768
+
+    def __init__(self, crest_m: float = 180.0,
+                 falloff_m_per_m: float = 0.30) -> None:
+        self.crest_m = crest_m
+        self.falloff = falloff_m_per_m
+
+    def alt(self, xy) -> float:
+        longitude = xy[0] + (-87.0)
+        latitude = xy[1] + 36.0
+        north_m = (latitude - ANCHOR_LATITUDE) * 111132.0
+        return self.crest_m - self.falloff * abs(north_m)
 
 
 class _FakeLayout:
@@ -411,6 +450,136 @@ class TestObjectSourcedCorridors:
 
 
 # ---------------------------------------------------------------------------
+# portal OUTWARD ramp width (user ruling 2026-07-15, KBNA 02C)
+# ---------------------------------------------------------------------------
+
+class TestMappedOsmCarriagewayWidth:
+    """``_mapped_osm_carriageway_width_m`` re-associates the portal
+    footprint to the tagged big-road ways by geometry (the draped/OSM
+    lines the corridor walks carry no tags)."""
+
+    def _cross_road(self, tags):
+        """OSM ``(nodes, ways)`` with one road crossing a footprint
+        centred on the layout origin (x=0, y from -50 to +50 m)."""
+        _to_m, m_to_ll = bridges._local_meter_projections(ANCHOR)
+        lat0, lon0 = m_to_ll(0.0, -50.0)
+        lat1, lon1 = m_to_ll(0.0, 50.0)
+        nodes = {"n0": (lat0, lon0), "n1": (lat1, lon1)}
+        ways = [("w0", ["n0", "n1"], dict(tags))]
+        return nodes, ways
+
+    def test_lanes_derive_carriageway_width(self, monkeypatch):
+        from auto_patch import pipeline
+        layout = _FakeLayout()
+        to_meters, _m = bridges._local_meter_projections(ANCHOR)
+        footprint = Polygon([(-30, -30), (30, -30), (30, 30), (-30, 30)])
+        monkeypatch.setattr(
+            pipeline, "_load_osm_big_roads",
+            lambda _a, _b: self._cross_road(
+                {"highway": "primary", "lanes": "6"}))
+        width = bridges._mapped_osm_carriageway_width_m(
+            layout, footprint, to_meters)
+        assert width == pytest.approx(21.0)  # 6 × LANE_WIDTH_M (3.5)
+
+    def test_no_road_near_footprint_returns_none(self, monkeypatch):
+        from auto_patch import pipeline
+        layout = _FakeLayout()
+        to_meters, m_to_ll = bridges._local_meter_projections(ANCHOR)
+        # A footprint 1 km away from the crossing road.
+        footprint = Polygon([(970, -30), (1030, -30),
+                             (1030, 30), (970, 30)])
+        monkeypatch.setattr(
+            pipeline, "_load_osm_big_roads",
+            lambda _a, _b: self._cross_road(
+                {"highway": "primary", "lanes": "6"}))
+        assert bridges._mapped_osm_carriageway_width_m(
+            layout, footprint, to_meters) is None
+
+    def test_non_carriageway_type_ignored(self, monkeypatch):
+        from auto_patch import pipeline
+        layout = _FakeLayout()
+        to_meters, _m = bridges._local_meter_projections(ANCHOR)
+        footprint = Polygon([(-30, -30), (30, -30), (30, 30), (-30, 30)])
+        # A footway has no carriageway table entry and no width/lanes.
+        monkeypatch.setattr(
+            pipeline, "_load_osm_big_roads",
+            lambda _a, _b: self._cross_road({"highway": "footway"}))
+        assert bridges._mapped_osm_carriageway_width_m(
+            layout, footprint, to_meters) is None
+
+    def test_missing_cache_returns_none(self, monkeypatch):
+        from auto_patch import pipeline
+        layout = _FakeLayout()
+        to_meters, _m = bridges._local_meter_projections(ANCHOR)
+        footprint = Polygon([(-30, -30), (30, -30), (30, 30), (-30, 30)])
+        monkeypatch.setattr(
+            pipeline, "_load_osm_big_roads", lambda _a, _b: ({}, []))
+        assert bridges._mapped_osm_carriageway_width_m(
+            layout, footprint, to_meters) is None
+
+
+class TestPortalOutwardRampWidth:
+    """The resolution ORDER (user ruling 2026-07-15): mapped OSM
+    carriageway + shoulder → classified deck-face width → mouth-face,
+    always capped at the mouth-face width."""
+
+    def _portal(self, deck_width_m):
+        import dataclasses
+        bridge = dataclasses.replace(_bridge(), deck_width_m=deck_width_m)
+        return {"bridge": bridge,
+                "footprint": Polygon([(-5, -5), (5, -5), (5, 5), (-5, 5)])}
+
+    def _resolve(self, deck_width_m, mouth_face_width_m):
+        layout = _FakeLayout()
+        to_meters, _m = bridges._local_meter_projections(ANCHOR)
+        portal = self._portal(deck_width_m)
+        return bridges._portal_outward_ramp_width_m(
+            layout, portal, portal["footprint"], to_meters,
+            mouth_face_width_m)
+
+    def test_mapped_osm_wins_with_shoulder(self, monkeypatch):
+        monkeypatch.setattr(
+            bridges, "_mapped_osm_carriageway_width_m", lambda *a: 21.0)
+        width, provenance = self._resolve(
+            deck_width_m=17.0, mouth_face_width_m=84.0)
+        assert width == pytest.approx(
+            21.0 + bridges.PORTAL_RAMP_SHOULDER_MARGIN_M)
+        assert "mapped OSM" in provenance
+
+    def test_deck_face_when_no_mapped_road(self, monkeypatch):
+        monkeypatch.setattr(
+            bridges, "_mapped_osm_carriageway_width_m", lambda *a: None)
+        width, provenance = self._resolve(
+            deck_width_m=17.0, mouth_face_width_m=84.0)
+        assert width == pytest.approx(17.0)
+        assert "deck-face" in provenance
+
+    def test_mouth_face_last_resort(self, monkeypatch):
+        monkeypatch.setattr(
+            bridges, "_mapped_osm_carriageway_width_m", lambda *a: None)
+        width, provenance = self._resolve(
+            deck_width_m=0.0, mouth_face_width_m=30.0)
+        assert width == pytest.approx(30.0)
+        assert "mouth-face" in provenance
+
+    def test_mapped_width_capped_at_mouth_face(self, monkeypatch):
+        monkeypatch.setattr(
+            bridges, "_mapped_osm_carriageway_width_m", lambda *a: 100.0)
+        width, provenance = self._resolve(
+            deck_width_m=17.0, mouth_face_width_m=30.0)
+        assert width == pytest.approx(30.0)
+        assert "capped" in provenance
+
+    def test_deck_face_capped_at_mouth_face(self, monkeypatch):
+        monkeypatch.setattr(
+            bridges, "_mapped_osm_carriageway_width_m", lambda *a: None)
+        width, provenance = self._resolve(
+            deck_width_m=200.0, mouth_face_width_m=30.0)
+        assert width == pytest.approx(30.0)
+        assert "capped" in provenance
+
+
+# ---------------------------------------------------------------------------
 # gate-off neutrality
 # ---------------------------------------------------------------------------
 
@@ -641,6 +810,83 @@ class TestExclusionWiringR4:
         assert assembly.exclusion_set_for_dsf(
             str(dsf_path), None, pack_root="PACK"
         ) == {("PACK", _BRIDGE_RESOURCE)}
+
+    def _cache_harness(self, tmp_path, monkeypatch, classify_calls):
+        """Gate on, synthetic DSF lines, a REAL pack_root directory (so
+        ``airport_mod_cache_dir`` resolves) and a counting classifier."""
+        from auto_patch import dsf_reader
+        from auto_patch import object_terrain_features as otf_module
+
+        monkeypatch.setattr(config, "OBJECT_BRIDGE_TERRAIN", True)
+        pack_root = tmp_path / "Fake Pack"
+        pack_root.mkdir()
+        dsf_path = pack_root / "fake.dsf"
+        dsf_path.write_bytes(b"")
+        monkeypatch.setattr(
+            dsf_reader, "_load_dsf_text",
+            lambda _path: list(_SYNTHETIC_DSF_LINES),
+        )
+        geometry_holder = {"payload": ("geometry", 1)}
+        monkeypatch.setattr(
+            assembly, "_load_object_geometry_by_resource",
+            lambda _placements, _pack_root, _xplane_root: {
+                _BRIDGE_RESOURCE: geometry_holder["payload"]
+            },
+        )
+
+        class _FakeResult:
+            exclusions = [(str(pack_root), _BRIDGE_RESOURCE)]
+
+        def _counting_classify(placements, geometry_by_resource, **kwargs):
+            classify_calls.append(1)
+            return _FakeResult()
+
+        monkeypatch.setattr(
+            otf_module,
+            "classify_object_terrain_features",
+            _counting_classify,
+        )
+        return dsf_path, pack_root, geometry_holder
+
+    def test_exclusion_set_second_call_served_from_sidecar_cache(
+        self, tmp_path, monkeypatch
+    ):
+        """The R4 exclusion set is pure pack content (2026-07-15 profile:
+        recomputed 46 s per mesh build at KBNA) — call two must hit the
+        content-hash sidecar, and changed geometry content must miss."""
+        classify_calls = []
+        dsf_path, pack_root, geometry_holder = self._cache_harness(
+            tmp_path, monkeypatch, classify_calls
+        )
+        expected = {(str(pack_root), _BRIDGE_RESOURCE)}
+
+        assert assembly.exclusion_set_for_dsf(
+            str(dsf_path), None, pack_root=str(pack_root)
+        ) == expected
+        assert assembly.exclusion_set_for_dsf(
+            str(dsf_path), None, pack_root=str(pack_root)
+        ) == expected
+        assert len(classify_calls) == 1  # second call from the sidecar
+
+        geometry_holder["payload"] = ("geometry", 2)  # content changed
+        assert assembly.exclusion_set_for_dsf(
+            str(dsf_path), None, pack_root=str(pack_root)
+        ) == expected
+        assert len(classify_calls) == 2
+
+    def test_exclusion_cache_disabled_by_environment_flag(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("O4_OBJECT_EXCLUSION_CACHE", "0")
+        classify_calls = []
+        dsf_path, pack_root, _geometry_holder = self._cache_harness(
+            tmp_path, monkeypatch, classify_calls
+        )
+        for _ in range(2):
+            assembly.exclusion_set_for_dsf(
+                str(dsf_path), None, pack_root=str(pack_root)
+            )
+        assert len(classify_calls) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1094,6 +1340,99 @@ class TestCausewayPlates:
         assert bridges.build_bridge_layout_shapes(
             layout, None, 36, -87) == (0, 0, 0)
         assert not layout.shapes
+
+
+class TestDeckLipWeldStrips:
+    """Deck-lip weld strips (user directive 2026-07-15): the resumed
+    pavement must slightly OVERLAP the deck-elevation terrain at every
+    pavement-facing rim of a hard deck — coplanar (both pinned at the
+    deck-top profile law value), so aircraft taxi smoothly onto the
+    deck with no raw-mesh sliver diving to the trench at the lip."""
+
+    @staticmethod
+    def _crossing_junction() -> BuiltShape:
+        """A junction crossing the deck box (x 0..131, y ∓27.5) through
+        both LONG sides — the R8 hard-deck cut splits it into two
+        resumed-pavement pieces whose cut edges lie exactly on the box
+        boundary (the KBNA taxiway-L geometry class)."""
+        return BuiltShape(
+            polygon=Polygon([(40.0, -45.0), (90.0, -45.0),
+                             (90.0, 45.0), (40.0, 45.0)]),
+            role=ROLE_JUNCTION, ref="XING",
+            node_altitudes=[150.0] * 4 + [150.0])
+
+    def test_strips_overlap_resumed_pavement_coplanar(self, monkeypatch):
+        from shapely.geometry import LineString
+        from shapely.ops import unary_union
+
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.shapes.append(self._crossing_junction())
+        bridges.build_bridge_layout_shapes(layout, None, 36, -87)
+
+        strips = [shape for shape in layout.shapes
+                  if shape.ref == "object_bridge_deck_weld"]
+        assert strips, "deck-lip weld strips must be emitted"
+        # Flat KBNA-class profile: every strip vertex at the deck value.
+        for shape in strips:
+            assert all(value == pytest.approx(167.0, abs=0.01)
+                       for value in shape.node_altitudes)
+
+        pavement = [shape for shape in layout.shapes
+                    if shape.role == ROLE_JUNCTION]
+        assert len(pavement) == 2, "R8 must split the crossing junction"
+        strip_union = unary_union([shape.polygon for shape in strips])
+        # The pavement cut edges (y = ±27.5) lie INSIDE the strip union
+        # with >= 0.2 m ring depth: the overlap the owner asked for.
+        eroded = strip_union.buffer(-0.19)
+        assert eroded.covers(LineString([(41.0, 27.5), (89.0, 27.5)]))
+        assert eroded.covers(LineString([(41.0, -27.5), (89.0, -27.5)]))
+        overlap_area = sum(
+            shape.polygon.intersection(strip_union).area
+            for shape in pavement)
+        assert overlap_area > 5.0, "the strips must genuinely overlap"
+
+        # Fronting pavement ring vertices are pinned at the same law
+        # value — the overlap is coplanar.
+        for shape in pavement:
+            ring = list(shape.polygon.exterior.coords)[:-1]
+            fronting = [
+                shape.node_altitudes[index]
+                for index, (x, y) in enumerate(ring)
+                if abs(abs(y) - 27.5) < 0.45 and 39.9 < x < 90.1
+            ]
+            assert fronting, "cut-edge vertices must exist"
+            assert all(value == pytest.approx(167.0, abs=0.01)
+                       for value in fronting)
+        pin_values = getattr(layout, "_object_bridge_pin_values")
+        assert any(value == pytest.approx(167.0, abs=0.01)
+                   for value in pin_values.values())
+
+        # R2 node-split wall: the strips never come within the 0.5 m
+        # node-interning tolerance of the trench plate.
+        trench = [shape for shape in layout.shapes
+                  if shape.ref == "object_bridge_corridor"]
+        assert trench
+        assert strip_union.distance(trench[0].polygon) > 0.5
+
+    def test_cosmetic_deck_emits_no_strips(self, monkeypatch):
+        # Cosmetic decks keep their pavement over the box (R2 pavement
+        # wins) — there is no lip cut and nothing to weld.
+        bridge = _bridge(deck_hardness=DECK_HARDNESS_COSMETIC,
+                         hard_deck=False)
+        layout = _gate_on_layout_with_bridge(monkeypatch, bridge)
+        layout.shapes.append(self._crossing_junction())
+        bridges.build_bridge_layout_shapes(layout, _FakeDem(161.0), 36, -87)
+        assert not [shape for shape in layout.shapes
+                    if shape.ref == "object_bridge_deck_weld"]
+
+    def test_pavement_beyond_reach_gets_no_strips(self, monkeypatch):
+        # The KBNA gap-rect class (pavement 9.6 m short of the abutment)
+        # is causeway territory, not lip-weld territory.
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.shapes.append(_kbna_gap_rect())
+        bridges.build_bridge_layout_shapes(layout, None, 36, -87)
+        assert not [shape for shape in layout.shapes
+                    if shape.ref == "object_bridge_deck_weld"]
 
 
 class TestRoadCarriedOverpass:
@@ -1908,33 +2247,58 @@ class TestTunnelPortalPairs:
 
     def test_owned_crossing_masks_adjacent_ground_and_clearance(
             self, monkeypatch):
-        """User ruling 2026-07-14 (``BRIDGE_CROSSING_MASK``): the owned
-        crossing region — here the portal pair's footprints and the
-        band over the buried body — joins the adjacent-ground standoff
-        block, so bands and clearance strips are differenced out of the
-        crossing instead of fighting the object cut."""
+        """User ruling 2026-07-14 (``BRIDGE_CROSSING_MASK``), REFINED
+        2026-07-15 (KBNA round 6), REBUILT for Phase 1 of docs/specs/
+        crossing-terrain-ownership.md: the recognized crossing is
+        published as the ONE influence zone that bands, skirts,
+        clearance, and gap-fill all consult — the open crossing (portal
+        footprints, collar rings) is zone, while the roof over the
+        BURIED tunnel body is normal graded ground and stays bandable
+        BY CONSTRUCTION (the zone over the buried span carries only the
+        road bore).  ``O4_ADJACENT_GROUND_BURIED_BODY_BAND=0`` restores
+        the full-span mask; ``BRIDGE_CROSSING_MASK=0`` unpublishes the
+        classifier components."""
         from shapely.geometry import Point
 
-        from auto_patch import adjacent_ground, config
+        import auto_patch.osm_load as OL
+        from auto_patch import config, crossing_terrain
 
+        # Hermetic road corridor: the dev machine carries real caches.
+        monkeypatch.setattr(OL, "_load_osm_big_roads",
+                            lambda lat, lon, *a, **k: ({}, []))
         layout = self._paired_layout()
         dem = _FakeDem(180.0)
         pairs = bridges._detect_tunnel_portal_pairs(layout, dem, 36, -87)
         assert pairs  # sanity: the pair is recognized
-        block = adjacent_ground._tunnel_ramp_standoff_block(layout)
-        assert block is not None and not block.is_empty
-        # The block covers the mid-point of the connecting band (in
-        # layout meters, halfway between the portal centroids).
+        assert crossing_terrain.publish_crossing_influence_zones(layout) > 0
+        zone = crossing_terrain.crossing_influence_zone_union(layout)
+        assert zone is not None and not zone.is_empty
         centroid_a = pairs[0]["portals"][0]["footprint"].centroid
         centroid_b = pairs[0]["portals"][1]["footprint"].centroid
         middle = Point((centroid_a.x + centroid_b.x) / 2.0,
                        (centroid_a.y + centroid_b.y) / 2.0)
-        assert block.covers(middle)
+        # Buried-roof banding ON (default): the roof midpoint is NOT in
+        # the zone — bands may march there — while the portal footprints
+        # themselves are zone.
+        assert not zone.covers(middle)
+        assert zone.intersects(pairs[0]["portals"][0]["footprint"])
+        assert zone.intersects(pairs[0]["portals"][1]["footprint"])
 
-        # Gate off: with no tunnel_ramp / retaining_wall shapes in this
-        # layout, the block collapses to None.
+        # Buried-roof knob OFF restores the 2026-07-14 full-span mask
+        # (the knob is import-frozen; patch the module attribute).
+        monkeypatch.setattr(crossing_terrain, "_BURIED_BODY_BAND", False)
+        assert crossing_terrain.publish_crossing_influence_zones(layout) > 0
+        zone_full = crossing_terrain.crossing_influence_zone_union(layout)
+        assert zone_full is not None and zone_full.covers(middle)
+
+        # Crossing mask off: the classifier components unpublish, and with
+        # no mapped depressed road either, nothing remains.
         monkeypatch.setattr(config, "BRIDGE_CROSSING_MASK", False)
-        assert adjacent_ground._tunnel_ramp_standoff_block(layout) is None
+        assert crossing_terrain.publish_crossing_influence_zones(layout) == 0
+        assert crossing_terrain.crossing_influence_zone_union(layout) is None
+        # The march-side consumers read the same nothing.
+        from auto_patch import adjacent_ground
+        assert adjacent_ground._crossing_zone_union(layout) is None
 
     def test_portal_crown_gate_off_restores_single_plate(self, monkeypatch):
         from auto_patch import config
@@ -1991,11 +2355,210 @@ class TestTunnelPortalPairs:
             walk, 200.0, 174.5, 11.0, 20.0, refuse_inverted=True)
         assert emitted is True and layout.shapes
 
+    def test_portal_collar_is_a_transition_not_a_flat_plate(self):
+        # Defect (2026-07-15): the collar was emitted FLAT at the crown
+        # elevation, so its exposed rim was a vertical cliff (KBNA:
+        # 7.76/7.09 m steps to the approach, 4.44 m to the
+        # adjacent_ground band).  It must be a TRANSITION ring: the
+        # inner face hugs the crown, the exposed flank rim feathers down
+        # to the surrounding ground.  With a laterally-dropping DEM the
+        # collar must carry PER-VERTEX altitudes that span from the
+        # crown down toward that lower ground — never a single value.
+        layout = self._paired_layout()
+        dem = _LateralRidgeDem(crest_m=180.0, falloff_m_per_m=0.30)
+        bridges.build_bridge_layout_shapes(layout, dem, 36, -87)
+
+        crowns = [shape for shape in layout.shapes
+                  if shape.ref == "object_tunnel_portal_crown"]
+        collars = [shape for shape in layout.shapes
+                   if shape.ref == "object_tunnel_portal_collar"]
+        assert crowns and collars
+
+        # The crown stays a single terrain-true elevation (unchanged).
+        crown_elevation = crowns[0].node_altitudes[0]
+        assert all(value == pytest.approx(crown_elevation, abs=0.05)
+                   for value in crowns[0].node_altitudes)
+
+        collar_altitudes = [value for shape in collars
+                            for value in (shape.node_altitudes or [])]
+        assert collar_altitudes
+        # NOT a flat plate: the ring feathers over a real range.
+        assert max(collar_altitudes) - min(collar_altitudes) > 3.0, (
+            "collar must be a transition, not a flat plate "
+            f"(range {max(collar_altitudes) - min(collar_altitudes):.2f} m)")
+        # Never rises above the crown; the exposed rim drops well below.
+        assert max(collar_altitudes) <= crown_elevation + 0.1
+        assert min(collar_altitudes) <= crown_elevation - 3.0
+
+        # The per-vertex values TRACK the synthetic DEM: every collar
+        # vertex feathers toward the ground it drops into (the DEM
+        # sampled AT-or-just-OUTWARD of the vertex — the value the
+        # abutting band will read), never rising above the crown nor
+        # cliffing below that ground.
+        def _ground_floor(vertex_x, vertex_y):
+            """Lowest DEM within a small disk around the vertex — a lower
+            bound on the ground the collar may feather into (the emitter
+            samples the same neighbourhood; a slightly wider disk here is
+            a safe lower bound regardless of the exact emitter radius)."""
+            samples = []
+            for offset_x, offset_y in (
+                    (0.0, 0.0), (6.0, 0.0), (-6.0, 0.0),
+                    (0.0, 6.0), (0.0, -6.0)):
+                lat, lon = layout.m_to_ll(vertex_x + offset_x,
+                                          vertex_y + offset_y)
+                samples.append(dem.alt((lon - (-87.0), lat - 36.0)))
+            return min(samples)
+
+        lowest = None
+        for shape in collars:
+            ring = list(shape.polygon.exterior.coords)
+            for (vertex_x, vertex_y), value in zip(
+                    ring, shape.node_altitudes):
+                ground_low = _ground_floor(vertex_x, vertex_y)
+                # bounded ABOVE by the crown and never a cliff standing
+                # above the ground it feathers into
+                assert value <= crown_elevation + 0.1
+                assert value >= ground_low - 0.6
+                if lowest is None or value < lowest[0]:
+                    lowest = (value, vertex_x, vertex_y)
+        low_value, low_x, low_y = lowest
+        # the lowest collar vertex is an EXPOSED-flank vertex over
+        # demonstrably lower ground than the crown, and it feathered
+        # down toward that ground (not left standing at the crown).
+        assert low_value < crown_elevation - 2.0
+        low_lat, low_lon = layout.m_to_ll(low_x, low_y)
+        assert dem.alt((low_lon - (-87.0), low_lat - 36.0)) \
+            < crown_elevation - 1.5
+
+    def test_crowns_are_terrain_true_from_the_inset_dem(self):
+        # Round-8 fact 2: each crown is the runway embankment riding over
+        # the tunnel roof, so it must equal the SAME inset DEM sampled
+        # over its OWN buried body — measured at the crown centroid — and
+        # the two portals must therefore diverge exactly as the terrain
+        # does, never seat at one shared clamp value.  The prior
+        # single-point-beyond-the-buried-edge sample read the mid-hill
+        # downslope on each inner face and diverged the crowns off the
+        # terrain (measured KBNA 02C: east 180.34 vs west 181.32 with
+        # neither matching the ground over its body).
+
+        # ``_paired_layout`` separates the two portals EAST-WEST (the
+        # pair axis), so the gradient runs east: each portal's body sits
+        # over demonstrably different terrain.
+        meters_per_degree_longitude = 111320.0 * math.cos(
+            math.radians(ANCHOR_LATITUDE))
+
+        class _EastGradientDem:
+            """A gentle east-running gradient (no cross-axis falloff): the
+            terrain over the two portals' bodies differs by a known,
+            terrain-true amount, and each mouth ray reads close enough
+            that the crown's clamp band never bites."""
+
+            nodata = -32768
+
+            def alt(self, xy):
+                longitude = xy[0] + (-87.0)
+                east_m = ((longitude - ANCHOR_LONGITUDE)
+                          * meters_per_degree_longitude)
+                return 175.0 + 0.01 * east_m
+
+        layout = self._paired_layout()
+        dem = _EastGradientDem()
+        bridges.build_bridge_layout_shapes(layout, dem, 36, -87)
+        crowns = [shape for shape in layout.shapes
+                  if shape.ref == "object_tunnel_portal_crown"]
+        assert len(crowns) == 2
+        crown_values = []
+        for crown in crowns:
+            # Each crown is a single flat plate value.
+            values = set(round(v, 2) for v in crown.node_altitudes)
+            assert len(values) == 1
+            crown_value = next(iter(values))
+            crown_values.append(crown_value)
+            # Terrain-true: within the acceptance tolerance of the inset
+            # DEM sampled at the crown centroid.
+            centroid = crown.polygon.centroid
+            target_lat, target_lon = layout.m_to_ll(centroid.x, centroid.y)
+            target = dem.alt((target_lon - (-87.0), target_lat - 36.0))
+            assert crown_value == pytest.approx(target, abs=0.3), (
+                f"crown {crown_value} not terrain-true to DEM {target}")
+        # Consistency across the same DEM: the two crowns diverge because
+        # the terrain over their bodies does — they are NOT clamped to a
+        # single shared value.
+        assert abs(crown_values[0] - crown_values[1]) > 1.5
+
+    def test_clip_collar_to_mouth_front_removes_the_road_side_lobe(self):
+        # Round-8 fact 3: the forward-face clip removes any collar region
+        # ahead of the mouth face while keeping the back band.  A square
+        # footprint spanning north -10..10 has its front face at north 11
+        # (extent + 1 m); outward is +north.
+        from shapely.ops import unary_union
+
+        footprint = Polygon([(-10.0, -10.0), (10.0, -10.0),
+                             (10.0, 10.0), (-10.0, 10.0)])
+        outward = (0.0, 1.0)
+        back_band = Polygon([(-12.0, -22.0), (12.0, -22.0),
+                            (12.0, -12.0), (-12.0, -12.0)])   # behind
+        front_lobe = Polygon([(-5.0, 40.0), (5.0, 40.0),
+                             (5.0, 50.0), (-5.0, 50.0)])       # ahead
+        collar = unary_union([back_band, front_lobe])
+        clipped = bridges._clip_collar_to_mouth_front(
+            collar, footprint, outward)
+        # The road-side lobe is gone; the back band survives whole.
+        assert clipped.intersection(front_lobe).area == pytest.approx(
+            0.0, abs=1e-6)
+        assert clipped.intersection(back_band).area == pytest.approx(
+            back_band.area, abs=1e-6)
+
+    def test_clip_collar_front_works_far_from_the_layout_origin(self):
+        # Regression (KBNA 02C round 8): the clip rectangle was anchored
+        # at ``outward * front_extent`` — on the front line but up to
+        # kilometres away LATERALLY from the footprint (layout meters
+        # are anchored at the airport reference, not the portal), so the
+        # finite rectangle missed the site and the clip was a silent
+        # no-op (the measured 34 m² front lobe survived the first fixed
+        # build).  The same geometry translated 2.4 km from the origin
+        # must clip identically to the at-origin case.
+        from shapely.affinity import translate as shapely_translate
+
+        outward = (-0.888, 0.459)
+        norm = math.hypot(*outward)
+        outward = (outward[0] / norm, outward[1] / norm)
+        footprint = Polygon([(-10.0, -10.0), (10.0, -10.0),
+                             (10.0, 10.0), (-10.0, 10.0)])
+        lobe = Polygon([
+            (outward[0] * 15.0 - 5.0, outward[1] * 15.0 - 5.0),
+            (outward[0] * 25.0 - 5.0, outward[1] * 25.0 - 5.0),
+            (outward[0] * 25.0 + 5.0, outward[1] * 25.0 + 5.0),
+            (outward[0] * 15.0 + 5.0, outward[1] * 15.0 + 5.0),
+        ])
+        for offset_x, offset_y in ((0.0, 0.0), (-2005.0, -1295.0)):
+            moved_footprint = shapely_translate(
+                footprint, xoff=offset_x, yoff=offset_y)
+            moved_lobe = shapely_translate(
+                lobe, xoff=offset_x, yoff=offset_y)
+            clipped = bridges._clip_collar_to_mouth_front(
+                moved_lobe, moved_footprint, outward)
+            assert clipped.area < 0.2 * moved_lobe.area, (
+                f"lobe forward of the face must clip at offset "
+                f"({offset_x}, {offset_y}); "
+                f"{clipped.area:.1f} of {moved_lobe.area:.1f} m² left")
+
 
 class TestClassificationSidecar:
-    """Pack-sidecar classification cache (user directive 2026-07-10):
+    """Classification sidecar cache (user directive 2026-07-10):
     fingerprint covers the DSF, every .obj in the pack, the pavement
-    evidence, and the version salt — any pack edit invalidates."""
+    evidence, and the version salt — any pack edit invalidates.  Per the
+    user ruling 2026-07-15 the sidecar lives under the data root's
+    ``Airport_mod_cache/<pack name>/`` — never inside the pack — and any
+    pre-ruling in-pack sidecar is removed on resolution."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_data_root(self, tmp_path, monkeypatch):
+        """Pin the data root under ``tmp_path`` — ``ORTHO4XP_DATA_ROOT``
+        wins ``O4_File_Names.resolve_data_root`` — so sidecars never
+        escape the test sandbox."""
+        self.data_root = tmp_path / "o4root"
+        monkeypatch.setenv("ORTHO4XP_DATA_ROOT", str(self.data_root))
 
     @staticmethod
     def _pack(tmp_path):
@@ -2007,7 +2570,7 @@ class TestClassificationSidecar:
         (pack / "Objects" / "b.obj").write_text("VT 1 1 1\n")
         return pack, dsf
 
-    def test_fingerprint_stable_and_path_in_pack(self, tmp_path):
+    def test_fingerprint_stable_and_path_under_data_root(self, tmp_path):
         pack, dsf = self._pack(tmp_path)
         path_1, print_1 = assembly._classification_sidecar(
             str(dsf), str(pack), None)
@@ -2015,7 +2578,21 @@ class TestClassificationSidecar:
             str(dsf), str(pack), None)
         assert print_1 == print_2
         assert path_1 == path_2
-        assert path_1.startswith(str(pack))
+        # The sidecar lands under the data root's Airport_mod_cache —
+        # never inside the pack (user ruling 2026-07-15) — and carries
+        # the DSF stem so two DSFs of one pack cannot collide.
+        assert path_1 == os.path.join(
+            str(self.data_root), "Airport_mod_cache", "US-TEST Airport",
+            "o4_object_terrain_classification_overlay.cache")
+        assert not path_1.startswith(str(pack))
+
+    def test_stale_legacy_in_pack_sidecar_removed(self, tmp_path):
+        pack, dsf = self._pack(tmp_path)
+        legacy = pack / "o4_object_terrain_classification.cache"
+        legacy.write_bytes(b"pre-ruling in-pack sidecar")
+        assembly._classification_sidecar(str(dsf), str(pack), None)
+        # The old in-pack file was cleaned up on sidecar resolution.
+        assert not legacy.exists()
 
     def test_object_edit_invalidates(self, tmp_path):
         import os as _os
@@ -2076,3 +2653,381 @@ class TestClassificationSidecar:
         _path, after = assembly._classification_sidecar(
             str(dsf), str(pack), None)
         assert before != after
+
+
+# ---------------------------------------------------------------------------
+# per-DSF sibling road-network sidecar cache
+# ---------------------------------------------------------------------------
+
+_ROAD_DUMP = "\n".join([
+    "NETWORK_DEF lib/g10/roads_EU.net",
+    "BEGIN_SEGMENT 0 20 1 -86.678000 36.124000 0.0",
+    "END_SEGMENT 2 -86.679000 36.125000 0.0",
+]) + "\n"
+
+
+class TestRoadNetworkSidecarCache:
+    """The per-DSF road-network cache in ``_discover_sibling_road_networks``
+    — a warm hit must skip both the DSFTool dump and the parse while
+    reproducing the same :class:`RoadNetwork`; the gate turns it off; the
+    sidecar helper declines when no pack root resolves.  Per the user
+    ruling 2026-07-15 the sidecar lives under the data root's
+    ``Airport_mod_cache/<pack name>/`` — never inside the roads pack —
+    and any pre-ruling in-pack sidecar is removed on resolution."""
+
+    _TILE_LATITUDE = 36
+    _TILE_LONGITUDE = -87
+
+    @pytest.fixture(autouse=True)
+    def _isolated_data_root(self, tmp_path, monkeypatch):
+        """Pin the data root under ``tmp_path`` — ``ORTHO4XP_DATA_ROOT``
+        wins ``O4_File_Names.resolve_data_root`` — so sidecars never
+        escape the test sandbox."""
+        self.data_root = tmp_path / "o4root"
+        monkeypatch.setenv("ORTHO4XP_DATA_ROOT", str(self.data_root))
+
+    def _sidecar_path(self, pack_root):
+        pack_name = os.path.basename(os.path.abspath(pack_root))
+        return os.path.join(
+            str(self.data_root), "Airport_mod_cache", pack_name,
+            "o4_dsf_road_network_+36-087.cache")
+
+    def _roads_pack(self, tmp_path):
+        """Build ``<xplane>/Custom Scenery/<pack>/Earth nav data/
+        +30-090/+36-087.dsf`` and return ``(xplane_root, pack_root)``."""
+        xplane_root = tmp_path / "X-Plane 12"
+        pack_root = xplane_root / "Custom Scenery" / "US-KBNA Nashville Roads"
+        earth_nav_data = pack_root / "Earth nav data" / "+30-090"
+        earth_nav_data.mkdir(parents=True)
+        (earth_nav_data / "+36-087.dsf").write_text("binary-placeholder")
+        return str(xplane_root), str(pack_root)
+
+    def _patch_pack_order_and_loader(self, monkeypatch):
+        from auto_patch import agp_reader
+        monkeypatch.setattr(
+            agp_reader, "_scenery_pack_order",
+            lambda _root: ["US-KBNA Nashville Roads"])
+        load_calls = []
+
+        def counting_load_dsf_text(dsf_path, *args, **keyword_arguments):
+            load_calls.append(dsf_path)
+            return _ROAD_DUMP.splitlines()
+
+        monkeypatch.setattr(assembly.dsf_reader, "_load_dsf_text",
+                            counting_load_dsf_text)
+        return load_calls
+
+    def test_warm_hit_skips_dump_and_parse(self, tmp_path, monkeypatch):
+        xplane_root, pack_root = self._roads_pack(tmp_path)
+        load_calls = self._patch_pack_order_and_loader(monkeypatch)
+
+        first = assembly._discover_sibling_road_networks(
+            xplane_root, self._TILE_LATITUDE, self._TILE_LONGITUDE)
+        assert len(first) == 1 and first[0].segments
+        assert len(load_calls) == 1
+        assert os.path.isfile(self._sidecar_path(pack_root))
+
+        second = assembly._discover_sibling_road_networks(
+            xplane_root, self._TILE_LATITUDE, self._TILE_LONGITUDE)
+        # Cache hit: no second dump/parse, identical network.
+        assert len(load_calls) == 1
+        assert second == first
+
+    def test_sidecar_lands_under_data_root_not_in_pack(
+            self, tmp_path, monkeypatch):
+        xplane_root, pack_root = self._roads_pack(tmp_path)
+        self._patch_pack_order_and_loader(monkeypatch)
+
+        assembly._discover_sibling_road_networks(
+            xplane_root, self._TILE_LATITUDE, self._TILE_LONGITUDE)
+        sidecar = self._sidecar_path(pack_root)
+        assert os.path.isfile(sidecar)
+        assert sidecar.startswith(
+            os.path.join(str(self.data_root), "Airport_mod_cache"))
+        # Nothing cache-shaped may land inside the roads pack (user
+        # ruling 2026-07-15).
+        pack_files = []
+        for directory, _subdirectories, file_names in os.walk(pack_root):
+            pack_files.extend(file_names)
+        assert not any(name.endswith(".cache") for name in pack_files)
+
+    def test_stale_legacy_in_pack_sidecar_removed(
+            self, tmp_path, monkeypatch):
+        xplane_root, pack_root = self._roads_pack(tmp_path)
+        self._patch_pack_order_and_loader(monkeypatch)
+        legacy = os.path.join(pack_root, "o4_dsf_road_network.cache")
+        with open(legacy, "wb") as handle:
+            handle.write(b"pre-ruling in-pack sidecar")
+
+        assembly._discover_sibling_road_networks(
+            xplane_root, self._TILE_LATITUDE, self._TILE_LONGITUDE)
+        # The old in-pack file was cleaned up on sidecar resolution.
+        assert not os.path.exists(legacy)
+
+    def test_gate_zero_disables_read_and_write(
+            self, tmp_path, monkeypatch):
+        xplane_root, pack_root = self._roads_pack(tmp_path)
+        load_calls = self._patch_pack_order_and_loader(monkeypatch)
+        monkeypatch.setenv("O4_DSF_ROAD_NETWORK_CACHE", "0")
+
+        assembly._discover_sibling_road_networks(
+            xplane_root, self._TILE_LATITUDE, self._TILE_LONGITUDE)
+        assert not os.path.isfile(self._sidecar_path(pack_root))
+        assembly._discover_sibling_road_networks(
+            xplane_root, self._TILE_LATITUDE, self._TILE_LONGITUDE)
+        # Both calls dumped/parsed (no cache in play).
+        assert len(load_calls) == 2
+
+    def test_dsf_edit_invalidates(self, tmp_path, monkeypatch):
+        xplane_root, pack_root = self._roads_pack(tmp_path)
+        load_calls = self._patch_pack_order_and_loader(monkeypatch)
+
+        assembly._discover_sibling_road_networks(
+            xplane_root, self._TILE_LATITUDE, self._TILE_LONGITUDE)
+        assert len(load_calls) == 1
+        dsf = os.path.join(pack_root, "Earth nav data", "+30-090",
+                           "+36-087.dsf")
+        os.utime(dsf, (1e9, 1e9))
+        assembly._discover_sibling_road_networks(
+            xplane_root, self._TILE_LATITUDE, self._TILE_LONGITUDE)
+        # Stale fingerprint → recompute (second dump/parse).
+        assert len(load_calls) == 2
+
+    def test_corrupt_sidecar_falls_back(self, tmp_path, monkeypatch):
+        xplane_root, pack_root = self._roads_pack(tmp_path)
+        load_calls = self._patch_pack_order_and_loader(monkeypatch)
+
+        assembly._discover_sibling_road_networks(
+            xplane_root, self._TILE_LATITUDE, self._TILE_LONGITUDE)
+        sidecar = self._sidecar_path(pack_root)
+        with open(sidecar, "wb") as handle:
+            handle.write(b"garbled \x00\x01")
+        assembly._discover_sibling_road_networks(
+            xplane_root, self._TILE_LATITUDE, self._TILE_LONGITUDE)
+        # A corrupt sidecar never raises — it recomputes (second load).
+        assert len(load_calls) == 2
+
+    def test_no_pack_root_means_no_sidecar(self, tmp_path, monkeypatch):
+        # When the pack root cannot be resolved the helper declines and
+        # the discovery loop falls back to its uncached dump/parse.
+        loose_dsf = tmp_path / "loose.dsf"
+        loose_dsf.write_text("binary-placeholder")
+        monkeypatch.setattr(assembly.dsf_reader, "_pack_root_for_dsf",
+                            lambda _path: None)
+        assert assembly._road_network_sidecar(
+            str(loose_dsf)) == (None, None)
+
+
+# ---------------------------------------------------------------------------
+# 2026-07-15 defects A+B (KBNA Donelson) — approach-chain continuity,
+# [H,L,L,H] slope orientation, and the corridor-plate weld
+# ---------------------------------------------------------------------------
+
+def _draped_curved_road_across_deck(length_m: float = 131.0) -> RoadNetwork:
+    """A fully-draped road crossing UNDER the deck perpendicular to its
+    axis but CURVING away from it (radius ~400 m) — the geometry that
+    made consecutive same-chain steps overlap and get registry-dropped
+    (defect B: every-other-step terrain holes at KBNA)."""
+    shape_points = []
+    for across in range(-300, 301, 30):
+        along = length_m / 2.0 + (across * across) / 800.0
+        latitude, longitude = local_offset_to_lonlat(
+            ANCHOR_LATITUDE, ANCHOR_LONGITUDE, 0.0, along, float(across)
+        )
+        shape_points.append(RoadShapePoint(longitude, latitude, 0.0, True))
+    return RoadNetwork(
+        network_definitions=["lib/g10/roads_EU.net"],
+        segments=[RoadSegment(0, "lib/g10/roads_EU.net", 20, 1, 2,
+                              shape_points)],
+        skipped_line_count=0,
+    )
+
+
+def _approach_shapes(layout):
+    return [s for s in layout.shapes if s.ref == "object_bridge_approach"]
+
+
+def _chain_sides(approaches, footprint_centroid_y=0.0):
+    """Split approach quads into the two exit chains by which side of
+    the deck they sit on, each ordered by distance from the deck."""
+    sides: dict = {"+": [], "-": []}
+    for shape in approaches:
+        key = "+" if shape.polygon.centroid.y > footprint_centroid_y else "-"
+        sides[key].append(shape)
+    for members in sides.values():
+        members.sort(key=lambda s: abs(s.polygon.centroid.y))
+    return [members for members in sides.values() if members]
+
+
+def _open_ring(polygon):
+    ring = list(polygon.exterior.coords)
+    return ring[:-1] if ring[0] == ring[-1] else ring
+
+
+class TestApproachChainContinuity:
+    def test_curved_road_chain_contiguous_and_complete(self):
+        # Defect B regression: under curvature the per-step rects used
+        # to overlap and the shared registry dropped every other SAME-
+        # CHAIN step.  The reworked emitter shares one corner pair per
+        # station: all steps emit, consecutive quads share their facing
+        # edge VERBATIM, and no pair overlaps above the audit floor.
+        layout = _FakeLayout()
+        layout.shapes.append(_deck_route_shape())
+        count, _s, _c = bridges._emit_object_sourced_bridge_corridors(
+            layout, _FakeDem(150.0), 36, -87,
+            _Classification([_bridge()]),
+            [_draped_curved_road_across_deck()],
+            road_width_m=22.0, ramp_step_m=20.0, approach_length_m=80.0,
+        )
+        assert count == 1
+        approaches = _approach_shapes(layout)
+        # The depressed walk runs BRIDGE_CORRIDOR_DEPRESSED_LENGTH_M
+        # (the caller's 80 m only widens) at 20 m steps, both sides.
+        steps_per_side = int(
+            config.BRIDGE_CORRIDOR_DEPRESSED_LENGTH_M // 20.0)
+        assert len(approaches) == 2 * steps_per_side, \
+            "every station step must emit — no same-chain registry drops"
+        for chain in _chain_sides(approaches):
+            for near_shape, far_shape in zip(chain, chain[1:]):
+                shared = (set(_open_ring(near_shape.polygon))
+                          & set(_open_ring(far_shape.polygon)))
+                assert len(shared) >= 2, \
+                    "consecutive quads must share their facing edge verbatim"
+        for index_a, shape_a in enumerate(approaches):
+            for shape_b in approaches[index_a + 1:]:
+                assert shape_a.polygon.intersection(
+                    shape_b.polygon).area <= 0.5, \
+                    "no approach-versus-approach overlap (audit invariant 1)"
+
+    def test_sloped_quads_follow_high_low_corner_convention(self):
+        # [H,L,L,H]: ring corners 0,3 carry altitude_high.  With DEM 150
+        # below the 161.01 floor the chain DESCENDS outward, so the high
+        # end of every quad is its NEAR (deck-side) end — corners 0,3
+        # must sit nearer the deck than corners 1,2.  (Measured KBNA
+        # defect: the fixed near-first ring order shipped every climbing
+        # rect inverted — floor value on the far edge.)
+        from shapely.geometry import Point
+        from shapely.geometry import Polygon as _Polygon
+        layout = _FakeLayout()
+        layout.shapes.append(_deck_route_shape())
+        bridges._emit_object_sourced_bridge_corridors(
+            layout, _FakeDem(150.0), 36, -87,
+            _Classification([_bridge()]),
+            [_draped_road_network_across_deck()],
+            road_width_m=22.0, ramp_step_m=20.0, approach_length_m=80.0,
+        )
+        deck_box = _Polygon([(0.0, -27.5), (131.0, -27.5),
+                             (131.0, 27.5), (0.0, 27.5)])
+        sloped = [s for s in _approach_shapes(layout)
+                  if s.altitude_high is not None]
+        assert sloped, "descending chains must emit sloped quads"
+        for shape in sloped:
+            ring = _open_ring(shape.polygon)
+            assert len(ring) == 4
+            high_pair = (deck_box.distance(Point(ring[0]))
+                         + deck_box.distance(Point(ring[3])))
+            low_pair = (deck_box.distance(Point(ring[1]))
+                        + deck_box.distance(Point(ring[2])))
+            assert high_pair < low_pair, (
+                "high corners (0,3) must be the deck-side end of a "
+                "descending quad — inverted [H,L,L,H] order")
+
+    def test_deck_corridor_chain_welds_to_plate_exit_edge(
+        self, monkeypatch
+    ):
+        # Defect A regression: the chain's first quad copies the
+        # corridor plate's exit-edge ring coordinates VERBATIM (the
+        # weld) and keeps the plate's floor value on that edge — no
+        # more 1.09 m open seam at the trench inset, no 4-5 m lateral
+        # offset.
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.shapes.append(_deck_route_shape())
+        from shapely.geometry import LineString as _LineString
+        layout._object_bridge_route_lines = [
+            _LineString([(65.0, -80.0), (65.0, 80.0)])]
+        setattr(layout, bridges._OBJECT_BRIDGE_ROAD_NETWORKS_ATTRIBUTE,
+                [_axial_road_network()])
+        bridges.build_bridge_layout_shapes(layout, _FakeDem(150.0), 36, -87)
+        bridges._emit_object_sourced_bridge_corridors(
+            layout, _FakeDem(150.0), 36, -87,
+            _Classification([_bridge()]), [_axial_road_network()],
+            road_width_m=22.0, ramp_step_m=20.0, approach_length_m=80.0,
+        )
+        plates = [s for s in layout.shapes
+                  if s.ref == "object_bridge_corridor"]
+        assert len(plates) == 1
+        plate_ring = set(_open_ring(plates[0].polygon))
+        approaches = _approach_shapes(layout)
+        assert approaches, "the axial road must produce approach chains"
+        welded = []
+        for shape in approaches:
+            shared = set(_open_ring(shape.polygon)) & plate_ring
+            if len(shared) >= 2:
+                welded.append(shape)
+        # The road exits BOTH plate ends — each chain's first quad
+        # welds to its end edge.
+        assert len(welded) == 2, (
+            "each chain's first quad must share the plate end edge "
+            f"verbatim (welded quads: {len(welded)})"
+        )
+        floor = bridges._bridge_corridor_floor_m(_bridge(), 167.0)
+        for shape in welded:
+            assert shape.polygon.distance(plates[0].polygon) < 1e-9
+            # DEM 150 < floor: descending chain, near (plate) edge is
+            # the HIGH end and must carry the plate's floor value.
+            assert shape.altitude_high == pytest.approx(
+                round(floor, 1), abs=0.05)
+
+
+class TestPortalCollarCoverage:
+    def test_collar_spans_full_object_footprint_width(self):
+        # Defect C (2026-07-15, KBNA 02C): the collar's lateral extent
+        # derives from the object's FULL solid footprint (the captured
+        # never-stack building pad), not the narrow deck-face union —
+        # measured KBNA: collars covered 86-87 % of the portal back
+        # width.  Here the pad is 3x wider than the 20 m deck square;
+        # the collar must span >= 95 % of the pad width (the deck-
+        # sourced band would reach only 40 of 60 m).
+        from auto_patch.layout import BuiltShape as _BuiltShape
+        from auto_patch.layout import ROLE_BUILDING
+        layout = TestTunnelPortalPairs._paired_layout(
+            TestTunnelPortalPairs())
+        anchor_x, anchor_y = layout.ll_to_m(*local_offset_to_lonlat(
+            ANCHOR_LATITUDE, ANCHOR_LONGITUDE, 0.0, 0.0, 0.0))
+        pad = Polygon([
+            (anchor_x - 10.0, anchor_y - 30.0),
+            (anchor_x + 10.0, anchor_y - 30.0),
+            (anchor_x + 10.0, anchor_y + 30.0),
+            (anchor_x - 10.0, anchor_y + 30.0),
+        ])
+        layout.shapes.append(_BuiltShape(
+            polygon=pad, role=ROLE_BUILDING, ref="padA"))
+        _n_trench, _n_causeway, pads_removed = (
+            bridges.build_bridge_layout_shapes(
+                layout, _FakeDem(180.0), 36, -87))
+        assert pads_removed == 1, "the portal pad must be captured"
+        collars = [shape for shape in layout.shapes
+                   if shape.ref == "object_tunnel_portal_collar"
+                   and shape.polygon.distance(pad) < 30.0]
+        assert collars, "portal A must emit a collar"
+        lateral_low = min(
+            min(y for _x, y in shape.polygon.exterior.coords)
+            for shape in collars)
+        lateral_high = max(
+            max(y for _x, y in shape.polygon.exterior.coords)
+            for shape in collars)
+        pad_width = 60.0
+        assert lateral_high - lateral_low >= 0.95 * pad_width, (
+            "collar must span the full object footprint width "
+            f"(spanned {lateral_high - lateral_low:.1f} of {pad_width} m)")
+
+    def test_collar_without_pad_keeps_deck_derived_band(self):
+        # Fallback: with no captured pad the collar still emits from
+        # the deck-face crown source (the pre-defect-C behaviour, now
+        # keep-all-parts).
+        layout = TestTunnelPortalPairs._paired_layout(
+            TestTunnelPortalPairs())
+        bridges.build_bridge_layout_shapes(layout, _FakeDem(180.0), 36, -87)
+        collars = [shape for shape in layout.shapes
+                   if shape.ref == "object_tunnel_portal_collar"]
+        assert len(collars) == 2

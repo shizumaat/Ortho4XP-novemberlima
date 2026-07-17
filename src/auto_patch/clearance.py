@@ -1555,20 +1555,16 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
             groundside_block = unary_union(_gs).buffer(1.0)
         except _GEOM_EXC:
             groundside_block = None
-    # OWNED CROSSING EXCLUSION (user ruling 2026-07-14,
-    # ``BRIDGE_CROSSING_MASK``): clearance strips never land inside a
-    # crossing Feature B owns (corridor deck boxes, tunnel-portal-pair
-    # regions) — the objects provide the terrain story there, and a law
+    # CROSSING INFLUENCE ZONE (Phase 1, docs/specs/crossing-terrain-
+    # ownership.md; supersedes the 2026-07-14 owned-crossing exclusion):
+    # clearance strips never land inside a published crossing zone —
+    # the crossing assembly provides the terrain story there, and a law
     # strip marching into the crossing fought the object cut at the
-    # KBNA Donelson Pike bridges.  Same difference treatment as the
-    # groundside block.
-    crossing_block = None
-    from .config import BRIDGE_CROSSING_MASK as _CROSSING_MASK
-    if _CROSSING_MASK:
-        from . import bridges as _BRIDGES
-        crossing_block = _BRIDGES._classifier_owned_crossing_union(layout)
-        if crossing_block is not None and crossing_block.is_empty:
-            crossing_block = None
+    # KBNA Donelson Pike bridges.  The zone also carries the depressed-
+    # road corridor, so clearance strips stop burying depressed public
+    # roads too.  Same difference treatment as the groundside block.
+    from .crossing_terrain import crossing_influence_zone_union
+    crossing_block = crossing_influence_zone_union(layout)
     static_union = None
     if static_polys:
         try:
@@ -2477,8 +2473,9 @@ def _surface_road_corridors(layout, ll_to_m):
     """
     try:
         from .bridges import (
-            _carriageway_width_for, _load_tunnel_road_network)
-        nodes_r, ways_r, _big_way_ids = _load_tunnel_road_network(layout)
+            _carriageway_width_from_tags, _load_tunnel_road_network)
+        nodes_r, ways_r, _big_way_ids, _node_tags_r = (
+            _load_tunnel_road_network(layout))
     except _GEOM_EXC:
         return None
     if not ways_r:
@@ -2502,7 +2499,7 @@ def _surface_road_corridors(layout, ll_to_m):
         if railway_type is not None:
             width = _SKIRT_RAILWAY_CORRIDOR_M
         else:
-            width = _carriageway_width_for(highway_type, 6.0)
+            width = _carriageway_width_from_tags(highway_type, tags, 6.0)
         try:
             corridors.append(
                 LineString(points).buffer(
@@ -2543,7 +2540,7 @@ def _end_constraint_block(layout, ll_to_m):
     # the pond/river beside the overrun).
     try:
         from .osm_load import _load_osm_road_layer
-        nodes_w, ways_w = _load_osm_road_layer(
+        nodes_w, ways_w, _node_tags_w = _load_osm_road_layer(
             "water", layout.anchor[0], layout.anchor[1])
     except _GEOM_EXC:
         nodes_w, ways_w = {}, []
@@ -3125,6 +3122,27 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
     # burying them (the validator exempts the same corridors, via the
     # shared ``_surface_road_corridors``).
     road_block = _surface_road_corridors(layout, _ll_to_m)
+    # CROSSING INFLUENCE ZONE (Phase 1, docs/specs/crossing-terrain-
+    # ownership.md): a runway-end skirt across a crossing or its depressed
+    # road corridor laid its floor ACROSS the buried public road (measured
+    # KBNA: skirt pieces 1067-1069 overlap object_bridge_approach 1105-1108
+    # by up to 201 m², 8.53 % down-grades into the trench).  The
+    # skirt-airside precedence ruling (2026-07-10) makes the skirt override
+    # airside pavement, groundside, and RESA cuts — but it does NOT extend
+    # into a crossing's influence zone: the skirt clears it, exactly as it
+    # already clears surface roads.  The zone is published PRE-solve
+    # (superseding the round-8 mapped-road corridor rework, which existed
+    # because the old emitted-piece lane clip was a no-op on the pre-solve
+    # skirt path), so this clip fires identically on both skirt phases.
+    from .crossing_terrain import crossing_influence_zone_union
+    zone_block = crossing_influence_zone_union(layout)
+    if os.environ.get("O4_CROSSING_ZONE_DEBUG") == "1":
+        _zb_area = (zone_block.area
+                    if zone_block is not None and not zone_block.is_empty
+                    else 0.0)
+        print(f"  [crossing-zone-debug] skirt-emit crossing zone union "
+              f"area = {_zb_area:.1f} m2 "
+              f"({'NON-EMPTY' if _zb_area > 0 else 'EMPTY'})")
     emitted_fill = None
     n = 0
     skirt_debug = os.environ.get("O4_SKIRT_DEBUG") == "1"
@@ -3160,6 +3178,7 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
             stage_areas = [("raw", poly.area)]
             for name, block in (("static", static_block),
                                 ("road", road_block),
+                                ("crossing_zone", zone_block),
                                 ("prior_fill", emitted_fill)):
                 if block is not None and not block.is_empty:
                     poly = poly.difference(block)
