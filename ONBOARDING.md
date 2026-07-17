@@ -44,7 +44,10 @@ X-Plane.**
 - Dependencies are in `requirements.txt` (the platform install scripts
   `install_mac.sh` / `install_windows.bat` both install from it); shapely is the
   core geometry library, scipy (Voronoi/splines) + networkx (skeleton graphs)
-  serve the pavement-skeleton spine (`pavement/pav_skeleton.py`).
+  serve the pavement-skeleton spine (`pavement/pav_skeleton.py`), and osmium
+  (pyosmium) filters the Geofabrik regional OSM extracts that stand in for
+  Overpass downloads (`O4_OSM_Extracts` / `O4_OSM_Extract_Filter`,
+  `docs/specs/osm-regional-extracts-spec.md`).
 - **PySide6 (Qt UI only).** `Ortho4XP_Qt.py` launches the modernized Qt
   interface (live map, settings window, onboarding wizard — see
   `docs/UI_MODERNIZATION.md`); it needs `PySide6` from `requirements.txt`.

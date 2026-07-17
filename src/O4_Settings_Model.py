@@ -93,6 +93,8 @@ _LAYOUT: list = [
         ("max_download_slots", "Parallel orthophoto downloads", "app", False),
         ("max_convert_slots", "Parallel DDS conversions", "app", False),
         ("overpass_server_choice", "OSM Overpass server", "app", False),
+        ("osm_regional_extracts", "OSM regional extracts", "app", False),
+        ("osm_extract_refresh_days", "Extract refresh age (days)", "app", True),
         ("http_timeout", "HTTP timeout (s)", "app", True),
         ("max_connect_retries", "Connection retries", "app", True),
         ("max_baddata_retries", "Bad-data retries", "app", True),

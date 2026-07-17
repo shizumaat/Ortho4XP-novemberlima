@@ -337,6 +337,17 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(300, self.refresh_tiles)
         QTimer.singleShot(400, self._load_airports_async)
 
+        # OSM regional extracts: keep stored region extracts fresh and
+        # download newly wanted ones in the background (docs/specs/
+        # osm-regional-extracts-spec.md).  Application process only —
+        # parallel-build worker children merely record wants.
+        try:
+            import O4_OSM_Extracts as EXTRACTS
+
+            EXTRACTS.start_background_maintenance()
+        except Exception:
+            pass
+
         lat = int(self.prefs.get("last_lat", 48))
         lon = int(self.prefs.get("last_lon", -6))
         self.map.center_on_tile(lat, lon, zoom=7)

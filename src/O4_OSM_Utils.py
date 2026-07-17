@@ -580,16 +580,35 @@ def _OSM_queries_to_OSM_layer_serialized(
         # wholly on the other side of the line, which the plain tile
         # bbox never returns.  Callers passing a margin must bump their
         # cache_schema (the cache file is still keyed per tile).
-        response = get_overpass_data(
-            statements_to_download,
-            (
-                lat - bbox_margin_degrees,
-                lon - bbox_margin_degrees,
-                lat + 1 + bbox_margin_degrees,
-                lon + 1 + bbox_margin_degrees,
-            ),
-            request_description=cached_suffix,
+        bounding_box = (
+            lat - bbox_margin_degrees,
+            lon - bbox_margin_degrees,
+            lat + 1 + bbox_margin_degrees,
+            lon + 1 + bbox_margin_degrees,
         )
+        # Regional-extract backend first (docs/specs/
+        # osm-regional-extracts-spec.md): serve the statements from
+        # locally stored Geofabrik extracts when the covering regions
+        # are downloaded; otherwise the regions are recorded for the
+        # background downloader and this build proceeds to Overpass —
+        # the backend is an accelerator, never a dependency.
+        response = None
+        try:
+            import O4_OSM_Extracts as EXTRACTS
+
+            response = EXTRACTS.osm_xml_from_local_extracts(
+                statements_to_download,
+                bounding_box,
+                request_description=cached_suffix,
+            )
+        except Exception:
+            response = None
+        if response is None:
+            response = get_overpass_data(
+                statements_to_download,
+                bounding_box,
+                request_description=cached_suffix,
+            )
         if UI.red_flag:
             return 0
         if not response:

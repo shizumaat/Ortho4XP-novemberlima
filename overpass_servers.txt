@@ -4,3 +4,4 @@
 
 DE = https://overpass-api.de/api/interpreter
 KU = https://overpass.private.coffee/api/interpreter
+KUMI = https://overpass.kumi.systems/api/interpreter

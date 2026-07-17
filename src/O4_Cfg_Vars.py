@@ -48,6 +48,16 @@ cfg_app_vars = {
         "values": overpass_server_values,
         "hint": "OSM Overpass server used to grab vector data. Servers are specified in overpass_servers.txt.",
     },
+    "osm_regional_extracts": {
+        "type": bool,
+        "default": True,
+        "hint": "Serve OpenStreetMap vector data from locally stored Geofabrik regional extracts when available, falling back to the Overpass servers. The first build in a region records it for download; the extract is then fetched in the background (typically a few hundred megabytes, once per region) and every later build in that region reads OSM data locally - no waiting on shared OSM servers, no rate limits.",
+    },
+    "osm_extract_refresh_days": {
+        "type": float,
+        "default": 14.0,
+        "hint": "How old, in days, a stored regional extract may grow before background maintenance re-downloads it at application start. OpenStreetMap edits reach scenery slowly, so the default trades a fortnight of staleness for far fewer multi-hundred-megabyte downloads.",
+    },
     "base_elevation_source": {
         "module": "DEM",
         "type": str,
@@ -600,6 +610,8 @@ list_app_vars = [
     "verbosity",
     "cleaning_level",
     "overpass_server_choice",
+    "osm_regional_extracts",
+    "osm_extract_refresh_days",
     "base_elevation_source",
     "skip_downloads",
     "skip_converts",
