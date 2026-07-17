@@ -17,6 +17,18 @@ if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
 
 sys.path.append(os.path.join(Ortho4XP_dir, 'src'))
 
+# JSON-lines engine transport (docs/specs/engine-protocol-multi-gui.md §5):
+# a subprocess front end runs `Ortho4XP.py --engine-jsonl` and speaks the
+# protocol over stdio.  Handle it here, BEFORE any GUI toolkit import below,
+# so the engine-only path never pulls in Tkinter/PySide6.
+if '--engine-jsonl' in sys.argv:
+    from o4_engine import jsonl
+    # owns_process: the transport bounds this process's life — front-end
+    # death (stdin EOF, SIGTERM, ppid change) stops any in-flight build
+    # and exits, so no orphan engine can keep building headless.
+    jsonl.serve(sys.stdin, sys.stdout, owns_process=True)
+    sys.exit(0)
+
 import O4_File_Names as FNAMES
 sys.path.append(FNAMES.Provider_dir)
 import O4_Imagery_Utils as IMG

@@ -8,6 +8,7 @@ import requests
 from math import sqrt, cos, pi
 import O4_DEM_Utils as DEM
 import O4_Airport_Elevation_Insets as INSETS
+import O4_Elevation_Level as ELEVATION_LEVEL
 import O4_UI_Utils as UI
 import O4_File_Names as FNAMES
 import O4_Geo_Utils as GEO
@@ -88,7 +89,7 @@ def community_mesh(tile):
                     FNAMES.mesh_file(tile.build_dir, tile.lat, tile.lon)
                     + ".7z",
                 ],
-                env=UI.subprocess_env(),
+                **UI.external_tool_keyword_arguments(),
             ):
                 UI.exit_message_and_bottom_line(
                     "\nERROR: Could not extract community_mesh from archive."
@@ -328,15 +329,22 @@ def post_process_nodes_altitudes(tile):
 
 ################################################################################
 def write_mesh_file(tile, vertices):
+    mesh_file_name = FNAMES.mesh_file(tile.build_dir, tile.lat, tile.lon)
     UI.vprint(
         1,
-        "-> Writing final mesh to the file "
-        + FNAMES.mesh_file(tile.build_dir, tile.lat, tile.lon),
+        "-> Writing final mesh to the file " + mesh_file_name,
     )
     f_ele = open(FNAMES.output_ele_file(tile), "r")
     nbr_vert = len(vertices) // 6
     nbr_tri = int(f_ele.readline().split()[0])
-    f = open(FNAMES.mesh_file(tile.build_dir, tile.lat, tile.lon), "w")
+    # Neighbor tile builds (step 2.5 masks) read this file concurrently
+    # during parallel builds: write to a temporary file in the same
+    # directory and atomically rename it into place so a reader can never
+    # observe a half-written mesh.
+    temporary_mesh_file_name = (
+        mesh_file_name + ".tmp" + str(os.getpid())
+    )
+    f = open(temporary_mesh_file_name, "w")
     f.write("MeshVersionFormatted 2\n")
     f.write("Dimension 3\n\n")
     f.write("Vertices\n")
@@ -367,6 +375,7 @@ def write_mesh_file(tile, vertices):
         f.write(" ".join(f_ele.readline().split()[1:]) + "\n")
     f_ele.close()
     f.close()
+    os.replace(temporary_mesh_file_name, mesh_file_name)
     return
 
 
@@ -662,6 +671,9 @@ def build_mesh(tile):
                 # and the bake guards base nodata cells, which this
                 # fill_nodata=False load can contain).
                 INSETS.densify_tile_dem_for_insets(tile)
+                # Mirror the step-1 bake order: tile-wide elevation-level
+                # overlay first (base terrain), airport insets last.
+                ELEVATION_LEVEL.bake_tile_overlay_into_alt_dem(tile)
                 INSETS.bake_airport_insets_into_alt_dem(tile)
                 tile.dem.write_to_file(FNAMES.alt_file(tile))
         except Exception as e:
@@ -715,8 +727,13 @@ def build_mesh(tile):
         Tri_option.strip(),
         "{:.9g}".format(GEO.lon_to_m(tile.lat)),
         "{:.9g}".format(GEO.lat_to_m),
-        "{:n}".format(tile.dem.nxdem),
-        "{:n}".format(tile.dem.nydem),
+        # "{:d}", never "{:n}": the locale-aware "n" format inserts
+        # grouping separators under a non-C LC_NUMERIC (e.g. in-process
+        # Qt GUI builds, where QApplication calls setlocale(LC_ALL, ""))
+        # and Triangle4XP's atoi("7,345") reads 7 — the mesh then samples
+        # a 7x7 phantom DEM and the whole tile flattens.
+        "{:d}".format(tile.dem.nxdem),
+        "{:d}".format(tile.dem.nydem),
         "{:.9g}".format(tile.dem.x0),
         "{:.9g}".format(tile.dem.y0),
         "{:.9g}".format(tile.dem.x1),
@@ -733,7 +750,7 @@ def build_mesh(tile):
     UI.vprint(1, "-> Start of the mesh algorithm Triangle4XP.")
     UI.vprint(2, "   Mesh command:", " ".join(mesh_cmd))
     fingers_crossed = subprocess.Popen(
-        mesh_cmd, stdout=subprocess.PIPE, bufsize=0, env=UI.subprocess_env()
+        mesh_cmd, stdout=subprocess.PIPE, bufsize=0, **UI.external_tool_keyword_arguments()
     )
     while True:
         line = fingers_crossed.stdout.readline()
@@ -768,7 +785,7 @@ def build_mesh(tile):
             )
             mesh_cmd[1] = Tri_option
             fingers_crossed = subprocess.Popen(
-                mesh_cmd, stdout=subprocess.PIPE, bufsize=0, env=UI.subprocess_env()
+                mesh_cmd, stdout=subprocess.PIPE, bufsize=0, **UI.external_tool_keyword_arguments()
             )
             while True:
                 line = fingers_crossed.stdout.readline()
@@ -861,7 +878,7 @@ def sort_mesh(tile):
     UI.vprint(1, "-> Reorganizing mesh triangles.")
     timer = time.time()
     moulinette = subprocess.Popen(
-        sort_mesh_cmd_list, stdout=subprocess.PIPE, bufsize=0, env=UI.subprocess_env()
+        sort_mesh_cmd_list, stdout=subprocess.PIPE, bufsize=0, **UI.external_tool_keyword_arguments()
     )
     while True:
         line = moulinette.stdout.readline()
@@ -891,7 +908,7 @@ def triangulate(name, path_to_Ortho4XP_dir):
         name + ".poly",
     ]
     fingers_crossed = subprocess.Popen(
-        mesh_cmd, stdout=subprocess.PIPE, bufsize=0, env=UI.subprocess_env()
+        mesh_cmd, stdout=subprocess.PIPE, bufsize=0, **UI.external_tool_keyword_arguments()
     )
     while True:
         line = fingers_crossed.stdout.readline()

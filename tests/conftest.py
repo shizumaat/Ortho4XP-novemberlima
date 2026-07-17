@@ -29,6 +29,11 @@ import os
 import sys
 from typing import List, Optional
 
+# No test may reach the network: the parallel-build OpenStreetMap cache
+# warmer (o4_engine.parallel) is disabled suite-wide; tests that exercise
+# the warmer itself delete this variable and stub the download modules.
+os.environ.setdefault("O4_DISABLE_OSM_WARMER", "1")
+
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

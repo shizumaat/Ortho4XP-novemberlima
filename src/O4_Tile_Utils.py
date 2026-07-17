@@ -13,7 +13,12 @@ import O4_Mesh_Utils as MESH
 import O4_Mask_Utils as MASK
 import O4_DSF_Utils as DSF
 import O4_Overlay_Utils as OVL
-from O4_Parallel_Utils import parallel_launch, parallel_join
+from O4_Parallel_Utils import (
+    effective_convert_slots,
+    effective_download_slots,
+    parallel_launch,
+    parallel_join,
+)
 
 max_download_slots = 1
 max_convert_slots = 4
@@ -27,23 +32,31 @@ def download_textures(
     convert_queue,
     workers=None,
     producer_done_event=None,
+    stats=None,
 ):
-    worker_count = max(1, workers or max_download_slots)
+    """``stats`` (optional dict) is filled with the final "done"/"failed"
+    counts so the caller can distinguish a completed step from one that
+    silently dropped textures (a permanently failed download is otherwise
+    only visible as a per-texture console line)."""
+    worker_count = max(
+        1, workers or effective_download_slots(max_download_slots)
+    )
     UI.vprint(1, f"-> Opening download queue with {worker_count} worker(s).")
 
     progress_lock = threading.Lock()
-    progress_state = {"done": 0, "pending": 0}
+    progress_state = {"done": 0, "pending": 0, "failed": 0}
     attempts = defaultdict(int)
     interrupted = False
     max_attempts = 3
 
     def _update_progress_locked():
+        finished = progress_state["done"] + progress_state["failed"]
         denom = (
-            progress_state["done"]
+            finished
             + progress_state["pending"]
             + download_queue.qsize()
         )
-        UI.progress_bar(2, int(100 * progress_state["done"] / denom) if denom else 100)
+        UI.progress_bar(2, int(100 * finished / denom) if denom else 100)
 
     def _download_task(*attrs):
         nonlocal interrupted
@@ -75,9 +88,17 @@ def download_textures(
                 should_retry = attempt < max_attempts and not UI.red_flag
                 if not should_retry:
                     attempts.pop(attrs, None)
+                    progress_state["failed"] += 1
             _update_progress_locked()
 
         if ok:
+            # Color harmonization statistics are collected here, on the
+            # download worker, so the target field is complete the moment
+            # the last download lands (spec section 3.4).  The lock
+            # attribute only exists when the tile build activated the
+            # feature and its convert barrier.
+            if getattr(tile, "color_harmonization_lock", None) is not None:
+                IMG.collect_color_statistics_for_harmonization(tile, *attrs)
             convert_queue.put((tile, *attrs))
         elif should_retry:
             download_queue.put(attrs)
@@ -111,9 +132,21 @@ def download_textures(
     parallel_join(workers_list)
 
     UI.progress_bar(2, 100)
+    if stats is not None:
+        stats["done"] = progress_state["done"]
+        stats["failed"] = progress_state["failed"]
     if interrupted or UI.red_flag:
         UI.vprint(1, "Download process interrupted.")
         return 0
+    if progress_state["failed"] and progress_state["done"]:
+        UI.lvprint(
+            0,
+            "WARNING:",
+            progress_state["failed"],
+            "texture(s) failed to download after",
+            max_attempts,
+            "attempts — run step 3 again to retry the missing ones.",
+        )
     if progress_state["done"]:
         UI.vprint(1, " *Download of textures completed.")
     return 1
@@ -142,6 +175,17 @@ def build_tile(tile):
         return 0
 
     timer = time.time()
+
+    if (tile.default_website not in IMG.providers_dict
+            and tile.default_website not in IMG.combined_providers_dict):
+        UI.lvprint(
+            0,
+            "ERROR: imagery source '%s' is not a known provider — "
+            "select an imagery source in the interface, or fix "
+            "default_website in the tile config." % (tile.default_website,),
+        )
+        UI.exit_message_and_bottom_line("")
+        return 0
 
     tile.write_to_config()
 
@@ -192,7 +236,10 @@ def build_tile(tile):
 
     download_launched = False
     convert_launched = False
-    download_workers = max_download_slots
+    download_workers = effective_download_slots(max_download_slots)
+    # Resolved ONCE so the launch count and the quit-token count below can
+    # never disagree ("0 = Auto" scales to the machine).
+    convert_worker_count = effective_convert_slots(max_convert_slots)
 
     # Default X-Plane texture mode uses no orthophotos: build_dsf queues
     # nothing, so the imagery download/convert stage is a clean no-op for this
@@ -216,6 +263,7 @@ def build_tile(tile):
     build_dsf_thread = threading.Thread(target=_build_dsf_guarded)
     producer_done_event = threading.Event()
 
+    download_stats = {}
     download_thread = threading.Thread(
         target=download_textures,
         args=[
@@ -224,33 +272,55 @@ def build_tile(tile):
             convert_queue,
             download_workers,
             producer_done_event,
+            download_stats,
         ],
     )
+    # Color harmonization needs every texture's statistics before any
+    # conversion runs (the target field is a whole-tile consensus), so with
+    # the feature on the convert workers are launched only after the
+    # download thread joins; the convert queue accumulates in the meantime.
+    # See docs/specs/color-harmonization-spec.md section 3.4.
+    harmonization_active = (
+        imagery_needed
+        and not skip_downloads
+        and not skip_converts
+        and getattr(tile, "color_harmonization", False)
+    )
+    if harmonization_active:
+        IMG.initialize_color_harmonization(tile)
+
+    def _launch_convert_workers():
+        UI.vprint(
+            1,
+            "-> Opening convert queue and",
+            convert_worker_count,
+            "conversion workers.",
+        )
+        return parallel_launch(
+            IMG.convert_texture,
+            convert_queue,
+            convert_worker_count,
+            progress=dico_conv_progress,
+        )
+
+    dico_conv_progress = {"done": 0, "bar": 3}
     build_dsf_thread.start()
     if not skip_downloads and imagery_needed:
         download_thread.start()
         download_launched = True
-        if not skip_converts:
-            UI.vprint(
-                1,
-                "-> Opening convert queue and",
-                max_convert_slots,
-                "conversion workers.",
-            )
-            dico_conv_progress = {"done": 0, "bar": 3}
-            convert_workers = parallel_launch(
-                IMG.convert_texture,
-                convert_queue,
-                max_convert_slots,
-                progress=dico_conv_progress,
-            )
+        if not skip_converts and not harmonization_active:
+            convert_workers = _launch_convert_workers()
             convert_launched = True
     build_dsf_thread.join()
     producer_done_event.set()
     if download_launched:
         download_thread.join()
+        if harmonization_active and not UI.red_flag:
+            IMG.compute_color_harmonization_targets(tile)
+            convert_workers = _launch_convert_workers()
+            convert_launched = True
         if convert_launched:
-            for _ in range(max_convert_slots):
+            for _ in range(convert_worker_count):
                 convert_queue.put("quit")
             parallel_join(convert_workers)
             if UI.red_flag:
@@ -258,6 +328,19 @@ def build_tile(tile):
             elif dico_conv_progress["done"] >= 1:
                 UI.vprint(1, " *DDS conversion of textures completed.")
     if dsf_build_error:
+        UI.exit_message_and_bottom_line("")
+        return 0
+    if (
+        download_launched
+        and not UI.red_flag
+        and download_stats.get("failed")
+        and not download_stats.get("done")
+    ):
+        UI.lvprint(
+            0,
+            "ERROR: every texture download failed (imagery source '%s') — "
+            "the new DSF was not activated." % (tile.default_website,),
+        )
         UI.exit_message_and_bottom_line("")
         return 0
     UI.vprint(1, " *Activating DSF file.")

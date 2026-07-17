@@ -9,6 +9,13 @@ red_flag = False
 is_working = False
 cleaning_level = 1
 gui = None
+# The active o4_engine.EngineSession, set by the session itself on
+# construction (docs/specs/engine-protocol-multi-gui.md §6).  When set,
+# the module functions below route to it; the legacy ``gui`` attribute
+# stays as the Tkinter fallback.  This module never imports o4_engine —
+# attribute registration keeps the import graph acyclic and core
+# pipeline modules toolkit-free.
+engine_session = None
 log = True
 total_elapsed = 0.0
 
@@ -23,8 +30,38 @@ def subprocess_env():
     return env
 
 
+def external_tool_keyword_arguments():
+    """Keyword arguments for every external build-tool launch
+    (Triangle4XP, DDSTool, gdal_translate, gdalwarp, 7z, ...).
+
+    ``close_fds=False`` makes CPython take its ``posix_spawn()`` path
+    instead of ``fork()`` + ``exec()``.  This is load-bearing on macOS:
+    once GDAL has warped anything, its bundled PROJ has registered a
+    ``pthread_atfork`` handler that closes the ``proj.db`` sqlite handles
+    inside the forked child, and that handler segfaults in ``os_log``
+    before ``exec`` ever runs (diagnosed 2026-07-16 from the
+    ``Python-*.ips`` crash reports: ``fork`` ->
+    ``_pthread_atfork_child_handlers`` ->
+    ``SQLiteHandleCache::invalidateHandles`` -> SIGSEGV).  The symptom
+    was Triangle4XP and texture conversions "failing" instantly with no
+    output, only in engine builds that had performed GDAL warps first.
+
+    Not sweeping file descriptors is safe: Python file descriptors are
+    non-inheritable by default (PEP 446).  ``posix_spawn`` is only taken
+    when ``cwd`` is None and standard streams are not low file
+    descriptors -- true for every pipeline tool call.
+    """
+    return {"env": subprocess_env(), "close_fds": False}
+
+
 ################################################################################
 def progress_bar(nbr, percentage, message=None):
+    if engine_session is not None:
+        try:
+            engine_session.legacy_progress(nbr, int(percentage))
+        except Exception:
+            pass
+        return
     if gui:
         gui.pgrbv[nbr].set(percentage)
 
@@ -36,6 +73,12 @@ def auto_patch_begin(icaos):
     Only enqueues onto the GUI's thread-safe queue — safe to call from the
     build worker thread; the actual widgets are created on the Tk main
     thread."""
+    if engine_session is not None:
+        try:
+            engine_session.autopatch_begin(icaos)
+        except Exception:
+            pass
+        return
     if gui:
         try:
             gui.autopatch_begin(icaos)
@@ -57,6 +100,13 @@ def auto_patch_progress(icao, done, total, label, status="run",
     blends it with its own elapsed-time extrapolation for the "About m:ss
     remaining" label.  No-op without a GUI and never raises — progress is
     cosmetic."""
+    if engine_session is not None:
+        try:
+            engine_session.autopatch_event(icao, done, total, label, status,
+                                           eta_total_s)
+        except Exception:
+            pass
+        return
     if gui:
         try:
             gui.autopatch_event(icao, done, total, label, status,
@@ -74,7 +124,7 @@ def vprint(min_verbosity, *args):
 ################################################################################
 def logprint(*args):
     try:
-        f = open(FNAMES.resource_path("Ortho4XP.log"), "a")
+        f = open(FNAMES.data_path("Ortho4XP.log"), "a")
         f.write(
             time.strftime("%c")
             + " | "

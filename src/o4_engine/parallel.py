@@ -1,0 +1,854 @@
+"""Parallel tile builds: the phase-aware subprocess orchestrator
+(docs/specs/parallel-tile-builds.md).
+
+One :class:`ParallelBuildRun` drives a run in which up to N tiles build
+concurrently, each inside its own worker child process running the
+existing JSON-lines engine transport (``Ortho4XP.py --engine-jsonl``).
+
+The parent dispatches ONE STEP AT A TIME (spec §3.8): every ``build``
+command a child receives selects a single step key, so the parent knows
+and controls each tile's phase.  Steps belong to resource classes —
+"network" (vector, imagery) and "compute" (mesh, masks, overlays) —
+with per-class concurrency caps, so a forty-tile queue can never
+stampede the OpenStreetMap or imagery servers and never crunches more
+meshes at once than the machine should hold.  A child whose next step's
+class is full waits idle (a between-steps child holds almost nothing —
+the pipeline communicates through files).  When capacity frees, blocked
+children are dispatched finish-first (later steps before earlier ones,
+work in progress drains before new tiles enter).
+
+Children are reused across steps and tiles (one interpreter start-up
+per slot), except after a mid-step cancel, where the child is retired
+and a fresh one spawned so a red-flagged interpreter never carries
+state forward.  The child's per-step ``BuildDone`` / ``TileState(done)``
+/ ``RunDone`` events are consumed as scheduling signals; the parent
+forwards tile-level terminals only when a tile's LAST step completes,
+and remaps ``StepProgress`` percent from the child's single-step window
+into the tile's full-plan window, so views see exactly the stream a
+whole-tile build produced.
+
+No GUI-toolkit imports (core-module rule).  The session owns run
+lifecycle bookkeeping; this module reports back through
+``session._emit`` and ``session._run_finished``.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+from collections import deque
+from typing import Optional
+
+from . import events as EVENTS
+from .events import BuildDone, RunDone, RunEta, StepProgress, TileState
+from .session import plan_steps
+
+# Seconds to wait for a freshly spawned worker's EngineHello line before
+# declaring the spawn failed (interpreter start + light imports only —
+# the heavy pipeline imports happen later, inside the build command).
+HANDSHAKE_TIMEOUT_SECONDS = 30.0
+
+# Resource classes (spec §3.8): which shared resource each step leans
+# on, and how many tiles may occupy a class at once.  The two network
+# classes are SEPARATE because they exhaust separate servers — a tile
+# downloading OpenStreetMap data must not steal budget from the imagery
+# phase, which dominates total build time (the goal is minimal makespan
+# for the whole queue).  The compute cap leaves one slot's worth of
+# headroom so a network phase is always feedable.
+STEP_CLASSES = {
+    "vector": "osm",
+    "imagery": "imagery",
+    "mesh": "compute",
+    "masks": "compute",
+    "overlays": "compute",
+}
+OSM_CLASS_LIMIT = 2
+IMAGERY_CLASS_LIMIT = 2
+
+
+def class_limits(slots):
+    """Per-class concurrency caps for a run of ``slots`` children."""
+    return {
+        "osm": min(OSM_CLASS_LIMIT, slots),
+        "imagery": min(IMAGERY_CLASS_LIMIT, slots),
+        "compute": max(1, slots - 1),
+    }
+
+
+# Rough peak mesh-step memory per tile (gigabytes) by elevation detail
+# level (docs/specs/elevation-level-spec.md sizing: working raster plus
+# smoothing/bake copies).  Drives the mesh admission gate below, so one
+# 1 m island tile in a forty-tile queue is scheduled around, not
+# alongside, other big rasters.
+MESH_MEMORY_ESTIMATES_GB = {
+    "auto": 2.0,
+    "coastline": 3.0,
+    "30": 1.5,
+    "10": 3.0,
+    "5": 8.0,
+    "1": 18.0,
+}
+MESH_MEMORY_DEFAULT_GB = 2.0
+# Gigabytes kept free for the operating system, the application, and the
+# non-mesh phases of concurrently building tiles.
+MESH_MEMORY_HEADROOM_GB = 4.0
+
+
+def mesh_memory_estimate_gigabytes(elevation_level_value):
+    """Estimated peak mesh memory for a tile's ``elevation_level``."""
+    if elevation_level_value is None:
+        return MESH_MEMORY_DEFAULT_GB
+    key = str(elevation_level_value).strip().lower()
+    return MESH_MEMORY_ESTIMATES_GB.get(key, MESH_MEMORY_DEFAULT_GB)
+
+
+def mesh_memory_budget_gigabytes():
+    """Total gigabytes the run may commit to concurrent mesh steps."""
+    import O4_Parallel_Utils as PARALLEL_UTILS
+
+    return max(
+        4.0,
+        PARALLEL_UTILS.machine_memory_gigabytes() - MESH_MEMORY_HEADROOM_GB,
+    )
+
+
+# Event types forwarded verbatim (modulo remapping/suppression, spec
+# §3.8) from a child stream into the parent session.  Everything else is
+# child-run-level (hello, run clock, run end) or impossible from a
+# worker (scan events) and is suppressed; the parent emits its own.
+_FORWARDED_EVENT_TYPES = (
+    "TileState",
+    "StepProgress",
+    "BuildDone",
+    "AutoPatchBegin",
+    "AutoPatchProgress",
+    "Log",
+)
+
+_EVENT_CLASSES = {
+    name: value
+    for name, value in vars(EVENTS).items()
+    if isinstance(value, type)
+    and issubclass(value, EVENTS.EngineEvent)
+    and value is not EVENTS.EngineEvent
+}
+
+
+def tile_worker_command():
+    """The argv launching one worker child.
+
+    From source: ``[python, <repo>/Ortho4XP.py, --engine-jsonl]``.  In
+    the frozen application the executable serves as its own worker via
+    the same early argv branch in ``Ortho4XP_Qt.py``.  Module-level so
+    tests can substitute a stub worker script.
+    """
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--engine-jsonl"]
+    repository_root = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
+    return [
+        sys.executable,
+        os.path.join(repository_root, "Ortho4XP.py"),
+        "--engine-jsonl",
+    ]
+
+
+def _short_latlon(tile):
+    lat, lon = tile
+    return "%+03d%+04d" % (lat, lon)
+
+
+def _rebuild_event(payload):
+    """Parse one child event line back into a typed event, or ``None``.
+
+    Additive-protocol rules: unknown event types and unknown fields are
+    dropped silently.  ``seq``/``ts`` are discarded — the parent session
+    re-stamps both at re-emission.
+    """
+    event_name = payload.get("event")
+    event_class = _EVENT_CLASSES.get(event_name)
+    if event_class is None:
+        return None
+    field_names = {
+        f.name for f in dataclasses.fields(event_class)
+    } - {"seq", "ts"}
+    kwargs = {k: v for k, v in payload.items() if k in field_names}
+    # JSON turns tuples into lists; the tuple-typed forwarded field is
+    # normalized back so in-process and merged streams look alike.
+    if "airports" in kwargs and isinstance(kwargs["airports"], list):
+        kwargs["airports"] = tuple(
+            tuple(a) if isinstance(a, list) else a
+            for a in kwargs["airports"]
+        )
+    try:
+        return event_class(**kwargs)
+    except Exception:
+        return None
+
+
+class _WorkerChild:
+    """One worker subprocess: process handle, stream threads, state."""
+
+    def __init__(self, run, index):
+        self.run = run
+        self.index = index
+        self.process: Optional[subprocess.Popen] = None
+        self.tile = None               # tile this child is carrying
+        self.running_step = None       # step key in flight, None = waiting
+        self.step_failed = False       # current tile had a failing step
+        self.cancelling = False        # a mid-step cancel is in flight
+        self.retired = False
+        self.hello = threading.Event()
+        self._stdin_lock = threading.Lock()
+        self._command_id = 0
+
+    # -- lifecycle -----------------------------------------------------
+    def spawn(self):
+        """Start the process and its stream threads; await the handshake.
+
+        Returns True when the child produced its EngineHello in time.
+        """
+        try:
+            # Children learn their sibling count so their own Auto slot
+            # resolutions (DDS conversion, downloads) share the machine.
+            child_environment = dict(os.environ)
+            child_environment["O4_PARALLEL_BUILD_SIBLINGS"] = str(
+                self.run._slots)
+            # The child's parent-death watchdog probes this pid directly
+            # (jsonl owns_process mode), so a front end that dies without
+            # collapsing the stdin pipe still takes its workers with it.
+            child_environment["O4_PARENT_PROCESS_ID"] = str(os.getpid())
+            self.process = subprocess.Popen(
+                tile_worker_command(),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                env=child_environment,
+                cwd=os.path.dirname(
+                    os.path.dirname(
+                        os.path.dirname(os.path.abspath(__file__)))),
+            )
+        except Exception as error:
+            print("Could not start a build worker process:", error)
+            return False
+        threading.Thread(target=self._read_events, daemon=True).start()
+        threading.Thread(target=self._drain_stderr, daemon=True).start()
+        if not self.hello.wait(HANDSHAKE_TIMEOUT_SECONDS):
+            print("Build worker", self.index,
+                  "did not answer in time; giving up on it.")
+            self.terminate()
+            return False
+        return True
+
+    def send(self, command):
+        try:
+            with self._stdin_lock:
+                self._command_id += 1
+                command = dict(command, id=self._command_id)
+                self.process.stdin.write(json.dumps(command) + "\n")
+                self.process.stdin.flush()
+            return True
+        except Exception:
+            return False
+
+    def start_step(self, step_key, build_arguments):
+        """Send one single-step build command for this child's tile."""
+        self.running_step = step_key
+        return self.send(dict(
+            build_arguments,
+            cmd="build",
+            tiles=[[self.tile[0], self.tile[1]]],
+            steps=[step_key],
+        ))
+
+    def retire(self):
+        """Close the child down gracefully (EOF ends jsonl.serve)."""
+        self.retired = True
+        try:
+            self.process.stdin.close()
+        except Exception:
+            pass
+
+    def terminate(self):
+        self.retired = True
+        try:
+            self.process.terminate()
+        except Exception:
+            pass
+
+    # -- stream threads --------------------------------------------------
+    def _read_events(self):
+        try:
+            for line in self.process.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except ValueError:
+                    continue
+                if payload.get("event") == "EngineHello":
+                    self.hello.set()
+                    continue
+                if "event" in payload:
+                    self.run._on_child_event(self, payload)
+        except Exception:
+            pass
+        self.run._on_child_exit(self)
+
+    def _drain_stderr(self):
+        """Pipeline prints and crash text, re-printed with attribution so
+        the interleaved console stays readable."""
+        try:
+            for line in self.process.stderr:
+                tile = self.tile
+                prefix = ("[%s] " % _short_latlon(tile)) if tile else (
+                    "[worker %d] " % self.index)
+                print(prefix + line.rstrip("\n"))
+        except Exception:
+            pass
+
+
+class ParallelBuildRun:
+    """The phase-aware orchestrator for one parallel run (spec §3.1–3.8)."""
+
+    def __init__(self, session, tiles, provider, zoomlevel,
+                 custom_build_dir, step_flags, slots):
+        do_vector, do_imagery, do_overlays = step_flags
+        self._session = session
+        self._queue = deque(tiles)
+        self._total = len(tiles)
+        self._slots = slots
+        self._build_arguments = {
+            "provider": provider,
+            "zoomlevel": zoomlevel,
+            "custom_build_dir": custom_build_dir,
+        }
+        # The step program every tile walks, and each step's window in
+        # the whole-tile percent scale (for StepProgress remapping).
+        full_plan = plan_steps(do_vector, do_imagery, do_overlays)
+        self._program = [key for (key, _base, _width) in full_plan]
+        self._step_windows = {
+            key: (base, width) for (key, base, width) in full_plan
+        }
+        self._class_limits = class_limits(slots)
+        self._class_active = {name: 0 for name in self._class_limits}
+        self._next_step_index: dict = {}
+        # Memory-aware mesh admission (spec §3.8): per-tile estimates
+        # from each tile's configured elevation detail level, admitted
+        # against the machine's budget (at least one mesh always runs).
+        self._mesh_memory_estimates = self._estimate_mesh_memory(
+            tiles, custom_build_dir)
+        self._mesh_memory_budget = mesh_memory_budget_gigabytes()
+        self._mesh_memory_in_use = 0.0
+        self._meshing_tiles: set = set()
+        self._lock = threading.Lock()
+        self._children: list = []
+        self._next_child_index = 0
+        self._done = 0
+        self._errors = 0
+        self._cancel_all = False
+        self._finished = False
+        self._t0 = time.time()
+        # OpenStreetMap cache warmer state (spec §3.7): the tile whose
+        # caches are being downloaded right now (assignment waits for
+        # it), and the tiles already warmed.
+        self._warming_tile = None
+        self._warmed_tiles: set = set()
+        # Per-tile progress high-water marks: the legacy in-step bars
+        # oscillate within a step (they refill per OpenStreetMap layer,
+        # per download phase, ...), which the historic single-bar view
+        # hid but a per-tile bar shows as jumping.  The forwarder
+        # ratchets: a tile's displayed percent only ever advances.
+        self._percent_high_water: dict = {}
+
+    # -- lifecycle -----------------------------------------------------
+    def start(self):
+        """Spawn the slot pool and dispatch the first steps.
+
+        The FIRST child is the canary: if it cannot be spawned, the whole
+        parallel mode is declared unavailable and the session falls back
+        to the in-process worker (spec §3.2).  Later spawn failures just
+        shrink the pool.
+        """
+        if not self._program:
+            return False
+        first = self._spawn_child()
+        if first is None:
+            return False
+        for _ in range(self._slots - 1):
+            if not self._queue:
+                break
+            if self._spawn_child() is None:
+                print("Fewer build workers than requested could be "
+                      "started; continuing with", len(self._children))
+                break
+        with self._lock:
+            self._dispatch_locked()
+        threading.Thread(target=self._osm_cache_warmer, daemon=True).start()
+        threading.Thread(target=self._ticker, daemon=True).start()
+        # A cancel that landed during the handshake window may have
+        # drained the queue already; settle immediately in that case.
+        self._maybe_finish()
+        return True
+
+    def _spawn_child(self):
+        """Spawn one worker (blocks on the handshake; never called while
+        holding the scheduler lock — a slow spawn must not block
+        cancellation or event routing)."""
+        with self._lock:
+            child = _WorkerChild(self, self._next_child_index)
+            self._next_child_index += 1
+        if not child.spawn():
+            return None
+        with self._lock:
+            self._children.append(child)
+        return child
+
+    # -- the dispatcher (spec §3.8) --------------------------------------
+    def _dispatch_locked(self):
+        """Start every step that capacity allows (caller holds the lock).
+
+        Blocked children first, finish-first (later steps before earlier
+        ones), then idle children pick up new tiles from the queue.
+        """
+        if self._finished or self._cancel_all:
+            return
+        blocked = sorted(
+            (child for child in self._children
+             if child.tile is not None and child.running_step is None
+             and not child.retired and not child.cancelling),
+            key=lambda child: -self._next_step_index.get(child.tile, 0),
+        )
+        for child in blocked:
+            self._try_start_step_locked(child)
+        for child in list(self._children):
+            if (child.tile is None and not child.retired
+                    and not child.cancelling):
+                self._start_new_tile_locked(child)
+
+    @staticmethod
+    def _estimate_mesh_memory(tiles, custom_build_dir):
+        """Per-tile mesh memory estimates from the tiles' configurations.
+
+        Reads each tile's ``elevation_level`` (per-tile config file, or
+        the default when absent); any failure degrades to the default
+        estimate — scheduling must never fail on a config hiccup.
+        """
+        estimates = {}
+        for tile in tiles:
+            level_value = None
+            try:
+                import O4_Settings_Model as SETTINGS_MODEL
+
+                raw = SETTINGS_MODEL.read_tile_raw(
+                    tile[0], tile[1], custom_build_dir)
+                level_value = (raw or {}).get("elevation_level")
+                if level_value is None:
+                    # Sparse tile configs (blended model) omit inherited
+                    # settings: the tile builds with the GLOBAL value.
+                    level_value = SETTINGS_MODEL.global_effective_value(
+                        "elevation_level")
+            except Exception:
+                level_value = None
+            estimates[tile] = mesh_memory_estimate_gigabytes(level_value)
+        return estimates
+
+    def _mesh_memory_admits_locked(self, tile):
+        """True when the tile's mesh step fits the memory budget now.
+
+        One mesh is always admitted (a single tile must never deadlock,
+        however big its raster); beyond that, the sum of running
+        estimates stays within the budget.
+        """
+        if not self._meshing_tiles:
+            return True
+        estimate = self._mesh_memory_estimates.get(
+            tile, MESH_MEMORY_DEFAULT_GB)
+        return (self._mesh_memory_in_use + estimate
+                <= self._mesh_memory_budget)
+
+    def _try_start_step_locked(self, child):
+        """Dispatch the child's tile's next step if its class has room
+        (and, for mesh steps, the memory budget admits it)."""
+        step_index = self._next_step_index.get(child.tile, 0)
+        step_key = self._program[step_index]
+        step_class = STEP_CLASSES.get(step_key, "compute")
+        if self._class_active[step_class] >= self._class_limits[step_class]:
+            return False
+        if step_key == "mesh" and not self._mesh_memory_admits_locked(
+                child.tile):
+            return False
+        if child.start_step(step_key, self._build_arguments):
+            self._class_active[step_class] += 1
+            if step_key == "mesh":
+                self._meshing_tiles.add(child.tile)
+                self._mesh_memory_in_use += self._mesh_memory_estimates.get(
+                    child.tile, MESH_MEMORY_DEFAULT_GB)
+            return True
+        return False
+
+    def _release_step_resources_locked(self, child):
+        """Return a finished/aborted step's class and memory budget."""
+        step_key = child.running_step
+        if step_key is None:
+            return
+        step_class = STEP_CLASSES.get(step_key, "compute")
+        self._class_active[step_class] = max(
+            0, self._class_active[step_class] - 1)
+        if step_key == "mesh" and child.tile in self._meshing_tiles:
+            self._meshing_tiles.discard(child.tile)
+            self._mesh_memory_in_use = max(
+                0.0,
+                self._mesh_memory_in_use - self._mesh_memory_estimates.get(
+                    child.tile, MESH_MEMORY_DEFAULT_GB))
+        child.running_step = None
+
+    def _start_new_tile_locked(self, child):
+        """Hand an idle child a queued tile whose first step has room.
+
+        A tile whose OpenStreetMap caches are being warmed RIGHT NOW is
+        skipped (never assigned mid-warm — the no-race guarantee of spec
+        §3.7); the warmer re-dispatches the moment it finishes a tile.
+        """
+        tile = next(
+            (t for t in self._queue if t != self._warming_tile), None
+        )
+        if tile is None:
+            return False
+        first_class = STEP_CLASSES.get(self._program[0], "compute")
+        if self._class_active[first_class] >= self._class_limits[
+                first_class]:
+            return False
+        self._queue.remove(tile)
+        child.tile = tile
+        child.step_failed = False
+        self._next_step_index[tile] = 0
+        if not self._try_start_step_locked(child):
+            # Dead pipe: put the tile back for another child; the exit
+            # path cleans the child up.
+            child.tile = None
+            self._queue.appendleft(tile)
+            return False
+        return True
+
+    # -- cancellation ----------------------------------------------------
+    def cancel_tile(self, tile):
+        emit_stopped = False
+        with self._lock:
+            if tile in self._queue:
+                self._queue.remove(tile)
+                emit_stopped = True
+                accepted = True
+            else:
+                accepted = False
+                for child in self._children:
+                    if child.tile != tile or child.retired:
+                        continue
+                    if child.running_step is None:
+                        # Between steps: no child cancel needed at all —
+                        # stop dispatching and report stopped (spec §3.8);
+                        # the child stays clean and reusable.
+                        child.tile = None
+                        self._next_step_index.pop(tile, None)
+                        self._percent_high_water.pop(tile, None)
+                        emit_stopped = True
+                        accepted = True
+                        self._dispatch_locked()
+                    else:
+                        child.cancelling = True
+                        accepted = child.send({"cmd": "cancel"})
+                    break
+        if emit_stopped:
+            self._session._emit(TileState(lat=tile[0], lon=tile[1],
+                                          state="queued", label="stopped"))
+            self._maybe_finish()
+        return accepted
+
+    def cancel_all(self):
+        with self._lock:
+            self._cancel_all = True
+            drained = list(self._queue)
+            self._queue.clear()
+            waiting = []
+            for child in self._children:
+                if child.retired or child.tile is None:
+                    continue
+                if child.running_step is None:
+                    waiting.append(child.tile)
+                    child.tile = None
+                else:
+                    child.cancelling = True
+                    child.send({"cmd": "cancel"})
+        for tile in drained + waiting:
+            self._session._emit(TileState(lat=tile[0], lon=tile[1],
+                                          state="queued", label="stopped"))
+        self._maybe_finish()
+
+    def shutdown_workers(self):
+        """Hard-stop every worker child because the front end is exiting.
+
+        ``cancel_all`` is the graceful in-run stop (children finish their
+        current step before retiring); this is the application going away
+        NOW.  Each child gets its stdin closed (end-of-file) AND a
+        terminate signal — its transport turns both into a red-flagged,
+        bounded wind-down (jsonl.serve owns_process mode) — so no worker
+        can outlive the front end and keep building headless.  Never
+        blocks the caller.
+        """
+        with self._lock:
+            self._cancel_all = True
+            self._queue.clear()
+            children = list(self._children)
+        for child in children:
+            child.retire()
+            child.terminate()
+
+    # -- child callbacks (reader threads) --------------------------------
+    def _on_child_event(self, child, payload):
+        event_name = payload.get("event")
+        if event_name == "RunDone":
+            self._child_step_done(child)
+            return
+        if event_name == "Error" and payload.get("fatal"):
+            # A fatal child error ends that CHILD, never the parent
+            # session; the crash path in _on_child_exit accounts for it.
+            print("[worker %d] fatal: %s"
+                  % (child.index, payload.get("text", "")))
+            return
+        if event_name not in _FORWARDED_EVENT_TYPES:
+            return
+        event = _rebuild_event(payload)
+        if event is None:
+            return
+        tile = child.tile
+        step_index = self._next_step_index.get(tile, 0)
+        last_step = step_index >= len(self._program) - 1
+        if event_name == "BuildDone":
+            if event.ok and not last_step:
+                # Intermediate step completion: a scheduling signal, not
+                # a tile terminal — swallowed (spec §3.8).
+                return
+            with self._lock:
+                if event.ok:
+                    self._done += 1
+                else:
+                    child.step_failed = True
+                    self._errors += 1
+        elif event_name == "TileState":
+            if event.state == "done" and not last_step:
+                return
+        elif event_name == "StepProgress" and tile is not None:
+            # Remap the child's single-step percent window into the
+            # tile's full-plan window so views see whole-tile percent,
+            # then ratchet against the tile's high-water mark: the
+            # legacy bars oscillate within a step, and a per-tile bar
+            # must fill smoothly, never slide back (each tile has one
+            # child, so the per-key update is single-writer).
+            base, width = self._step_windows.get(
+                event.step_key, (0.0, 1.0))
+            remapped = min(
+                100.0, (base + width * event.percent / 100.0) * 100.0)
+            remapped = max(
+                remapped, self._percent_high_water.get(tile, 0.0))
+            self._percent_high_water[tile] = remapped
+            event = dataclasses.replace(event, percent=remapped)
+        if event_name in ("AutoPatchBegin", "AutoPatchProgress"):
+            if tile is not None and (event.lat, event.lon) == (0, 0):
+                event = dataclasses.replace(event, lat=tile[0], lon=tile[1])
+        self._session._emit(event)
+
+    def _child_step_done(self, child):
+        """The child finished (or aborted) one single-step build."""
+        respawn = False
+        with self._lock:
+            self._release_step_resources_locked(child)
+            if child.cancelling:
+                # Spec §3.4: never reuse a red-flagged interpreter.
+                self._next_step_index.pop(child.tile, None)
+                self._percent_high_water.pop(child.tile, None)
+                child.tile = None
+                child.retire()
+                respawn = bool(self._queue) and not self._cancel_all
+            elif child.step_failed:
+                # The failure was forwarded at BuildDone time; abort the
+                # tile's remaining steps.
+                self._next_step_index.pop(child.tile, None)
+                self._percent_high_water.pop(child.tile, None)
+                child.tile = None
+                child.step_failed = False
+            elif child.tile is not None:
+                self._next_step_index[child.tile] = (
+                    self._next_step_index.get(child.tile, 0) + 1)
+                if self._next_step_index[child.tile] >= len(self._program):
+                    # Tile complete (its final BuildDone was forwarded).
+                    self._next_step_index.pop(child.tile, None)
+                    self._percent_high_water.pop(child.tile, None)
+                    child.tile = None
+            self._dispatch_locked()
+        if respawn:
+            replacement = self._spawn_child()
+            if replacement is not None:
+                with self._lock:
+                    self._dispatch_locked()
+        self._maybe_finish()
+
+    def _on_child_exit(self, child):
+        """The child's stdout closed: normal retirement or a crash."""
+        crashed_tile = None
+        respawn = False
+        with self._lock:
+            if child in self._children:
+                self._children.remove(child)
+            self._release_step_resources_locked(child)
+            if child.tile is not None and not child.retired:
+                crashed_tile = child.tile
+                self._next_step_index.pop(child.tile, None)
+                self._percent_high_water.pop(child.tile, None)
+                child.tile = None
+                self._errors += 1
+                respawn = bool(self._queue) and not self._cancel_all
+            self._dispatch_locked()
+        if crashed_tile is not None:
+            lat, lon = crashed_tile
+            self._session._emit(TileState(lat=lat, lon=lon, state="error",
+                                          label="failed"))
+            self._session._emit(BuildDone(
+                lat=lat, lon=lon, ok=False,
+                error="build worker exited unexpectedly"))
+            print("Build worker for", _short_latlon(crashed_tile),
+                  "exited unexpectedly; its tile is marked failed.")
+        if respawn:
+            replacement = self._spawn_child()
+            if replacement is not None:
+                with self._lock:
+                    self._dispatch_locked()
+        self._maybe_finish()
+
+    # -- OpenStreetMap cache warmer (spec §3.7) ---------------------------
+    def _osm_cache_warmer(self):
+        """Pre-download queued tiles' OpenStreetMap layer caches.
+
+        One tile at a time, one Overpass request at a time — combined
+        with the network class cap, the server sees a bounded, polite
+        request profile however many tiles are queued.  Only UNASSIGNED
+        tiles are touched, and assignment skips the tile being warmed
+        (_start_new_tile_locked), so the warmer can never race a worker
+        child on the same cache files.  Failures are per-tile and
+        non-fatal: the child simply downloads for itself, exactly as
+        without a warmer.
+
+        ``O4_DISABLE_OSM_WARMER`` in the environment disables the warmer
+        entirely (the automated test suite sets it globally so no test
+        can reach the network; real runs never set it).
+        """
+        if os.environ.get("O4_DISABLE_OSM_WARMER"):
+            return
+        try:
+            import O4_Config_Utils as CFG
+            import O4_OSM_Utils as OSM
+            import O4_Vector_Map as VMAP
+        except Exception as error:
+            print("OpenStreetMap cache warmer unavailable:", error)
+            return
+        while True:
+            with self._lock:
+                if self._finished or self._cancel_all:
+                    return
+                tile = next(
+                    (t for t in self._queue if t not in self._warmed_tiles),
+                    None,
+                )
+                if tile is None:
+                    return
+                self._warming_tile = tile
+            try:
+                tile_configuration = CFG.Tile(
+                    tile[0], tile[1],
+                    self._build_arguments["custom_build_dir"])
+                tile_configuration.read_from_config()
+                specifications = VMAP.osm_layer_warm_specifications(
+                    tile_configuration)
+                warmed_layers = 0
+                for (cached_suffix, queries, tags_of_interest,
+                        node_tags_of_interest,
+                        cache_schema) in specifications:
+                    with self._lock:
+                        still_queued = tile in self._queue
+                        stopping = self._finished or self._cancel_all
+                    if stopping or not still_queued:
+                        break
+                    OSM.OSM_queries_to_OSM_layer(
+                        queries,
+                        OSM.OSM_layer(),
+                        tile[0],
+                        tile[1],
+                        tags_of_interest,
+                        cached_suffix=cached_suffix,
+                        node_tags_of_interest=node_tags_of_interest,
+                        cache_schema=cache_schema,
+                    )
+                    warmed_layers += 1
+                if warmed_layers:
+                    print("[warm] OpenStreetMap cache ready for",
+                          _short_latlon(tile),
+                          "(%d layer(s))" % warmed_layers)
+            except Exception as error:
+                print("[warm] OpenStreetMap warm failed for",
+                      _short_latlon(tile), ":", error,
+                      "- its build will download for itself.")
+            with self._lock:
+                self._warming_tile = None
+                self._warmed_tiles.add(tile)
+                self._dispatch_locked()
+            self._maybe_finish()
+
+    # -- run end ----------------------------------------------------------
+    def _maybe_finish(self):
+        with self._lock:
+            if self._finished:
+                return
+            busy = any(
+                child.tile is not None
+                for child in self._children
+                if not child.retired
+            )
+            if self._queue or busy:
+                return
+            self._finished = True
+            children = list(self._children)
+            done, errors = self._done, self._errors
+            cancelled = self._cancel_all
+        for child in children:
+            child.retire()
+        deadline = time.time() + 5.0
+        for child in children:
+            try:
+                child.process.wait(timeout=max(0.1, deadline - time.time()))
+            except Exception:
+                child.terminate()
+        self._session._run_finished()
+        self._session._emit(RunDone(done_count=done, error_count=errors,
+                                    cancelled=cancelled))
+
+    def _ticker(self):
+        """Run-level clock: elapsed + an honest dash (spec §3.3)."""
+        while True:
+            with self._lock:
+                if self._finished:
+                    return
+                completed = self._done + self._errors
+            self._session._emit(RunEta(
+                elapsed_seconds=time.time() - self._t0,
+                remaining_seconds=None,
+                done_tiles=completed,
+                total_tiles=self._total))
+            time.sleep(1.0)
