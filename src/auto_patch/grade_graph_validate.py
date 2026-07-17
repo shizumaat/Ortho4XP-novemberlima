@@ -241,7 +241,8 @@ def _spine_runway_join_violations(layout, noise):
     from auto_patch.pavement.runways import _sample_runway_segment_elev
     import os as _os
     from auto_patch.grade_law import (
-        RUNWAY_CONTACT_M, RUNWAY_JOIN_NEAR_M, runway_join_contact)
+        RUNWAY_CONTACT_M, RUNWAY_JOIN_COINCIDENT_TOL_M,
+        RUNWAY_JOIN_NEAR_M, runway_join_contact)
     _CONTACT_M = RUNWAY_CONTACT_M
     _NEAR_M = RUNWAY_JOIN_NEAR_M
     _edge_contact = _os.environ.get("O4_RUNWAY_EDGE_CONTACT", "1") == "1"
@@ -253,10 +254,22 @@ def _spine_runway_join_violations(layout, noise):
     # 2026-06-26: a marginal ~U11/14L-32R join was mis-flagged on the crossing).
     _RUNWAY_SURFACE = (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING)
 
+    # ANCHOR TARGET SET — LOCKSTEP with ``grade_graph._runway_anchors``
+    # (user 2026-07-16, KBNA 13/31 defect H): the solver anchors joins
+    # against runways AND runway-crossing slabs (the slab replaced the
+    # runway surface at an intersection), gate O4_RUNWAY_CROSSING_ANCHOR.
+    # The validator must resolve each contact against the SAME target set
+    # or it samples a t-clamped runway piece where the join actually
+    # terminates on the slab (KBNA 31 threshold: a 0.23 m phantom step
+    # vs the extrapolated piece while the join sat flush on the slab).
+    _crossing_target = _os.environ.get(
+        "O4_RUNWAY_CROSSING_ANCHOR", "1") == "1"
+    _target_roles = ((ROLE_RUNWAY, ROLE_RUNWAY_CROSSING)
+                     if _crossing_target else (ROLE_RUNWAY,))
     runways = [s for s in layout.shapes
-               if s.role == ROLE_RUNWAY and s.polygon is not None
+               if s.role in _target_roles and s.polygon is not None
                and not s.polygon.is_empty]
-    if not runways:
+    if not any(s.role == ROLE_RUNWAY for s in runways):
         return []
     # emitted taxiway / junction nodes (the spine side of the join).
     nx, ny, ne = [], [], []
@@ -311,9 +324,20 @@ def _spine_runway_join_violations(layout, noise):
             if best_e is None:
                 continue
             d = math.sqrt(best_d2)
-            if d < 1e-6:
-                continue
             de = abs(re - best_e)
+            if d < 1e-6:
+                # COINCIDENT pair (user ruling 2026-07-16): the join
+                # vertex IS the contact — it must sit AT the crowned
+                # runway edge value (``re``, sampled from the emitted —
+                # crowned — runway ring).  This class was previously
+                # SKIPPED, hiding joins anchored at the centerline
+                # profile while the edge crowned 0.24-0.31 m lower
+                # (KBNA 13/31).  Reported with the step in the pct slot
+                # per metre of tolerance so the worst joins sort first.
+                if de > RUNWAY_JOIN_COINCIDENT_TOL_M:
+                    out.append((de * 100.0, cap * 100.0, d,
+                                "runway_join", True, cx, cy))
+                continue
             if de > cap * d + noise:
                 out.append(((de / d) * 100.0, cap * 100.0, d, "runway_join",
                             True, cx, cy))

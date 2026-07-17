@@ -256,7 +256,9 @@ def _crossing_dome_drop(x, y, axes):
 
 
 def build_crown_drop_field(layout, nodes, bucket_to_idx,
-                           freeze_idx) -> Dict[int, float]:
+                           freeze_idx,
+                           join_anchor_samples: Optional[dict] = None,
+                           elev=None) -> Dict[int, float]:
     """Compute the per-node crown drop ``c`` (metres, > 0).  Returns
     ``{node_idx: drop}`` (the writeback transform set) and persists:
 
@@ -292,7 +294,29 @@ def build_crown_drop_field(layout, nodes, bucket_to_idx,
     influence zone takes the drainage-dome drop (``_crossing_dome_drop``)
     instead of the uniform per-ref value — 0 on both centerlines, tapering to
     the min member half-width in the quadrants — so the two ridges cross at
-    profile level and the edges blend smoothly."""
+    profile level and the edges blend smoothly.
+
+    RUNWAY-JOIN ANCHORED nodes (``join_anchor_samples``, user ruling
+    2026-07-16: taxi joins anchor to the RUNWAY EDGE value — the crowned
+    edge — never the centerline/crown profile): ``{node_idx: (sample_x,
+    sample_y, runway_shape)}`` from ``grade_graph.UnifiedGraph.
+    runway_anchor_sample``.  Such a node carries the anchored runway
+    value (uncrowned space) through the solve, so its writeback drop is
+    what places the emitted join AT the crowned edge.  The drop is
+    VALUE-DERIVED (the extend_field_to_new_ring_nodes model): the
+    anchor shape's EMITTED edge is re-sampled at the exact anchor sample
+    point — per ring vertex ``solved value − field drop``, the same
+    interpolation the anchor value itself came from — and the join drop
+    is ``anchor value − emitted edge``, so the join lands on the edge in
+    EVERY regime (uniform drop, crossing dome blend, seam taper, flexed
+    or crossing-reconciled ring values; a per-ref re-derivation measured
+    0.15-0.23 m wrong where the anchor sampled a threshold-band or
+    slab-deviated ring at KBNA 31).  The assignment is AUTHORITATIVE:
+    it overrides any earlier freeze / shadow / family verdict for the
+    node, and the rect equalize below leaves it alone (KBNA 13/31:
+    joins that missed the drop — shadow gaps, rect-equalize pops,
+    frozen co-owners — emitted 0.24-0.31 m proud of the crowned edge).
+    Seam-bucket nodes stay uncrowned (cross-tile contracts)."""
     cps = getattr(layout, "canonical_points", None)
     if cps is None or not ENABLE_SPINE_CROWN:
         layout._crown_drop_key = {}
@@ -540,6 +564,86 @@ def build_crown_drop_field(layout, nodes, bucket_to_idx,
             continue
         _register(key, idx, min(drops))
 
+    # RUNWAY-JOIN ANCHORED nodes — authoritative (see the docstring):
+    # the emitted join must land ON the anchor shape's EMITTED edge at
+    # the anchor sample point.  Drop = anchor value − emitted edge,
+    # where the emitted edge is the shape's ring re-sampled with
+    # per-vertex ``solved value − field drop`` (the value-derived model).
+    # Runs AFTER the ownership passes (it overrides their verdicts for
+    # these nodes) and BEFORE the rect equalize (which treats these
+    # keys like runway-owned corners).
+    join_keys: set = set()
+    if join_anchor_samples and elev is not None:
+        from types import SimpleNamespace
+        from .pavement.runways import _sample_runway_segment_elev
+
+        def _emitted_edge_sample(shape, sx, sy):
+            """The shape's post-writeback edge value at ``(sx, sy)``:
+            per ring vertex ``elev[idx] − drop`` (falling back to the
+            shape's own node_altitudes off-graph), interpolated by the
+            SAME sampler that produced the anchor value."""
+            if shape is None or shape.polygon is None \
+                    or shape.polygon.is_empty:
+                return None, 0.0
+            try:
+                ring = list(shape.polygon.exterior.coords)
+            except _GEOM_EXC:
+                return None, 0.0
+            alts = list(getattr(shape, "node_altitudes", None) or ())
+            emitted: List[Optional[float]] = []
+            max_drop = 0.0
+            for k, (x, y) in enumerate(ring):
+                key = cps.get_or_add(float(x), float(y))
+                idx = bucket_to_idx.get(key)
+                if idx is not None and idx < len(elev):
+                    v = float(elev[idx])
+                elif k < len(alts) and alts[k] is not None:
+                    v = float(alts[k])
+                else:
+                    return None, 0.0
+                c = drop_by_key.get(key, 0.0)
+                max_drop = max(max_drop, c)
+                emitted.append(v - c)
+            shim = SimpleNamespace(
+                polygon=shape.polygon, node_altitudes=emitted,
+                altitude=None, altitude_high=None, altitude_low=None)
+            try:
+                s_val = _sample_runway_segment_elev(shim, sx, sy)
+            except _GEOM_EXC:                       # pragma: no cover
+                return None, 0.0
+            return (float(s_val) if s_val is not None else None), max_drop
+
+        for j_idx, sample in join_anchor_samples.items():
+            try:
+                sx, sy, j_shape = sample
+            except (TypeError, ValueError):
+                continue
+            j_idx = int(j_idx)
+            if j_idx < 0 or j_idx >= min(len(nodes), len(elev)):
+                continue
+            jx, jy = nodes[j_idx]
+            if vertex_bucket(float(jx), float(jy)) in seam_keys:
+                continue
+            edge_v, ring_max_drop = _emitted_edge_sample(j_shape, sx, sy)
+            if edge_v is None:
+                continue
+            key = cps.get_or_add(float(jx), float(jy))
+            join_keys.add(key)
+            # negative (anchor below the emitted edge) never crowns —
+            # the field is a drop; cap at the ring's own maximum drop
+            # plus slack (the extend_field_to_new_ring_nodes bound).
+            c = round(min(max(0.0, float(elev[j_idx]) - edge_v),
+                          ring_max_drop + 0.05), 3)
+            if c > 0.005:
+                drop_by_idx[j_idx] = c
+                drop_by_key[key] = c
+            else:
+                # the anchor already sits at (or below) the emitted
+                # edge: the join carries NO drop — clear any earlier
+                # shadow/family value so it emits the anchor verbatim.
+                drop_by_idx.pop(j_idx, None)
+                drop_by_key.pop(key, None)
+
     # Equalize over each crown-family RECT ring (and thereby its
     # level-coupled flat ends): a rect emits as a tilted PLANE whose axial
     # grade may sit exactly at cap (flex law: taxi at max cap first) — a
@@ -556,7 +660,10 @@ def build_crown_drop_field(layout, nodes, bucket_to_idx,
         except _GEOM_EXC:
             continue
         keys = [cps.get_or_add(float(x), float(y)) for (x, y) in ring]
-        own_keys = [k for k in keys if k not in rwy_by_key]
+        # join-anchored keys are value contracts at the crowned edge —
+        # the equalize must neither pop nor level them (like runway keys).
+        own_keys = [k for k in keys
+                    if k not in rwy_by_key and k not in join_keys]
         vals = [drop_by_key.get(k) for k in own_keys]
         if not vals:
             continue
@@ -1125,7 +1232,11 @@ def emit_crown_spines(layout, nodes, bucket_to_idx, elev,
             for part in s.ref.split("+"):
                 if part in profiles:
                     xing_by_ref.setdefault(part, []).append(s.polygon)
-    for ref in set(pieces_by_ref) | set(xing_by_ref):
+    # sorted(): the union is a set of STRING refs, and string hashing is
+    # seed-randomized — unsorted iteration emits the per-ref ridge ways in a
+    # PYTHONHASHSEED-dependent order (observed: CYXY/KBNA crown_spine ways
+    # rotating between unpinned runs, breaking byte-identical builds).
+    for ref in sorted(set(pieces_by_ref) | set(xing_by_ref)):
         p = profiles.get(ref)
         # Only crowned runways emit a ridge (crown_drop_m > 0 ⇒ CROWN_RUNWAYS
         # on and the runway actually crowns); a flat runway has no ridge.

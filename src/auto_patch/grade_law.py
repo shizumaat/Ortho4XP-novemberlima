@@ -74,6 +74,14 @@ JUNCTION_ROLES = ("junction", "service_junction")
 #    ``lateral_spine_nodes`` (was three copies of 12 m / 18 m).
 RUNWAY_CONTACT_M = 12.0
 RUNWAY_JOIN_NEAR_M = 18.0
+# COINCIDENT-join tolerance (user ruling 2026-07-16: taxi joins anchor to
+# the RUNWAY EDGE value — the crowned edge — never the centerline/crown
+# profile).  A join vertex that COINCIDES with its runway contact must sit
+# within this of the crowned-edge value; the validator's old ``d < 1e-6``
+# skip hid exactly this class (KBNA 13/31: 0.24-0.31 m steps =
+# RUNWAY_CROWN_TRANSVERSE × half-width, joins left at the profile value).
+# One source for the join validator AND the build-time verify.
+RUNWAY_JOIN_COINCIDENT_TOL_M = 0.05
 
 
 def runway_join_contact(ln, endpoint, rwy_polygon):

@@ -158,6 +158,7 @@ __all__ = [
     "ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT",
     "ADJACENT_GROUND_FULL_EXTENT_COVERAGE",
     "ADJACENT_GROUND_COVERAGE_DEPTH_STEP_M",
+    "ADJACENT_GROUND_ZONE_STATIC_KEEPOUT_M",
     "APRON_SHOULDER_WIDTH_M",
     "APRON_SHOULDER_MIN_DOWN_SLOPE",
     "APRON_SHOULDER_MAX_DOWN_SLOPE",
@@ -699,6 +700,16 @@ SERVICE_ROAD_PAVEMENT_NEAR_M = 25.0    # keep OSM roads within this of aircraft 
 RUNWAY_MAX_GRADE = 0.015        # FAA AC 150/5300-13B runway longitudinal (ARC C-E)
 RUNWAY_END_GRADE = 0.008        # EASA CS-ADR-DSN / ICAO Annex 14, first/last quarter (code 3/4)
 RUNWAY_END_FRACTION = 0.25      # extent of each runway end zone (fraction of length)
+# TIERED end-zone relaxation (user 2026-07-16, KBNA 13/31 defect G): when
+# hard anchors (CIFP thresholds, tile-seam DEM pins) make the 0.8% end-zone
+# preference infeasible, the OUTER part of the end zone escalates toward the
+# 1.5% law — but the immediate THRESHOLD VICINITY stays gentle.  The last
+# ``RUNWAY_THRESHOLD_STRICT_M`` before each threshold holds the strict 0.8%
+# cap (a 0.8% ramp over 90 m costs ≤0.72 m — absorbed deeper in the end zone
+# where the escalated cap applies); it relaxes only when the profile is
+# genuinely infeasible even with the outer end zone fully at the 1.5% law
+# (then the solver WARNs loudly with the achieved threshold-band cap).
+RUNWAY_THRESHOLD_STRICT_M = 90.0
 TUNNEL_RAMP_MAX_GRADE = 0.040   # navigable ramp grade for tunnel portals (user 2026-05-08)
 # Skip tunnel-portal ramp emission where the tunnel runs under / alongside
 # OTHER roads (user 2026-06-12, LMML): in a dense road interchange the
@@ -2430,12 +2441,29 @@ ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT = (
 #   * extended clearance charter ON (O4_CLEARANCE_CHARTER — wingtip strips
 #     only; junction/RESA large-area blobs excluded)
 #   * full-extent coverage grid ON  (O4_ADJACENT_GROUND_FULL_EXTENT_COVERAGE)
-# on top of the round-7 slice-B bundle (already ON).  DEFAULT OFF in this
-# delivery — the flip itself lands at round-10 ratification, when Noah
-# sets O4_B4_FLIP=1 here (or flips the three constituent defaults).  With
-# the switch OFF every constituent keeps its pre-B4 default, so the
-# delivery is byte-identical to the pre-switch tree.
-B4_FLIP_DEFAULTS = (_os.environ.get("O4_B4_FLIP", "0") == "1")
+# on top of the round-7 slice-B bundle (already ON).  DEFAULT ON since
+# 2026-07-15.  History: the 2026-07-15 KBNA perf round's first flip
+# attempt was REVERTED — constituent bisection found two grade-law
+# blockers the CYXY-only flip-gate bake (staged 2026-07-11) missed on
+# post-KBNA-round-4 dev:
+#   1. coverage grid ⇒ SPJC runway 16L/34R 8.60 % longitudinal spike: a
+#      grid zone-row point 0.49 m off the runway edge became a solver
+#      variable and interned onto the runway ring through the canonical
+#      registry's 0.5 m radius.  Fixed by the zone-node static keep-out
+#      (``ADJACENT_GROUND_ZONE_STATIC_KEEPOUT_M``, adjacent_ground
+#      ``_split_zone_rows_off_static``).
+#   2. legacy deletion ⇒ CYXY 4 junction spine violations (worst 11 %):
+#      band clip vertices ON a foreign pavement edge took zone-row values
+#      instead of that pavement's solved edge value, and the final weld
+#      stamped them into the junction rings — sites the legacy clearance
+#      strips used to occupy.  Fixed by the static-edge value weld in the
+#      band resampler plus the post-weld crown field completion
+#      (pipeline; band-minted ring vertices previously read crown drop 0,
+#      so the validator measured pairs against the wrong crown target).
+# With both mechanisms fixed the flip battery (test_pavement_grade,
+# test_single_graph_acceptance, test_route_reach at SPJC/CYXY/HECA/SPLP)
+# matches the pre-flip baseline failure set.
+B4_FLIP_DEFAULTS = (_os.environ.get("O4_B4_FLIP", "1") == "1")
 ADJACENT_GROUND_FULL_EXTENT_COVERAGE = (
     _os.environ.get("O4_ADJACENT_GROUND_FULL_EXTENT_COVERAGE", "0") == "1")
 # B4 review switch flips this default ON under the bundle.  Applied as a
@@ -2454,6 +2482,19 @@ if (B4_FLIP_DEFAULTS
 # airports (KBNA).  Byte-inert unless the coverage gate is ON.
 ADJACENT_GROUND_COVERAGE_DEPTH_STEP_M = float(
     _os.environ.get("O4_ADJACENT_GROUND_COVERAGE_DEPTH_STEP_M", "25.0"))
+# Zone-node static keep-out (B4 flip defect 1, 2026-07-15).  A band-corridor
+# zone-row point that lands ON or NEXT TO static pavement must never become a
+# solver variable: the band footprint is clipped away there, its DEM-clamped
+# value is meaningless under pavement, and — the measured defect — a point
+# within the canonical-point registry's 0.5 m merge radius of a pavement
+# ring vertex INTERNS onto that vertex's bucket, stamping the zone value
+# onto the pavement ring (SPJC 16L/34R: a depth-50 m grid row point 0.49 m
+# off the runway edge wrote 27.76 into the runway profile — an 8.6 %
+# longitudinal spike).  Zone points inside pavement, or within this margin
+# of any static-shape boundary, are dropped at construction (the margin
+# clears the 0.5 m registry radius with headroom).
+ADJACENT_GROUND_ZONE_STATIC_KEEPOUT_M = float(
+    _os.environ.get("O4_ADJACENT_GROUND_ZONE_STATIC_KEEPOUT_M", "0.75"))
 
 # APRON edges.  NO code mandates grading beyond an apron edge (positive
 # research finding): the only governed band is the FAA-RECOMMENDED

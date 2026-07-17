@@ -2554,6 +2554,120 @@ def check_epsilon_wedges(layout,
     return out
 
 
+# Airside pavement roles the mid-edge STEP gate governs.  A step between two
+# of these within 2 m that exceeds the tolerance is a bug (the runway-crossing
+# wedge class).  Everything else — groundside, clearances, and the designed
+# vertical storeys (retaining_wall, bridge_causeway/deck welds, bridge_trench
+# corridors + tunnel portals, tunnel_ramp) — is EXCLUDED: those roles either
+# carry a None grade cap (already skipped by check_grade) or are groundside
+# (wall-separated by design), so a height step across them is lawful.
+_MIDEDGE_AIRSIDE_ROLES = frozenset({
+    "runway", "runway_crossing", "primary_parallel", "secondary_parallel",
+    "stub", "cross_connector", "apron", "junction", "terminal",
+})
+# Refs that mark a designed vertical storey even when a numeric-cap role tag
+# leaks through (belt-and-suspenders on top of the role gate above).
+_MIDEDGE_EXCLUDE_REFS = frozenset({
+    "object_bridge_corridor", "object_bridge_causeway",
+    "object_bridge_deck_weld", "object_bridge_approach", "tunnel_wall",
+    "tunnel_ramp", "object_tunnel_portal_collar",
+    "object_tunnel_portal_crown", "object_tunnel_portal_mouth",
+})
+
+# Mid-edge STEP gate thresholds.  "Airside shape pair within 2 m; a
+# vertex-to-opposing-edge altitude step above 2.5 m is an ERROR."  The 2 m
+# contact tolerance (vs check_grade's default 1 m) is deliberate: the KBNA
+# 02L/20R+13/31 wedge put a 174.1 m crossing vertex 1.18 m from the 165.5 m
+# runway edge — a 1 m gate misses it.
+_MIDEDGE_CONTACT_TOL_M = 2.0
+_MIDEDGE_STEP_TOL_M = 2.5
+
+
+def check_midedge_step(layout):
+    """MID-EDGE STEP gate — the blind-spot closure for the runway-crossing
+    wedge class.
+
+    For every AIRSIDE shape pair within ``_MIDEDGE_CONTACT_TOL_M``, project
+    each shape's vertices (and interior edge samples) onto the neighbour's
+    edge and flag any elevation step above ``_MIDEDGE_STEP_TOL_M``.  Reuses
+    ``tools/check_grade`` for parsing AND for the projection logic
+    (``_check_vertex_to_edge_step`` / ``_check_edge_midpoint_step``, called
+    with the airside pair predicate + the wider 2 m touch tolerance) — no
+    duplicated geometry.  Designed vertical storeys (retaining walls, bridge
+    plates/causeways/deck welds, bridge-trench corridors + tunnel portals,
+    tunnel ramps) are excluded via the airside-role gate and the ref list.
+
+    Returns ``[(step_m, ref_v, ref_e, "lat,lon"), …]`` worst first — one row
+    per over-tolerance mid-edge step."""
+    check_grade = _import_check_grade()
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "verify.osm"
+        layout.to_osm(str(out))
+        nodes, ways = check_grade._parse_osm(out)
+    ll_to_m = check_grade._ll_to_m_factory(nodes, anchor=layout.anchor)
+    vertices, edges = check_grade._build_vertex_edge_tables(nodes, ways, ll_to_m)
+
+    def _airside(w) -> bool:
+        role = w.tags.get("role")
+        if role not in _MIDEDGE_AIRSIDE_ROLES:
+            return False
+        return w.tags.get("ref") not in _MIDEDGE_EXCLUDE_REFS
+
+    def _pair_ok(way_v, way_e) -> bool:
+        return _airside(way_v) and _airside(way_e)
+
+    steps = check_grade._check_vertex_to_edge_step(
+        vertices, edges, ways,
+        edge_search_m=_MIDEDGE_CONTACT_TOL_M,
+        edge_step_m=_MIDEDGE_STEP_TOL_M,
+        contact_tol_m=_MIDEDGE_CONTACT_TOL_M, pair_ok=_pair_ok)
+    steps += check_grade._check_edge_midpoint_step(
+        edges, ways,
+        edge_search_m=_MIDEDGE_CONTACT_TOL_M,
+        edge_step_m=_MIDEDGE_STEP_TOL_M,
+        contact_tol_m=_MIDEDGE_CONTACT_TOL_M, pair_ok=_pair_ok)
+
+    # De-duplicate near-coincident findings (a vertex hit + its edge-sample
+    # twin at the same spot) and convert the sample point back to lat/lon.
+    out_rows = []
+    seen = set()
+    for s in steps:
+        vx, vy = s.vert_pt
+        key = (round(vx, 1), round(vy, 1), round(s.step_m, 1))
+        if key in seen:
+            continue
+        seen.add(key)
+        lat, lon = layout.m_to_ll(vx, vy)
+        out_rows.append((s.step_m, s.way_v.tags.get("ref") or s.way_v.role,
+                         s.way_e.tags.get("ref") or s.way_e.role,
+                         f"{lat:.5f},{lon:.5f}"))
+    out_rows.sort(key=lambda r: -r[0])
+    return out_rows
+
+
+def check_runway_join_step(layout):
+    """RUNWAY-JOIN gate (user ruling 2026-07-16): every taxi/junction
+    join vertex anchors to the RUNWAY EDGE value — the crowned edge —
+    never the centerline/crown profile.  Runs the shared in-memory join
+    validator (``grade_graph_validate._spine_runway_join_violations`` —
+    the SAME check the solver's ``_runway_anchors`` mirrors, lockstep),
+    which asserts a COINCIDENT join vertex within
+    ``grade_law.RUNWAY_JOIN_COINCIDENT_TOL_M`` of the crowned-edge value
+    and holds non-coincident pairs to the per-letter grade law.
+
+    Returns ``[(step_or_pct, cap_pct, dist_m, "lat,lon"), …]`` worst
+    first — coincident rows carry the raw step ×100 in the first slot."""
+    from .grade_graph_validate import _spine_runway_join_violations
+    from .config import ELEV_ROUNDING_NOISE_M
+    rows = []
+    for (pct, cap_pct, d, _kind, _sp, x, y) in \
+            _spine_runway_join_violations(layout, ELEV_ROUNDING_NOISE_M):
+        lat, lon = layout.m_to_ll(x, y)
+        rows.append((pct, cap_pct, d, f"{lat:.7f},{lon:.7f}"))
+    rows.sort(key=lambda r: -r[0])
+    return rows
+
+
 def run_grade_checks(layout):
     """Run the grade engine on ``layout``.  Returns ``(within, cross,
     steps)`` with ``.lat`` / ``.lon`` + way labels populated."""
@@ -2588,7 +2702,8 @@ def _verify_debug_lines(layout, icao, taxi_index, gdesc, *,
                         overlaps, source, flat, edge_v, flat_v, axis_v,
                         short_e, wedges, cross, within, steps,
                         rwy_grade, adjacent=(), bridge_pins=(),
-                        bridge_floor=()) -> list:
+                        bridge_floor=(), midedge=(),
+                        join_steps=()) -> list:
     """Build the full per-category diagnostic lines for the verify debug
     log (no 5-item cap — this is for an engineer, not the console)."""
     def ds(idx):
@@ -2613,6 +2728,17 @@ def _verify_debug_lines(layout, icao, taxi_index, gdesc, *,
     for ang, div, ra, rb, loc in sorted(wedges, key=lambda w: w[1]):
         out.append(f"  EPSILON-WEDGE {div * 1000:.3f} mm @ {ang:.4f}° "
                    f"@ {loc}: {ra} ~ {rb}")
+    for step_m, ref_v, ref_e, loc in sorted(midedge, key=lambda r: -r[0]):
+        out.append(f"  MID-EDGE-STEP {step_m:.2f} m airside "
+                   f"(tol {_MIDEDGE_STEP_TOL_M:.1f} m) @ {loc}: "
+                   f"{ref_v} ↔ {ref_e}")
+    for pct, cap_pct, dist, loc in join_steps:
+        if dist < 1e-6:
+            out.append(f"  RUNWAY-JOIN step {pct / 100.0:.2f} m off the "
+                       f"crowned edge at a COINCIDENT join @ {loc}")
+        else:
+            out.append(f"  RUNWAY-JOIN {pct:.1f}% > {cap_pct:.1f}% over "
+                       f"{dist:.1f} m @ {loc}")
     for v in sorted(cross, key=lambda v: -v.de_m):
         loc = f"{v.lat:.5f},{v.lon:.5f}" if v.lat is not None else "?,?"
         out.append(f"  CROSS-SHAPE {v.de_m:.2f} m @ {loc}: "
@@ -2718,6 +2844,24 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None,
         wedges = check_epsilon_wedges(layout)
     except Exception:                              # pragma: no cover
         pass
+    # MID-EDGE STEP gate — the runway-crossing wedge blind-spot closure.
+    # Always on (unlike the O4_VERIFY_OSM_GRADE block below): it is the
+    # only reader that catches an airside vertex-to-opposing-edge step the
+    # within-shape / cross-shape checks miss when the neighbour is ~1-2 m
+    # away.  Never raises.
+    midedge = []
+    try:
+        midedge = check_midedge_step(layout)
+    except Exception:                              # pragma: no cover
+        pass
+    # RUNWAY-JOIN gate (user ruling 2026-07-16) — always on: the join
+    # vertex must sit at the crowned runway edge value; the coincident
+    # class was invisible to every other reader.  Never raises.
+    join_steps = []
+    try:
+        join_steps = check_runway_join_step(layout)
+    except Exception:                              # pragma: no cover
+        pass
     # The OSM-patch grade validation (write the patch to a temp OSM and re-check
     # it with tools/check_grade) is DEBUG-ONLY: once the solver is proven there is
     # no reason to re-validate the shipped patch on every build — the grade test
@@ -2821,8 +2965,16 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None,
               "vertex_on_flat_edge": len(flat_v),
               "axis_tilt": len(axis_v), "short_edge": len(short_e),
               "epsilon_wedge": len(wedges),
+              "midedge_step": len(midedge),
+              "runway_join": len(join_steps),
               "cross": len(cross), "within": len(within),
               "steps": len(steps), "runway_grade": len(rwy_grade)}
+    # Build-time airside-piece drops (shared-vertex weld could not preserve a
+    # >100 m² airside piece; see pavement.vertices._record_airside_drop).  A
+    # healthy build reads ZERO — a non-zero count is a silent-pavement-loss
+    # regression of the KBNA Donelson class (2026-07-16).
+    counts["airside_weld_drop"] = len(
+        getattr(layout, "airside_weld_drops", []) or [])
     if ADJACENT_GROUND_LAW_ENABLED:
         counts["adjacent_ground"] = len(adjacent)
     if OBJECT_BRIDGE_TERRAIN:
@@ -2856,7 +3008,8 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None,
         flat_v=flat_v, axis_v=axis_v, short_e=short_e, wedges=wedges,
         cross=cross, within=within, steps=steps, rwy_grade=rwy_grade,
         adjacent=adjacent, bridge_pins=bridge_pins,
-        bridge_floor=bridge_floor)
+        bridge_floor=bridge_floor, midedge=midedge,
+        join_steps=join_steps)
     _write_verify_debug(debug_log_path, icao, counts, lines)
 
     # User console: one summary line only (suppressed at build verbosity 0);

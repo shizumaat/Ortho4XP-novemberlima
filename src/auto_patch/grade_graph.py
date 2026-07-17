@@ -1350,11 +1350,18 @@ class UnifiedGraph:
     * ``runway_anchor`` — ``{node_idx: local_runway_elev}`` for every geometry
       node a taxi spine joins the runway at (the single hard anchor; the building
       floor yields to it).
+    * ``runway_anchor_sample`` — ``{node_idx: (sample_x, sample_y, shape)}``
+      the exact point (and owning runway/crossing SHAPE) the anchor value was
+      sampled at.  The crown writeback (user ruling 2026-07-16: taxi joins
+      anchor to the RUNWAY EDGE value — the crowned edge, never the
+      centerline/crown profile) re-samples that shape's EMITTED edge at THIS
+      point and assigns the join node the drop that lands it exactly there.
     """
     pos: dict = field(default_factory=dict)
     edges: list = field(default_factory=list)
     spine_adj: dict = field(default_factory=dict)
     runway_anchor: dict = field(default_factory=dict)
+    runway_anchor_sample: dict = field(default_factory=dict)
 
     def spine_edge_set(self):
         """The undirected spine pairs ``{(min(a,b), max(a,b))}`` (is_spine)."""
@@ -1732,7 +1739,7 @@ def _runway_anchors(layout, G, bucket_to_idx):
     taxi centerline joins a runway (mirrors the validator's runway-join check).
     The runway is the single hard anchor; this is what the spine solve pins to."""
     from shapely.geometry import Point
-    from .layout import ROLE_RUNWAY
+    from .layout import ROLE_RUNWAY, ROLE_RUNWAY_CROSSING
     from .pavement.runways import _sample_runway_segment_elev
     from .config import taxi_grade_cap_for_letter
 
@@ -1744,8 +1751,22 @@ def _runway_anchors(layout, G, bucket_to_idx):
         os.environ.get("O4_RUNWAY_CONTACT_ANCHOR", "1") == "1")
     _edge_contact = (
         os.environ.get("O4_RUNWAY_EDGE_CONTACT", "1") == "1")
+    # ANCHOR TARGET SET (user 2026-07-16, KBNA 13/31 defect H): include the
+    # ROLE_RUNWAY_CROSSING slab pieces alongside the true runways.  A taxi /
+    # junction join that TERMINATES on the crossing slab (which replaced the
+    # runway surface where two runways intersect) finds no ROLE_RUNWAY within
+    # RUNWAY_CONTACT_M, so it got no runway anchor and stepped off the slab
+    # edge (KBNA 13/31: junction 376 stepped 0.31 m vs the crossing slab
+    # edge).  The slab is runway-derived surface carrying per-vertex node
+    # altitudes, so ``_sample_runway_segment_elev`` reads its edge value at
+    # the contact exactly as for a runway.  Gate O4_RUNWAY_CROSSING_ANCHOR=0
+    # reverts to true-runway-only targets.
+    _crossing_anchor = (
+        os.environ.get("O4_RUNWAY_CROSSING_ANCHOR", "1") == "1")
+    _anchor_roles = ((ROLE_RUNWAY, ROLE_RUNWAY_CROSSING)
+                     if _crossing_anchor else (ROLE_RUNWAY,))
     runways = [s for s in layout.shapes
-               if s.role == ROLE_RUNWAY and s.polygon is not None
+               if s.role in _anchor_roles and s.polygon is not None
                and not s.polygon.is_empty]
     if not runways:
         return
@@ -1794,6 +1815,7 @@ def _runway_anchors(layout, G, bucket_to_idx):
             re = _sample_runway_segment_elev(rwy, cx, cy)
             if re is None:
                 continue
+            sample_x, sample_y = cx, cy
             contact_endpoints.append((cx, cy))
             # nearest graph node to the contact = the spine node that anchors
             best_i, best_d2 = None, _NEAR_M * _NEAR_M
@@ -1830,12 +1852,15 @@ def _runway_anchors(layout, G, bucket_to_idx):
                         re_node = None
                     if re_node is not None:
                         re = re_node
+                        sample_x, sample_y = q.x, q.y
                 if os.environ.get("O4_DESEG_DEBUG") == "1":
                     _la, _lo = layout.m_to_ll(*G.pos.get(best_i, (cx, cy)))
                     print(f"  [deseg-dbg] runway_anchor node@{_la:.7f},"
                           f"{_lo:.7f} = {float(re):.3f} "
                           f"(contact {cx:.1f},{cy:.1f})")
                 G.runway_anchor[best_i] = float(re)
+                G.runway_anchor_sample[best_i] = (
+                    float(sample_x), float(sample_y), rwy)
 
     # ── SPINE nodes ON a runway edge where a route TERMINATES (user 2026-06-28) ─
     # A taxiway that ENDS at the runway already has its contact materialised as a
@@ -1874,3 +1899,5 @@ def _runway_anchors(layout, G, bucket_to_idx):
                         print(f"  [deseg-dbg] spine-edge anchor "
                               f"node@{_la:.7f},{_lo:.7f} = {float(re):.3f}")
                     G.runway_anchor[i] = float(re)
+                    G.runway_anchor_sample[i] = (
+                        float(x), float(y), s)

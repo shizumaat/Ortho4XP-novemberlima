@@ -318,7 +318,14 @@ def _apply_runway_flex_hook(layout, icao, nodes, bucket_to_idx, elev,
     # flexed runway is the authority at its own edge: re-stamp every
     # coincident vertex on every other shape, and the solver seed.
     flexed_value_by_key: dict = {}
-    for ref in flexed_refs:
+    # sorted(): flexed_refs is a set of STRING runway refs, so its iteration
+    # order is PYTHONHASHSEED-dependent.  Where two flexed runways share a
+    # canonical vertex (crossing runways — their reconciled node_altitudes can
+    # disagree by up to ~2 cm) the LAST writer wins the shared key, so the
+    # winner must be pinned or solved edge altitudes differ run to run
+    # (observed at KBNA: ±1 cm flips at the 13/31×02C crossing cascading into
+    # adjacent-ground band survival).
+    for ref in sorted(flexed_refs):
         for s in layout.shapes:
             if (s.role != ROLE_RUNWAY or (s.ref or "") != ref
                     or s.polygon is None or s.polygon.is_empty
@@ -371,6 +378,7 @@ def _apply_runway_flex_hook(layout, icao, nodes, bucket_to_idx, elev,
             pass
 
     G.runway_anchor.clear()
+    G.runway_anchor_sample.clear()
     _GGf._runway_anchors(layout, G, bucket_to_idx)
 
     try:
@@ -1075,7 +1083,8 @@ def solve_route_profile(layout, icao: str,
             from auto_patch.config import (
                 TAXIWAY_MAX_GRADE_CHANGE_PER_M as _K_GAP_SPINE)
             _n_gap_kink = _fair_gap_spine_chains(
-                elev, _gap_spine_chains, _K_GAP_SPINE)
+                elev, _gap_spine_chains, _K_GAP_SPINE,
+                frozen=base_hard)
             if _os.environ.get("O4_STEP_DEBUG") == "1":
                 print(f"    [gap-spine] fairing residual "
                       f"kinks={_n_gap_kink}")
@@ -1124,8 +1133,27 @@ def solve_route_profile(layout, icao: str,
                     | {i for i, _cat in _hard_cat.items()
                        if _cat in ("seam_spine_anchor", "seat_on_spine",
                                    "gs_pin")})
+                # RUNWAY-JOIN anchored nodes (user ruling 2026-07-16):
+                # they carry the anchored runway value through the
+                # uncrowned solve, so the field assigns each the drop
+                # that lands its emitted value ON the anchor shape's
+                # EMITTED edge at the anchor sample point — the join
+                # anchors to the CROWNED EDGE value, never the
+                # centerline/crown profile.
+                _join_samples = {
+                    i: s for i, s in G.runway_anchor_sample.items()
+                    if i < n and _hard_cat.get(i) == "rwy_join"}
                 _crown_drop_idx = build_crown_drop_field(
-                    layout, nodes, bucket_to_idx, _crown_freeze)
+                    layout, nodes, bucket_to_idx, _crown_freeze,
+                    join_anchor_samples=_join_samples, elev=elev)
+                # Join-gate diagnostics (probes / forensics): the
+                # anchored join nodes with their anchored value, anchor
+                # sample point and assigned writeback drop.
+                layout._runway_join_anchor_debug = [
+                    (float(nodes[i][0]), float(nodes[i][1]),
+                     float(elev[i]), float(_crown_drop_idx.get(i, 0.0)),
+                     float(s[0]), float(s[1]))
+                    for i, s in _join_samples.items()]
                 # solve-time node registry: post-solve ring inserts are
                 # recognised (and field-interpolated) against this set.
                 layout._crown_solved_keys = set(bucket_to_idx)
@@ -1894,6 +1922,21 @@ def final_grade_projection(layout, icao: str = "", dem=None,
 
     hard = {i for i in range(n) if base_hard[i]}
     hard |= {i for i in runway_idx if i < n}
+    # RUNWAY-JOIN anchored nodes (user ruling 2026-07-16: taxi joins
+    # anchor to the RUNWAY EDGE value — the crowned edge): the solve
+    # pinned each join hard at the runway value and the drop field lands
+    # it on the emitted edge; this projection must keep it pinned or a
+    # free join gets dragged off the edge by its uncrowned neighbours
+    # (KBNA 13/31: a gap-spine chain pulled a coincident join 0.22 m
+    # below the crowned edge THROUGH this pass).  ``include_spine=False``
+    # skips the anchor derivation inside build_unified_graph, so derive
+    # them here explicitly — indices are this pass's own node list.
+    try:
+        if not G.runway_anchor:
+            _GG._runway_anchors(layout, G, b2i)
+    except _snapshot_geom_exceptions():            # pragma: no cover
+        pass
+    hard |= {i for i in G.runway_anchor if i < n}
     # tile-seam nodes: terrain-pinned for cross-tile stitching.
     # ``terrain_hard`` tracks the TERRAIN-dictated subset of the hard set
     # (seam pins + agreeing feature welds below): a violated law edge
@@ -2529,7 +2572,7 @@ def _fair_spine_chains(elev, spine_adj, anchors, node_band, nodes_xy,
 
 
 def _fair_gap_spine_chains(elev, chains, k_rate, *, max_sweeps=200,
-                           tol=1e-4):
+                           tol=1e-4, frozen=None):
     """GAP-SPINE longitudinal fairing (Slice B stage B2, ratified
     2026-07-10): the ``_fair_spine_chains`` second-difference law —
     ``|g2 − g1| ≤ k_rate·(L1 + L2)/2`` (``TAXIWAY_MAX_GRADE_CHANGE_
@@ -2543,7 +2586,12 @@ def _fair_gap_spine_chains(elev, chains, k_rate, *, max_sweeps=200,
     (first) parent's own interval — the same composition rule the
     retired analytic valuation used (``gap_fill._spine_interval``).
     Spine ENDPOINTS never move (no triple centres them), matching the
-    analytic smoother's pinned ends.
+    analytic smoother's pinned ends.  ``frozen`` (indexable of bool,
+    e.g. ``base_hard``): HARD nodes never move either — a gap-spine
+    vertex can weld onto a pavement node that is a runway-join anchor
+    (the single hard anchor law: everything yields to it, including
+    this smoother — KBNA 13/31: the fairing dragged an anchored join
+    0.22 m below the crowned runway edge, user ruling 2026-07-16).
 
     ``chains``: ``solver_primitives._build_gap_spine_constraints``
     output — per chain the node indices (``None`` = unmapped, splits
@@ -2608,6 +2656,9 @@ def _fair_gap_spine_chains(elev, chains, k_rate, *, max_sweeps=200,
                     a = idx[run[t - 1]]
                     b = idx[run[t]]
                     d = idx[run[t + 1]]
+                    if frozen is not None and b < len(frozen) \
+                            and frozen[b]:
+                        continue        # hard node (anchor/seed): pinned
                     g1 = (elev[b] - elev[a]) / l1
                     g2 = (elev[d] - elev[b]) / l2
                     dg = g2 - g1

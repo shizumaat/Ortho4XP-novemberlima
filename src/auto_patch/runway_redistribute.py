@@ -63,6 +63,7 @@ import os
 from collections import defaultdict
 from typing import Dict, List, Tuple
 
+from .config import RUNWAY_END_FRACTION, RUNWAY_THRESHOLD_STRICT_M
 from .layout import ROLE_RUNWAY, SHARED_VERTEX_TOL_M
 from .pavement.runway_segments import (
     MAX_RUNWAY_GRADE, MAX_RUNWAY_GRADE_CHANGE_PER_M, RUNWAY_END_GRADE,
@@ -460,10 +461,88 @@ def _worst_segment_over_main_cap(fractions: List[float],
     return worst
 
 
+def _strict_budget_between(s_lo: float, s_hi: float, phys_dist: float) -> float:
+    """Max grade-compliant height change between two stations (metres from
+    threshold A) under the STRICT end-zone preference: 0.8% within the
+    first/last ``RUNWAY_END_FRACTION`` of the length, 1.5% in the interior.
+    Integrates the position-dependent cap over [s_lo, s_hi]."""
+    end_len = RUNWAY_END_FRACTION * phys_dist
+    lo_b, hi_b = end_len, phys_dist - end_len   # cap breakpoints
+    budget = 0.0
+    cursor = s_lo
+    for edge, cap in ((lo_b, RUNWAY_END_GRADE),
+                      (hi_b, MAX_RUNWAY_GRADE),
+                      (phys_dist, RUNWAY_END_GRADE)):
+        if cursor >= s_hi:
+            break
+        seg_hi = min(edge, s_hi)
+        if seg_hi > cursor:
+            budget += (seg_hi - cursor) * cap
+            cursor = seg_hi
+    return budget
+
+
+def _end_zone_binding_report(fractions: List[float], elevs: List[float],
+                             anchored: List[bool], phys_dist: float
+                             ) -> List[str]:
+    """INSTRUMENT-FIRST (user 2026-07-16, KBNA 13/31 defect G): explain
+    WHY the strict 0.8% end-zone preference is infeasible — which HARD
+    anchors bind and by how much.
+
+    Under the strict preference every end-zone segment is capped at
+    ``RUNWAY_END_GRADE`` (0.8%) and the interior at ``MAX_RUNWAY_GRADE``
+    (1.5%).  For every pair of hard anchors (the CIFP thresholds + tile
+    seam / crossing pins — none of which move), the maximum height a
+    grade-compliant profile can span between them is the strict tiered
+    budget over their station separation.  Any pair whose required rise
+    exceeds that budget is a binding constraint; they are reported worst
+    first.  Anchor-derived, so it is the true cause independent of the
+    solve's projection order."""
+    hard = [i for i, a in enumerate(anchored) if a]
+    if len(hard) < 2:
+        return []
+    end_frac = RUNWAY_END_FRACTION
+    binders = []
+    for a in range(len(hard)):
+        for b in range(a + 1, len(hard)):
+            i, j = hard[a], hard[b]
+            s_i = fractions[i] * phys_dist
+            s_j = fractions[j] * phys_dist
+            s_lo, s_hi = min(s_i, s_j), max(s_i, s_j)
+            dist_m = s_hi - s_lo
+            if dist_m < 0.5:
+                continue
+            required = abs(elevs[i] - elevs[j])
+            budget = _strict_budget_between(s_lo, s_hi, phys_dist)
+            deficit = required - budget
+            if deficit > 1e-3:
+                binders.append((deficit, i, j, s_lo, s_hi, dist_m, required,
+                                budget))
+    binders.sort(reverse=True)
+    lines: List[str] = []
+    for (deficit, i, j, s_lo, s_hi, dist_m, required, budget) in binders[:4]:
+        avg = required / dist_m if dist_m > 0 else 0.0
+        which = []
+        if s_lo < end_frac * phys_dist:
+            which.append("A")
+        if s_hi > (1.0 - end_frac) * phys_dist:
+            which.append("B")
+        end_note = (f" (binds end {'+'.join(which)})" if which else "")
+        lines.append(
+            f"hard anchors {elevs[i]:.2f} m @ {s_lo:.0f} m and "
+            f"{elevs[j]:.2f} m @ {s_hi:.0f} m: need {required:.2f} m over "
+            f"{dist_m:.0f} m (avg {avg * 100:.2f}%) but the strict 0.8%/1.5% "
+            f"tiered budget allows only {budget:.2f} m — deficit "
+            f"{deficit:.2f} m{end_note}.")
+    return lines
+
+
 def solve_profile_with_minimal_end_zone_cap(
         fractions: List[float], elevs: List[float],
         anchored: List[bool], phys_dist: float, *,
-        blast_a: float = 0.0, blast_b: float = 0.0) -> float:
+        blast_a: float = 0.0, blast_b: float = 0.0,
+        threshold_strict_m: float = 0.0,
+        report: "dict | None" = None) -> float:
     """Run ``faa_joint_solve`` with the end-zone cap escalated MINIMALLY.
 
     RELAXATION ORDER (user ruling 2026-07-08): the main longitudinal
@@ -484,59 +563,125 @@ def solve_profile_with_minimal_end_zone_cap(
     +8.68 m; the 2.78 m deficit emitted as a 1.52–1.97% mid-runway
     ramp — a runway-LAW violation traded for the preference).
 
-    Escalation search: bisection on the end-zone cap over
+    TIERED relaxation (user 2026-07-16, KBNA 13/31 defect G): when
+    ``threshold_strict_m`` > 0, the escalation is split into two bands.
+    The last ``threshold_strict_m`` before EACH threshold holds the
+    strict 0.8% cap; only the OUTER part of the end zone (from there to
+    ``RUNWAY_END_FRACTION``) escalates — so the immediate threshold
+    vicinity stays gentle while the deficit is absorbed deeper in the
+    end zone.  The threshold band relaxes only when the profile is
+    genuinely infeasible even with the whole outer end zone at the 1.5%
+    law; that case escalates the threshold band minimally and is
+    reported as a loud WARN by the caller.
+
+    Escalation search: bisection on the escalating cap over
     (RUNWAY_END_GRADE, MAX_RUNWAY_GRADE], to 0.01%-grade granularity
-    (1e-4 absolute) — ceil(log2(0.007 / 1e-4)) = 7 joint-solve
-    attempts at most, each restarted from the SAME pre-solve sample
-    values (the joint solve is a mutating projection; its result is
-    path-dependent, so every attempt must start from identical
+    (1e-4 absolute), each attempt restarted from the SAME pre-solve
+    sample values (the joint solve is a mutating projection; its result
+    is path-dependent, so every attempt must start from identical
     state).  If even the uniform main cap cannot satisfy the anchors,
-    the main-cap solve is kept as-was (least-bad; matches the
-    historical uniform-cap behaviour — the validator is the backstop).
+    the main-cap solve is kept as-was (least-bad; matches the historical
+    uniform-cap behaviour — the validator is the backstop).
 
     Mutates ``elevs`` in place with the accepted solve.  Returns the
-    end-zone cap the accepted solve used.
+    (outer) end-zone cap the accepted solve used.  When ``report`` is a
+    dict it is filled with ``end_zone_cap`` / ``threshold_cap`` /
+    ``threshold_strict_fraction`` / ``binding`` (the instrument-first
+    reason list, non-empty only when the 0.8% preference is infeasible).
     """
     initial_elevs = list(elevs)
+    tsf = 0.0
+    if threshold_strict_m > 0.0 and phys_dist > 0.0:
+        tsf = min(threshold_strict_m / phys_dist, RUNWAY_END_FRACTION)
+    tiered = tsf > 0.0
 
-    def _attempt(end_zone_cap: float):
+    def _attempt(end_zone_cap: float, threshold_cap: "float | None"):
         candidate = list(initial_elevs)
         faa_joint_solve(
             fractions, candidate, anchored, phys_dist,
             blast_a=blast_a, blast_b=blast_b,
             grade_cap=MAX_RUNWAY_GRADE,
             end_grade_cap=end_zone_cap,
-            max_dg_per_m=MAX_RUNWAY_GRADE_CHANGE_PER_M)
+            max_dg_per_m=MAX_RUNWAY_GRADE_CHANGE_PER_M,
+            threshold_strict_cap=threshold_cap,
+            threshold_strict_fraction=tsf)
         compliant = _worst_segment_over_main_cap(
             fractions, candidate, phys_dist) is None
         return candidate, compliant
 
-    # The preference first: keep 0.8% verbatim whenever it is feasible.
-    candidate, compliant = _attempt(RUNWAY_END_GRADE)
+    def _record(end_cap: float, thr_cap: "float | None",
+                binding: "list | None" = None):
+        if report is not None:
+            report['end_zone_cap'] = end_cap
+            report['threshold_cap'] = (thr_cap if thr_cap is not None
+                                       else end_cap)
+            report['threshold_strict_fraction'] = tsf
+            if binding is not None:
+                report['binding'] = binding
+
+    # The strict band cap the escalation holds fixed (None when not tiered
+    # so the grade-cap machinery keeps the historical single-end-zone-cap
+    # behaviour verbatim).
+    strict = RUNWAY_END_GRADE if tiered else None
+
+    # 1. The preference first: keep 0.8% verbatim whenever feasible.
+    candidate, compliant = _attempt(RUNWAY_END_GRADE, strict)
     if compliant:
         elevs[:] = candidate
+        _record(RUNWAY_END_GRADE, RUNWAY_END_GRADE, [])
         return RUNWAY_END_GRADE
 
-    # Preference infeasible with the hard anchors.  Escalate minimally:
-    # bisect for the smallest law-compliant end-zone cap.
+    # Preference infeasible — record WHY (which anchors bind).
+    binding = _end_zone_binding_report(fractions, initial_elevs,
+                                       anchored, phys_dist)
+
+    # 2. Escalate the OUTER end zone only, threshold band held strict.
     infeasible_cap = RUNWAY_END_GRADE
-    accepted, compliant = _attempt(MAX_RUNWAY_GRADE)
-    if not compliant:
-        # Anchors infeasible even at the uniform LAW cap — keep the
-        # main-cap solve.
+    accepted, compliant = _attempt(MAX_RUNWAY_GRADE, strict)
+    if compliant:
+        accepted_cap = MAX_RUNWAY_GRADE
+        while accepted_cap - infeasible_cap > 1e-4:
+            midpoint_cap = 0.5 * (accepted_cap + infeasible_cap)
+            cand, ok = _attempt(midpoint_cap, strict)
+            if ok:
+                accepted_cap, accepted = midpoint_cap, cand
+            else:
+                infeasible_cap = midpoint_cap
         elevs[:] = accepted
+        _record(accepted_cap, RUNWAY_END_GRADE if tiered else accepted_cap,
+                binding)
+        return accepted_cap
+
+    # 3. Genuinely infeasible even with the outer end zone at the 1.5%
+    #    law and the threshold band strict.  When tiered, relax the
+    #    threshold band too — minimally — so the deficit resolves; the
+    #    caller WARNs loudly with the achieved threshold-band cap.
+    if tiered:
+        uniform_solve, uniform_ok = _attempt(MAX_RUNWAY_GRADE,
+                                              MAX_RUNWAY_GRADE)
+        if uniform_ok:
+            thr_infeasible = RUNWAY_END_GRADE
+            thr_cap, acc = MAX_RUNWAY_GRADE, uniform_solve
+            while thr_cap - thr_infeasible > 1e-4:
+                mid = 0.5 * (thr_cap + thr_infeasible)
+                cand, ok = _attempt(MAX_RUNWAY_GRADE, mid)
+                if ok:
+                    thr_cap, acc = mid, cand
+                else:
+                    thr_infeasible = mid
+            elevs[:] = acc
+            _record(MAX_RUNWAY_GRADE, thr_cap, binding)
+            return MAX_RUNWAY_GRADE
+        # Infeasible even at the uniform law — keep it (least-bad).
+        elevs[:] = uniform_solve
+        _record(MAX_RUNWAY_GRADE, MAX_RUNWAY_GRADE, binding)
         return MAX_RUNWAY_GRADE
-    accepted_cap = MAX_RUNWAY_GRADE
-    while accepted_cap - infeasible_cap > 1e-4:
-        midpoint_cap = 0.5 * (accepted_cap + infeasible_cap)
-        candidate, compliant = _attempt(midpoint_cap)
-        if compliant:
-            accepted_cap = midpoint_cap
-            accepted = candidate
-        else:
-            infeasible_cap = midpoint_cap
+
+    # tsf == 0 (legacy): anchors infeasible even at the uniform LAW cap —
+    # keep the main-cap solve.
     elevs[:] = accepted
-    return accepted_cap
+    _record(MAX_RUNWAY_GRADE, None, binding)
+    return MAX_RUNWAY_GRADE
 
 
 def redistribute_runway_profile(
@@ -672,21 +817,58 @@ def redistribute_runway_profile(
         # preference) escalates MINIMALLY when the hard anchors make
         # it unsatisfiable alongside the main-cap LAW — see
         # ``solve_profile_with_minimal_end_zone_cap``.
+        end_zone_report: dict = {}
+        # TIERED end-zone relaxation (defect G) — O4_RUNWAY_TIERED_END=0
+        # reverts to the historical single-end-zone-cap escalation.
+        _strict_m = (RUNWAY_THRESHOLD_STRICT_M
+                     if os.environ.get("O4_RUNWAY_TIERED_END", "1") == "1"
+                     else 0.0)
         end_zone_cap = solve_profile_with_minimal_end_zone_cap(
             fractions, elevs, anchored, phys_dist,
             blast_a=state['blast_a_m'],
-            blast_b=state['blast_b_m'])
-        if end_zone_cap > RUNWAY_END_GRADE + 1e-9:
+            blast_b=state['blast_b_m'],
+            threshold_strict_m=_strict_m,
+            report=end_zone_report)
+        threshold_cap = end_zone_report.get('threshold_cap', end_zone_cap)
+        threshold_strict_fraction = end_zone_report.get(
+            'threshold_strict_fraction', 0.0)
+        binding_lines = end_zone_report.get('binding') or []
+        escalated = end_zone_cap > RUNWAY_END_GRADE + 1e-9
+        threshold_relaxed = threshold_cap > RUNWAY_END_GRADE + 1e-9
+        if escalated or threshold_relaxed:
             try:
                 from O4_UI_Utils import vprint
-                vprint(1, f"  [pav-builder] runway {ref}: end-zone "
-                          f"grade preference "
-                          f"{RUNWAY_END_GRADE * 100:.1f}% infeasible "
-                          f"with hard anchors — escalated to "
-                          f"{end_zone_cap * 100:.2f}% (main "
-                          f"{MAX_RUNWAY_GRADE * 100:.1f}% cap is law).")
+                if threshold_relaxed:
+                    # The last ~90 m before a threshold could NOT hold the
+                    # gentle 0.8% cap — the genuinely-infeasible case.  Loud.
+                    vprint(1, f"  [pav-builder] runway {ref}: WARNING — the "
+                              f"threshold vicinity ({RUNWAY_THRESHOLD_STRICT_M:.0f} m) "
+                              f"could not hold the strict "
+                              f"{RUNWAY_END_GRADE * 100:.1f}% cap even with "
+                              f"the outer end zone at the "
+                              f"{MAX_RUNWAY_GRADE * 100:.1f}% law — threshold "
+                              f"band escalated to {threshold_cap * 100:.2f}%.")
+                else:
+                    vprint(1, f"  [pav-builder] runway {ref}: end-zone "
+                              f"grade preference "
+                              f"{RUNWAY_END_GRADE * 100:.1f}% infeasible "
+                              f"with hard anchors — outer end zone escalated "
+                              f"to {end_zone_cap * 100:.2f}%; the last "
+                              f"{RUNWAY_THRESHOLD_STRICT_M:.0f} m before each "
+                              f"threshold held at "
+                              f"{RUNWAY_END_GRADE * 100:.1f}% (main "
+                              f"{MAX_RUNWAY_GRADE * 100:.1f}% cap is law).")
+                for _line in binding_lines:
+                    vprint(1, f"  [pav-builder] runway {ref}: {_line}")
             except ImportError:
                 pass
+        if os.environ.get("O4_END_ZONE_DEBUG") == "1":
+            print(f"    [end-zone] runway {ref}: outer_cap="
+                  f"{end_zone_cap * 100:.2f}% threshold_cap="
+                  f"{threshold_cap * 100:.2f}% strict_frac="
+                  f"{threshold_strict_fraction:.4f}")
+            for _line in binding_lines:
+                print(f"    [end-zone] runway {ref}: {_line}")
 
         # Persist the gated profile so later passes can evaluate the
         # runway's authoritative elevation at any point (``tile_cut``
@@ -739,6 +921,12 @@ def redistribute_runway_profile(
             # a ref under two different end-zone caps would make the
             # flex re-stamp diverge from the redistributed profile.
             'end_zone_cap': end_zone_cap,
+            # TIERED end-zone caps (defect G): the strict threshold-band
+            # cap (0.8% unless genuinely infeasible) and the band extent
+            # (fraction of length before each threshold).  The flex
+            # re-solve must gate identically or its re-stamp diverges.
+            'threshold_cap': threshold_cap,
+            'threshold_strict_fraction': threshold_strict_fraction,
         }
 
         # Evaluate the new profile at every runway sub-rect's vertex.
@@ -815,7 +1003,15 @@ def flex_slack_at(profile: dict, t: float, direction: float) -> float:
     the flexed value v must satisfy ``|v − e_i| ≤ cap·|s_t − s_i|``.
     The K-factor is enforced afterwards by ``faa_joint_solve``'s gates
     on the free samples; the longitudinal-grade validator is the
-    backstop."""
+    backstop.
+
+    SPACE INVARIANT (verified 2026-07-16 with the crowned-edge join
+    ruling): every value here is CENTERLINE-PROFILE (uncrowned) space —
+    the runway-join anchors sample the profile-valued shapes in-solve,
+    the flex demands are computed from those anchors, and the crown drop
+    (including the join-anchored nodes' edge drop) is applied only at
+    the solve's writeback (``crown.build_crown_drop_field``).  Never
+    feed an emitted (crowned) value into this clamp."""
     fractions = profile['fractions']
     elevs = profile['elevs']
     anchored = profile.get('anchored') or [False] * len(fractions)
@@ -833,10 +1029,27 @@ def flex_slack_at(profile: dict, t: float, direction: float) -> float:
     del seam_t  # certain/intermediate distinction returns in Stage C
     bounding: List[int] = [k for k, a in enumerate(anchored) if a]
 
+    # TIERED THRESHOLD BAND (user 2026-07-16, KBNA 13/31 defect G): the flex
+    # drags the runway toward a taxiway contact, but within the last
+    # ``threshold_strict_fraction`` before a pinned CIFP threshold the ramp
+    # must stay gentle (≤0.8%) — the threshold is standing law, so a contact
+    # in that band cannot pull the profile down at the 1.5% main cap.  Bound
+    # a contact against the NEAR threshold anchor at ``RUNWAY_END_GRADE``
+    # instead of ``MAX_RUNWAY_GRADE``; the deficit stays a small residual at
+    # the taxi join (the taxi yields to the threshold), not a steep runway
+    # end.  ``threshold_strict_fraction`` == 0 (untiered) keeps the old bound.
+    tsf = float(profile.get('threshold_strict_fraction') or 0.0)
+    thr_first = bounding[0] if bounding else None
+    thr_last = bounding[-1] if bounding else None
+
     slack = float("inf")
     for k in set(bounding):
+        cap = MAX_RUNWAY_GRADE
+        if (tsf > 0.0 and k in (thr_first, thr_last)
+                and abs(t - fractions[k]) < tsf):
+            cap = RUNWAY_END_GRADE
         distance = abs(t - fractions[k]) * axis_len
-        budget = MAX_RUNWAY_GRADE * distance
+        budget = cap * distance
         current_diff = (current - elevs[k]) * direction
         slack = min(slack, budget - current_diff)
     return max(0.0, slack if slack != float("inf") else 0.0)
@@ -950,7 +1163,12 @@ def apply_runway_flex(layout, demands: Dict[str, list]) -> Dict[str, list]:
                 grade_cap=MAX_RUNWAY_GRADE,
                 end_grade_cap=float(profile.get('end_zone_cap')
                                     or RUNWAY_END_GRADE),
-                max_dg_per_m=MAX_RUNWAY_GRADE_CHANGE_PER_M)
+                max_dg_per_m=MAX_RUNWAY_GRADE_CHANGE_PER_M,
+                threshold_strict_cap=(
+                    float(profile['threshold_cap'])
+                    if profile.get('threshold_cap') is not None else None),
+                threshold_strict_fraction=float(
+                    profile.get('threshold_strict_fraction') or 0.0))
             return fractions, elevs, anchored
 
         def _worst_over_cap(fractions, elevs):
