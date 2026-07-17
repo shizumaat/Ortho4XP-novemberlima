@@ -882,6 +882,21 @@ def build_custom_pre_mask(til_x, til_y, sea_level, tile, extent_code):
 ################################################################################
 
 ################################################################################
+def water_type_is_inland(water_bits):
+    """Mapped inland water WINS over coastline sea.
+
+    A triangle carrying both the WATER and SEA bits (3) sits inside an
+    OpenStreetMap water polygon that the coastline's sea flood also
+    reached — the Ria Formosa lagoon behind rings cut at tile edges is
+    the canonical case.  The mapper's polygon is the deliberate signal,
+    so such triangles take the INLAND treatment (no deep-water fade).
+    SEA_EQUIV (bit 4) keeps the sea treatment: that class is itself an
+    explicit sea-mask routing (the large-lake rule).
+    """
+    return bool(water_bits & 1) and not (water_bits & 4)
+
+
+################################################################################
 def record_water_tris(tile):
     mesh_list = []
     for close_lat in range(tile.lat - 1, tile.lat + 2):
@@ -956,12 +971,10 @@ def record_water_tris(tile):
                 int(x) - 1 for x in f_mesh.readline().split()[:4]
             ]
             tri_type += 1
-            if (
-                (not tri_type)
-                or (not (tri_type & has_water))
-                or (
-                    (tri_type & has_water) < 2 and not tile.use_masks_for_inland
-                )
+            water_bits = tri_type & has_water
+            if (not water_bits) or (
+                water_type_is_inland(water_bits)
+                and not tile.use_masks_for_inland
             ):
                 continue
             (lon1, lat1) = pt_in[5 * n1 : 5 * n1 + 2]
@@ -1087,7 +1100,7 @@ def record_water_tris(tile):
                     int(x) - 1 for x in f_mesh.readline().split()[:4]
                 ]
                 tri_type += 1
-                if not (tri_type & has_water) == 1:
+                if not water_type_is_inland(tri_type & has_water):
                     continue
                 (lon1, lat1) = pt_in[5 * n1 : 5 * n1 + 2]
                 (lon2, lat2) = pt_in[5 * n2 : 5 * n2 + 2]

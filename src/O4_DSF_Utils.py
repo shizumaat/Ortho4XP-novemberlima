@@ -382,6 +382,26 @@ def create_terrain_file(
 ################################################################################
 
 ################################################################################
+def remap_water_tri_type(raw_tri_type, use_masks_for_inland, has_water=7):
+    """Collapse mesh water bits to the DSF classes 0=land, 1=inland, 2=sea.
+
+    Mapped inland water WINS over coastline sea: a triangle carrying
+    both the WATER and SEA bits (an OSM water polygon the sea flood also
+    reached — the Ria Formosa behind rings cut at tile edges) is INLAND,
+    matching :func:`O4_Mask_Utils.water_type_is_inland`.  SEA_EQUIV
+    keeps the sea class, and ``use_masks_for_inland`` still promotes
+    inland water to the sea class as before.
+    """
+    water_bits = raw_tri_type & has_water
+    if not water_bits:
+        return 0
+    inland = bool(water_bits & 1) and not (water_bits & 4)
+    if inland and not use_masks_for_inland:
+        return 1
+    return 2
+
+
+################################################################################
 def extract_elevation_and_bathymetry_data(lat, lon):
     UI.vprint(1, "     Extracting some rasters from X-Plane's Global Scenery")
     global_scenery_dsf = os.path.join(
@@ -768,9 +788,8 @@ def build_dsf(tile, download_queue):
     # 2 Remap tri_types in (0,1,2)
     has_water = 7 if (mesh_version >= 1.3) else 3
     for i in range(nbr_tris):
-        t = tri_types[i] & has_water
-        t = t and (2 * (t > 1 or tile.use_masks_for_inland) or 1)
-        tri_types[i] = t
+        tri_types[i] = remap_water_tri_type(
+            tri_types[i], tile.use_masks_for_inland, has_water)
 
     # 3 Recut water tris for XP12
     UI.vprint(1, "-> Adapting water triangles to XP12 requirements")

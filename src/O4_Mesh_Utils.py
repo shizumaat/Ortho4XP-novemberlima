@@ -261,7 +261,14 @@ def post_process_nodes_altitudes(tile):
         attr += 1
         if attr >= dico_attributes["INTERP_ALT"]:
             interp_alt_tris.add((v1, v2, v3))
-        elif attr & dico_attributes["SEA"]:
+        elif attr & dico_attributes["SEA"] and not (
+            attr & dico_attributes["WATER"]
+        ):
+            # Mapped inland water WINS over coastline sea (see
+            # O4_Mask_Utils.water_type_is_inland): a WATER|SEA triangle
+            # keeps the inland smoothing below, so a lagoon behind cut
+            # polygon rings holds its own level instead of being
+            # flattened to sea zero.
             sea_tris.add((v1, v2, v3))
         elif (
             attr & dico_attributes["WATER"]
