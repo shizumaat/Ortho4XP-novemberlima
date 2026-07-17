@@ -310,11 +310,16 @@ class TestClearanceCharter(_ChartHarness):
         assert self._emit(monkeypatch, "junction", charter=False), (
             "charter OFF: the same junction should source the historical sweep")
 
-    def test_gate_default_is_off(self):
-        """The gate ships DEFAULT OFF (turning it ON currently regresses
-        the adjacent-ground backfill — see the module docstring); the
-        integrated build must be unaffected."""
+    def test_gate_default_follows_b4_flip(self):
+        """The charter default follows the ONE B4 review switch
+        (``config.B4_FLIP_DEFAULTS``, flipped ON 2026-07-15 with the KBNA
+        performance round); an explicit O4_CLEARANCE_CHARTER env var always
+        wins over the switch."""
         import os
         from auto_patch import clearance
-        assert clearance._CLEARANCE_CHARTER is (
-            os.environ.get("O4_CLEARANCE_CHARTER", "0") == "1")
+        from auto_patch.config import B4_FLIP_DEFAULTS
+        if "O4_CLEARANCE_CHARTER" in os.environ:
+            expected = os.environ["O4_CLEARANCE_CHARTER"] == "1"
+        else:
+            expected = B4_FLIP_DEFAULTS
+        assert clearance._CLEARANCE_CHARTER is expected

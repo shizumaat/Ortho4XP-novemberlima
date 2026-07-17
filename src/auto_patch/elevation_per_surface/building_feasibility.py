@@ -67,6 +67,14 @@ _UNSET = object()          # build-wide-cache sentinel (distinguishes None resul
 
 _VIS_BUFFER_M = 0.5        # bridge weld-seam slivers between abutting shapes
 _VIS_ON_PAV_FRAC = 0.97    # chord counts as visible if ≥ this fraction is paved
+# Minimum paved mid-cell samples (of n) for float(paved/n) >= _VIS_ON_PAV_FRAC —
+# the integer form of the _paved_frac accept comparison, replicated exactly so
+# the two-stage sampler in _accept_flags can early-reject without changing any
+# accept decision.
+_ACCEPT_MIN_PAVED = {
+    n: next(p for p in range(n + 1) if (p / n) >= _VIS_ON_PAV_FRAC)
+    for n in range(1, 97)
+}
 # A reach binding is PHANTOM only when the serving centerline is BOTH far AND
 # only reachable across grass.  The CYXY south runway-crossing junction binds a
 # centerline 367 m away over 77 % grass; a building/apron vertex a few tens of m
@@ -244,7 +252,8 @@ def _paved_fracs(chords, vis):
     return fracs
 
 
-def _nearest_visible_centerline(c, cls, vis, tree=None, cache=None):
+def _nearest_visible_centerline(c, cls, vis, tree=None, cache=None,
+                                cls_arr=None):
     """The nearest centerline to point ``c`` whose connecting chord stays within
     pavement (``vis``).  Falls back to the straight-line nearest if none is
     visible (e.g. a building wholly off pavement — the caller's touch test has
@@ -296,46 +305,236 @@ def _nearest_visible_centerline(c, cls, vis, tree=None, cache=None):
         return result
 
     vis_ctx = getattr(vis, "context", vis)
+    # ENDPOINT-MARGIN PRUNE (perf 2026-07-15, KBNA profile): the query point's
+    # distance to the pavement union, ``m_c``, is an exact lower bound on every
+    # candidate chord's unpaved length — the chord ENDS at ``c``, and no point
+    # within ``m_c`` of ``c`` is on pavement.  Two bit-exact consequences used
+    # in the accept loops below:
+    #   * exact contains is ALWAYS False when ``m_c > 0`` (the endpoint is
+    #     strictly outside the polygon), so the GEOS line-contains test is
+    #     skipped wholesale — profiling showed 1.5 M scalar contains calls on
+    #     the deep walkers;
+    #   * the sampled paved fraction of a chord of length L has at least
+    #     ``floor(n·m_c/L)`` off-pavement mid-cell samples, so any candidate
+    #     with ``(n - (floor(n·m_c/L) - 1)) / n < _VIS_ON_PAV_FRAC`` cannot
+    #     accept and is rejected WITHOUT sampling (the -1 absorbs alignment
+    #     and float-rounding slack; the 1/n quantum dwarfs any ULP effect).
+    # A phantom point 40 m out in grass thus rejects every candidate nearer
+    # than ~1 km with plain numpy arithmetic — this was ~85 % of the reach-band
+    # wall (170 M contains_xy samples per KBNA build).
+    m_c = float(_sh.distance(vis_ctx, c))
+
+    def _viable_mask(lens):
+        if m_c <= 0.0:
+            return None
+        n_s = _np.minimum(96, _np.maximum(8, lens.astype(_np.int64)))
+        u_safe = _np.maximum(
+            _np.floor(n_s * (m_c / _np.maximum(lens, 1e-12))) - 1.0, 0.0)
+        return ((n_s - u_safe) / n_s) >= _VIS_ON_PAV_FRAC
+
+    def _accept_flags(chords, lens, count):
+        """Per-candidate boolean of ``paved_frac >= _VIS_ON_PAV_FRAC`` — the
+        only thing the accept loop consumes — computed with two bit-exact
+        volume cuts over :func:`_paved_fracs`:
+
+        * candidates failing the endpoint-margin prune are False outright;
+        * the fraction test on n mid-cell samples is equivalent to the
+          INTEGER test ``paved_count >= _ACCEPT_MIN_PAVED[n]`` (the table
+          replicates the float ``mean() >= 0.97`` comparison exactly), so a
+          chord is rejected as soon as its unpaved count exceeds
+          ``n - _ACCEPT_MIN_PAVED[n]`` (≤ 3 samples at n = 96).  Stage 1
+          evaluates only the first 16 mid-cells of the SAME sample set —
+          enough to reject nearly every grass-crossing chord — and only the
+          undecided minority pays for the remaining samples.  Same sample
+          points, same total counts, same accept set.
+
+        Returns ``(flags, needs_exact)``.  ``needs_exact`` (``m_c == 0``
+        queries only, else None) marks the rejected chords for which the
+        exact line-contains RESCUE could still differ from the sampled
+        verdict: containment requires every chord point in the polygon's
+        closure, so a rejected chord with ANY unpaved sample strictly
+        outside the closure is provably not contained — and a prepared
+        point-``intersects`` on each rejected chord's first unpaved sample
+        (one batched C call; on-boundary ⟺ True) separates the two cases
+        exactly.  Only boundary-degenerate chords (in practice none) keep
+        ``needs_exact`` and pay the expensive line-contains, which on long
+        walker chords measures ~2.4 ms even prepared.
+        """
+        viable = _viable_mask(lens)
+        kept = (list(range(count)) if viable is None
+                else [j for j in range(count) if viable[j]])
+        flags = [False] * count
+        track_exact = (m_c == 0.0)
+        reject_pts = []
+        if not kept:
+            return flags, ([False] * count if track_exact else None)
+        cc = _sh.get_coordinates(chords[kept] if len(kept) < count
+                                 else chords)
+        a, b = cc[0::2], cc[1::2]
+        geom = vis_ctx
+        _sh.prepare(geom)
+        n_per = []
+        for jj, j in enumerate(kept):
+            L = float(lens[j])
+            if L < 1e-9:
+                flags[j] = True         # _paved_frac returns 1.0 for these
+                n_per.append(0)
+                continue
+            n_per.append(min(96, max(8, int(L))))
+        # Stage 1: first min(16, n) mid-cells of each kept chord, one batch.
+        xs, ys, segs = [], [], []
+        for jj, j in enumerate(kept):
+            n = n_per[jj]
+            if n == 0:
+                continue
+            k1 = min(16, n)
+            t = (_np.arange(k1) + 0.5) / n
+            xs.append(a[jj, 0] + (b[jj, 0] - a[jj, 0]) * t)
+            ys.append(a[jj, 1] + (b[jj, 1] - a[jj, 1]) * t)
+            segs.append((jj, j, k1))
+        undecided = []
+        if segs:
+            hits = _sh.contains_xy(geom, _np.concatenate(xs),
+                                   _np.concatenate(ys))
+            off = 0
+            for si, (jj, j, k1) in enumerate(segs):
+                n = n_per[jj]
+                h1 = hits[off:off + k1]
+                paved1 = int(h1.sum())
+                off += k1
+                min_paved = _ACCEPT_MIN_PAVED[n]
+                if (k1 - paved1) > n - min_paved:
+                    if track_exact:     # first unpaved sample of the reject
+                        u = int(h1.argmin())
+                        reject_pts.append((j, xs[si][u], ys[si][u]))
+                    continue            # early exact reject
+                if k1 == n:
+                    flags[j] = paved1 >= min_paved
+                    if track_exact and not flags[j]:
+                        u = int(h1.argmin())
+                        reject_pts.append((j, xs[si][u], ys[si][u]))
+                else:
+                    undecided.append((jj, j, k1, paved1,
+                                      (int(h1.argmin()), xs[si], ys[si])
+                                      if paved1 < k1 else None))
+        # Stage 2: remaining mid-cells of the undecided chords, one batch.
+        if undecided:
+            xs2, ys2 = [], []
+            for (jj, j, k1, _p, _u1) in undecided:
+                n = n_per[jj]
+                t = (_np.arange(k1, n) + 0.5) / n
+                xs2.append(a[jj, 0] + (b[jj, 0] - a[jj, 0]) * t)
+                ys2.append(a[jj, 1] + (b[jj, 1] - a[jj, 1]) * t)
+            hits = _sh.contains_xy(geom, _np.concatenate(xs2),
+                                   _np.concatenate(ys2))
+            off = 0
+            for si, (jj, j, k1, paved1, u1) in enumerate(undecided):
+                n = n_per[jj]
+                h2 = hits[off:off + n - k1]
+                paved = paved1 + int(h2.sum())
+                off += n - k1
+                flags[j] = paved >= _ACCEPT_MIN_PAVED[n]
+                if track_exact and not flags[j]:
+                    if u1 is not None:  # first unpaved was in stage 1
+                        ui, uxs, uys = u1
+                        reject_pts.append((j, uxs[ui], uys[ui]))
+                    else:               # all of stage 1 paved → in stage 2
+                        u = int(h2.argmin())
+                        reject_pts.append((j, xs2[si][u], ys2[si][u]))
+        needs_exact = None
+        if track_exact:
+            needs_exact = [False] * count
+            if reject_pts:
+                plaus = _sh.intersects(
+                    geom, _sh.points([q[1] for q in reject_pts],
+                                     [q[2] for q in reject_pts]))
+                for k, (j, _x, _y) in enumerate(reject_pts):
+                    if plaus[k]:
+                        needs_exact[j] = True
+        return flags, needs_exact
+
     gen = _cl_by_distance(c, cls, tree)
     first = None
     chunk_size = 4
+    tested = 0
     while True:
+        # VECTORIZED DEEP WALK (perf 2026-07-15, KBNA profile): a query still
+        # rejecting after its first ~28 candidates is a long-tail walker (a
+        # phantom point or a far seam station), and the per-candidate Python
+        # overhead of the generator walk — not the GEOS predicates, which
+        # measure ~1-8 µs each — is what made these walks ~12 ms.  The
+        # expanding-ring generator yields candidates in exact global
+        # ``(distance, index)`` order (see _cl_by_distance), so ONE stable
+        # argsort over ONE vectorized ``shapely.distance`` call reproduces
+        # that order bit-for-bit; resume at position ``tested`` and stride
+        # through the tail in large blocks with the same per-candidate accept
+        # rule.  Same order, same rule, same fallback ⇒ identical results.
+        if tested >= 28 and tree is not None and cls_arr is not None:
+            dists = _sh.distance(cls_arr, c)
+            order = _np.argsort(dists, kind="stable")
+            pos, stride, n_all = tested, 64, len(order)
+            while pos < n_all:
+                take = order[pos:pos + stride]
+                chords = _sh.shortest_line(cls_arr[take], c)
+                lens = _sh.length(chords)
+                try:
+                    acc, needs_exact = _accept_flags(chords, lens, len(take))
+                except Exception:                          # pragma: no cover
+                    acc = needs_exact = None
+                if acc is None:                            # pragma: no cover
+                    exact = _sh.contains(vis_ctx, chords)
+                    for j in range(len(take)):
+                        if lens[j] < 1e-6 or exact[j]:
+                            return _cache_and_return(cls[int(take[j])])
+                else:
+                    for j in range(len(take)):
+                        if (lens[j] < 1e-6 or acc[j]
+                                or (needs_exact is not None
+                                    and needs_exact[j]
+                                    and _sh.contains(vis_ctx, chords[j]))):
+                            return _cache_and_return(cls[int(take[j])])
+                pos += stride
+                stride = min(stride * 4, 1024)
+            break                       # exhausted: fall through to fallback
         chunk = list(_islice(gen, chunk_size))
         if not chunk:
             break
         if first is None:
             first = chunk[0]
+        tested += len(chunk)
         arr = _np.empty(len(chunk), dtype=object)
         for _i, _ln in enumerate(chunk):
             arr[_i] = _ln
         chords = _sh.shortest_line(arr, c)          # [foot_on_ln, c] per candidate
         lens = _sh.length(chords)
-        exact = _sh.contains(vis_ctx, chords)
-        # The accept is the FIRST candidate (distance order) that is exact-visible
-        # (coincident chord or contained) OR ≥ _VIS_ON_PAV_FRAC paved.  Only the
-        # prefix BEFORE the first exact hit can win via the paved-fraction test
-        # (an exact hit at je short-circuits everything after it), so batch the
-        # seam-gap ``_paved_frac`` over exactly that prefix — nothing wasted, and
-        # zero paved-frac work in the common early-exact case.
-        je = len(chunk)
-        for j in range(len(chunk)):
-            if lens[j] < 1e-6 or exact[j]:
-                je = j
-                break
-        pf = None
-        if je > 0:
-            try:
-                pf = _paved_fracs(chords[:je], vis)
-            except Exception:                              # pragma: no cover
-                pf = None
-        for j in range(len(chunk)):
-            if j < je:
-                if pf is not None and pf[j] >= _VIS_ON_PAV_FRAC:
+        # The accept is the FIRST candidate (distance order) that is coincident
+        # (zero-length chord) OR exact-visible (contained) OR ≥ _VIS_ON_PAV_FRAC
+        # paved — a plain OR per candidate, so evaluation order is free.
+        # PAVED-FRACTION FIRST (perf 2026-07-15, KBNA profile): the sampled
+        # fraction (≤96 ``contains_xy`` points, ~tens of µs) is ~20× cheaper
+        # than an exact prepared line-contains on the huge airside union
+        # (~ms), and on pavement it accepts almost every candidate the exact
+        # test would.  Batch the fraction over the WHOLE chunk, then pay the
+        # expensive exact test ONLY for candidates the sampling rejects — a
+        # chord grazing the polygon boundary can sample a boundary point as
+        # outside yet still be exactly contained, so the exact test stays as
+        # the rescue.  Same accept set in the same distance order ⇒ the same
+        # centerline is returned, bit-identically.
+        try:
+            acc, needs_exact = _accept_flags(chords, lens, len(chunk))
+        except Exception:                                  # pragma: no cover
+            acc = needs_exact = None
+        if acc is None:                                    # pragma: no cover
+            exact = _sh.contains(vis_ctx, chords)
+            for j in range(len(chunk)):
+                if lens[j] < 1e-6 or exact[j]:
                     return _cache_and_return(chunk[j])
-            else:  # j == je: the exact hit (or je == len(chunk): no hit)
-                if je < len(chunk):
-                    return _cache_and_return(chunk[je])
-                break
+        else:
+            for j in range(len(chunk)):
+                if (lens[j] < 1e-6 or acc[j]
+                        or (needs_exact is not None and needs_exact[j]
+                            and _sh.contains(vis_ctx, chords[j]))):
+                    return _cache_and_return(chunk[j])
         chunk_size = min(chunk_size * 2, 512)
     return _cache_and_return(
         first if first is not None else min(
@@ -350,12 +549,17 @@ def _chord_on_pavement(c, foot, vis):
     must not be bound through it."""
     from shapely.geometry import LineString
     chord = LineString([(c.x, c.y), (foot.x, foot.y)])
-    if chord.length < 1e-6 or vis.contains(chord):
+    if chord.length < 1e-6:
         return True
+    # Paved-fraction first (perf 2026-07-15) — same OR of the same two tests
+    # as before, with the ~20× cheaper sampled test promoted ahead of the
+    # exact prepared contains; see _nearest_visible_centerline.
     try:
-        return _paved_frac(chord, vis) >= _VIS_ON_PAV_FRAC
+        if _paved_frac(chord, vis) >= _VIS_ON_PAV_FRAC:
+            return True
     except Exception:                                      # pragma: no cover
-        return False
+        pass
+    return vis.contains(chord)
 
 
 def _build_skeleton_band(layout, G):
@@ -554,6 +758,13 @@ def reach_band_unified(layout, G):
     if not cls_tcl:
         return lambda x, y: None
     cls = [cl.line for cl in cls_tcl]
+    # Object ndarray over the same lines, built ONCE per factory call — the
+    # vectorized deep walk in _nearest_visible_centerline needs one and
+    # filling it per query would cost ~0.5 µs × |cls| × every walker.
+    import numpy as _np_arr
+    cls_arr = _np_arr.empty(len(cls), dtype=object)
+    for _i, _ln in enumerate(cls):
+        cls_arr[_i] = _ln
     cap_of = {id(cl.line): cl for cl in cls_tcl}
     vis = _pavement_visibility(layout) if VISIBLE_CHORD_CONNECT else None
     # STRtree over the centerlines: every band query needs them in distance
@@ -653,7 +864,7 @@ def reach_band_unified(layout, G):
     def band(x, y):
         c = Point(x, y)
         ln = (_nearest_visible_centerline(c, cls, vis, tree=cl_tree,
-                                          cache=_nvc_cache)
+                                          cache=_nvc_cache, cls_arr=cls_arr)
               if vis is not None
               else next(_cl_by_distance(c, cls, cl_tree),
                         min(cls, key=lambda L: L.distance(c))))

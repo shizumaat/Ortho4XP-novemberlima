@@ -200,34 +200,51 @@ __all__ = [
 
 def runway_grade_cap_at(frac, grade_cap=MAX_RUNWAY_GRADE,
                         end_grade_cap=None,
-                        end_fraction=RUNWAY_END_FRACTION):
+                        end_fraction=RUNWAY_END_FRACTION,
+                        threshold_strict_cap=None,
+                        threshold_strict_fraction=0.0):
     """Longitudinal grade cap at fractional position ``frac`` ∈ [0, 1].
 
     Returns ``end_grade_cap`` inside the first/last ``end_fraction`` of
     the runway length (EASA/ICAO 0.8% rule) and ``grade_cap`` elsewhere.
     When ``end_grade_cap`` is None the cap is uniform — identical to the
     historical single-cap behaviour.
+
+    TIERED threshold band (user 2026-07-16, KBNA 13/31): when
+    ``threshold_strict_cap`` is given, the last ``threshold_strict_fraction``
+    of the length before EACH threshold holds that (strict, gentler) cap
+    even while the rest of the end zone runs at the escalated
+    ``end_grade_cap`` — so the immediate threshold vicinity stays gentle
+    while the deficit is absorbed deeper in the end zone.
     """
     if end_grade_cap is None:
         return grade_cap
-    if frac < end_fraction or frac > 1.0 - end_fraction:
+    end_dist = frac if frac <= 0.5 else 1.0 - frac
+    if (threshold_strict_cap is not None
+            and end_dist < threshold_strict_fraction):
+        return threshold_strict_cap
+    if end_dist < end_fraction:
         return end_grade_cap
     return grade_cap
 
 
 def runway_segment_grade_cap(frac_i, frac_j, grade_cap=MAX_RUNWAY_GRADE,
                              end_grade_cap=None,
-                             end_fraction=RUNWAY_END_FRACTION):
+                             end_fraction=RUNWAY_END_FRACTION,
+                             threshold_strict_cap=None,
+                             threshold_strict_fraction=0.0):
     """Grade cap binding on the segment between two samples.
 
     Uses the tighter of the two endpoints' caps so any segment touching
-    an end zone is held to ``end_grade_cap``.
+    an end zone (or the tighter threshold band) is held to that cap.
     """
     if end_grade_cap is None:
         return grade_cap
     return min(
-        runway_grade_cap_at(frac_i, grade_cap, end_grade_cap, end_fraction),
-        runway_grade_cap_at(frac_j, grade_cap, end_grade_cap, end_fraction),
+        runway_grade_cap_at(frac_i, grade_cap, end_grade_cap, end_fraction,
+                            threshold_strict_cap, threshold_strict_fraction),
+        runway_grade_cap_at(frac_j, grade_cap, end_grade_cap, end_fraction,
+                            threshold_strict_cap, threshold_strict_fraction),
     )
 
 
@@ -310,7 +327,9 @@ def faa_hard_cap_pass(fractions, elevs, anchored, phys_dist,
                        grade_cap=MAX_RUNWAY_GRADE,
                        max_iters=GRADE_RELAX_ITERATIONS,
                        end_grade_cap=None,
-                       end_fraction=RUNWAY_END_FRACTION):
+                       end_fraction=RUNWAY_END_FRACTION,
+                       threshold_strict_cap=None,
+                       threshold_strict_fraction=0.0):
     """Iterative per-edge grade-cap projection.
 
     For each non-anchored sample, restrict its elevation to the band
@@ -340,7 +359,8 @@ def faa_hard_cap_pass(fractions, elevs, anchored, phys_dist,
                     continue
                 cap = runway_segment_grade_cap(
                     fractions[idx], fractions[nidx], grade_cap,
-                    end_grade_cap, end_fraction)
+                    end_grade_cap, end_fraction,
+                    threshold_strict_cap, threshold_strict_fraction)
                 max_rise = seg * cap
                 lo = max(lo, elevs[nidx] - max_rise)
                 hi = min(hi, elevs[nidx] + max_rise)
@@ -453,13 +473,19 @@ def faa_joint_solve(fractions, elevs, anchored, phys_dist,
                      max_dg_per_m=MAX_RUNWAY_GRADE_CHANGE_PER_M,
                      n_outer=8, tol_m=0.005,
                      end_grade_cap=None,
-                     end_fraction=RUNWAY_END_FRACTION):
+                     end_fraction=RUNWAY_END_FRACTION,
+                     threshold_strict_cap=None,
+                     threshold_strict_fraction=0.0):
     """Run envelope clamp + alternating hard-cap and rate-of-change
     passes until joint convergence.  Mutates ``elevs`` in place.
 
     When ``end_grade_cap`` is given, the hard-cap pass tightens the
     longitudinal grade to it within the first/last ``end_fraction`` of
     the runway (EASA/ICAO end-zone rule); otherwise the cap is uniform.
+    When ``threshold_strict_cap`` is also given, the last
+    ``threshold_strict_fraction`` before each threshold is held to that
+    tighter cap (the TIERED end-zone relaxation — keeps the immediate
+    threshold vicinity gentle when the end zone is escalated).
     """
     faa_envelope_clamp(fractions, elevs, anchored, phys_dist,
                         grade_cap=grade_cap,
@@ -469,7 +495,9 @@ def faa_joint_solve(fractions, elevs, anchored, phys_dist,
         faa_hard_cap_pass(fractions, elevs, anchored, phys_dist,
                            grade_cap=grade_cap,
                            end_grade_cap=end_grade_cap,
-                           end_fraction=end_fraction)
+                           end_fraction=end_fraction,
+                           threshold_strict_cap=threshold_strict_cap,
+                           threshold_strict_fraction=threshold_strict_fraction)
         faa_rate_of_change_pass(fractions, elevs, anchored, phys_dist,
                                   blast_a=blast_a, blast_b=blast_b,
                                   max_dg_per_m=max_dg_per_m)

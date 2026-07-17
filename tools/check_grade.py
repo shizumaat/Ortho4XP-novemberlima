@@ -1472,12 +1472,23 @@ def _check_vertex_to_edge_step(
     ways: List[Way],
     edge_search_m: float,
     edge_step_m: float,
+    contact_tol_m: Optional[float] = None,
+    pair_ok=None,
 ) -> List[EdgeStep]:
     """For each vertex, find the closest edge of ANY OTHER way
     within ``edge_search_m``.  Project the vertex onto the edge,
     compute interpolated elevation along the edge at that point,
     and report a violation if the vertex's own elevation differs
-    by more than ``edge_step_m``."""
+    by more than ``edge_step_m``.
+
+    ``contact_tol_m`` (default ``_STEP_CONTACT_TOL_M``): a vertex is
+    treated as touching the edge only when its perpendicular distance is
+    within this bound — beyond it the two shapes are gapped and a height
+    difference is allowed.  ``pair_ok(way_v, way_e) -> bool`` (default
+    None = allow all): an extra predicate to restrict the pairs checked
+    (e.g. the airside-only mid-edge gate); the standard role/groundside
+    skips still apply on top of it."""
+    ctol = _STEP_CONTACT_TOL_M if contact_tol_m is None else contact_tol_m
     out: List[EdgeStep] = []
     cell = max(edge_search_m, 1.0)
     edge_grid = _bucket_edges(edges, cell)
@@ -1505,6 +1516,8 @@ def _check_vertex_to_edge_step(
                         continue  # edge's role is on the skip-list
                     if _airside_groundside_pair(way_v, way_e):
                         continue  # wall-separated boundary — step by design
+                    if pair_ok is not None and not pair_ok(way_v, way_e):
+                        continue  # caller's pair restriction (airside gate)
                     ax, ay = e.a
                     bx, by = e.b
                     dx = bx - ax
@@ -1525,7 +1538,7 @@ def _check_vertex_to_edge_step(
                         best = (e, t, px, py)
         if best is None:
             continue
-        if best_d2 > _STEP_CONTACT_TOL_M * _STEP_CONTACT_TOL_M:
+        if best_d2 > ctol * ctol:
             continue  # gap, not a shared edge — height difference allowed
         e, t, px, py = best
         e_proj = e.ea + t * (e.eb - e.ea)
@@ -1549,6 +1562,8 @@ def _check_edge_midpoint_step(
     edge_search_m: float,
     edge_step_m: float,
     samples_per_edge: int = 5,
+    contact_tol_m: Optional[float] = None,
+    pair_ok=None,
 ) -> List[EdgeStep]:
     """For every edge, sample at ``samples_per_edge`` points
     (including the midpoint), compute the edge's interpolated
@@ -1563,7 +1578,13 @@ def _check_edge_midpoint_step(
     0.3 m alongside a sloped rect's long edge, with the junction's
     other endpoint dragging the midpoint elevation off the rect's
     slope at that point).
+
+    ``contact_tol_m`` / ``pair_ok`` mirror ``_check_vertex_to_edge_step``:
+    override the touch tolerance and restrict the checked pairs (the
+    airside-only mid-edge gate uses a wider tolerance so a wedge whose
+    steep edge runs ~1 m from the neighbour is still caught).
     """
+    ctol = _STEP_CONTACT_TOL_M if contact_tol_m is None else contact_tol_m
     out: List[EdgeStep] = []
     cell = max(edge_search_m, 1.0)
     edge_grid = _bucket_edges(edges, cell)
@@ -1603,6 +1624,8 @@ def _check_edge_midpoint_step(
                             continue  # other edge's role on skip-list
                         if _airside_groundside_pair(way_e1, way_e2):
                             continue  # wall-separated boundary — step by design
+                        if pair_ok is not None and not pair_ok(way_e1, way_e2):
+                            continue  # caller's pair restriction (airside gate)
                         e2ax, e2ay = e2.a
                         e2bx, e2by = e2.b
                         e2dx = e2bx - e2ax
@@ -1624,7 +1647,7 @@ def _check_edge_midpoint_step(
                             best = (e2, tt, px, py)
             if best is None:
                 continue
-            if best_d2 > _STEP_CONTACT_TOL_M * _STEP_CONTACT_TOL_M:
+            if best_d2 > ctol * ctol:
                 continue  # gap, not a shared edge — height difference allowed
             e2, tt, px, py = best
             e2_elev = e2.ea + tt * (e2.eb - e2.ea)

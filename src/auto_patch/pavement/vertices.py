@@ -1163,6 +1163,62 @@ def _drop_spike_vertices(
 
 
 
+# Airside roles whose geometry the per-surface solver grades — a drop of any
+# such piece over _AIRSIDE_DROP_MIN_M2 is a real pavement loss and must never
+# be silent (KBNA Donelson 2026-07-16: the shared-vertex weld's largest-part-
+# only selection deleted 4.9 k m² of taxiway pavement without a word).
+_AIRSIDE_DROP_ROLES = frozenset({
+    ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+    ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION, ROLE_APRON,
+    ROLE_BUILDING})
+_AIRSIDE_DROP_MIN_M2 = 100.0
+
+# When the shared-vertex weld makes a ring invalid, buffer(0) is accepted as
+# the healed geometry only if it preserves the shape's footprint to within
+# this tolerance (rounding jitter of a clean pinch); a larger shortfall means
+# the ring FOLDED over itself and buffer(0) dropped the overlapped half — the
+# original polygon is kept instead (heal, never drop).
+_WELD_FOOTPRINT_TOL_M2 = 5.0
+
+
+def _record_airside_drop(layout, shape, poly, area_m2: float,
+                         mechanism: str) -> None:
+    """Record (and loudly log) that a shared-vertex weld could not preserve
+    an airside piece, so the drop is never silent.  Appends an event to
+    ``layout.airside_weld_drops`` (a build-time verify counter surfaced by
+    ``verification.verify_and_log``) whenever the piece is an airside role
+    larger than ``_AIRSIDE_DROP_MIN_M2``.
+
+    The healed paths (keep-original / re-admit-all-lobes) do NOT call this;
+    it fires only when a >100 m² airside piece is genuinely lost, so the
+    counter reads ZERO on a healthy build."""
+    role = getattr(shape, "role", None)
+    if role not in _AIRSIDE_DROP_ROLES or area_m2 <= _AIRSIDE_DROP_MIN_M2:
+        return
+    lat = lon = 0.0
+    try:
+        if layout.anchor is not None:
+            c = poly.centroid
+            from ..layout import R_EARTH as _RE
+            lat = layout.anchor[0] + math.degrees(c.y / _RE)
+            lon = layout.anchor[1] + math.degrees(
+                c.x / (_RE * math.cos(math.radians(layout.anchor[0]))))
+    except Exception:
+        pass
+    events = getattr(layout, "airside_weld_drops", None)
+    if events is None:
+        events = []
+        layout.airside_weld_drops = events           # type: ignore[attr-defined]
+    events.append({"role": role, "area_m2": round(area_m2, 1),
+                   "lat": round(lat, 6), "lon": round(lon, 6),
+                   "mechanism": mechanism})
+    import O4_UI_Utils as UI
+    UI.vprint(1,
+        f"  [pav-builder] VERIFY DROP: shared-vertex weld lost "
+        f"{role} piece {area_m2:.0f} m² ({mechanism}) "
+        f"@{lat:.6f},{lon:.6f} — pavement hole risk.")
+
+
 def _enforce_shared_vertices(layout: "PavementLayout",
                              tol: float = 1.5) -> None:
     """Collapse all emitted-shape vertices that lie within ``tol``
@@ -1336,12 +1392,18 @@ def _enforce_shared_vertices(layout: "PavementLayout",
             continue  # mixed-authority cluster: every member stays put
         new_coords_by_shape[si][(is_int, ri, vi)] = canonical_point
 
+    # Extra polygon parts recovered from a pinched (self-touching) ring —
+    # appended to layout.shapes AFTER the rewrite loop (mutating the list
+    # mid-enumerate would shift indices).  Each entry is (source_shape,
+    # part_polygon).
+    _recovered_parts: list[tuple["BuiltShape", Polygon]] = []
     for si, shape in enumerate(layout.shapes):
         poly = shape.polygon
         if poly is None or poly.is_empty or poly.geom_type != "Polygon":
             continue
         if si not in new_coords_by_shape:
             continue
+        _area_before = poly.area
         # Rebuild exterior.
         ext = list(poly.exterior.coords)
         if ext and ext[0] == ext[-1]:
@@ -1360,14 +1422,17 @@ def _enforce_shared_vertices(layout: "PavementLayout",
                                dedup_ext[0][1] - dedup_ext[-1][1]) < 0.05):
             dedup_ext = dedup_ext[:-1]
         if len(dedup_ext) < 3:
-            # Shape collapsed to a degenerate sliver after cluster
-            # rewrite (e.g. a thin grid-decomposition sliver whose
-            # vertices got pulled together).  Empty the polygon so
-            # the un-clustered original isn't left behind to
-            # violate the shared-vertex invariant.  Empty polygons
-            # are skipped by the validator and ``to_osm``.
-            shape.polygon = Polygon()
-            continue
+            # The CLUSTER-REWRITTEN ring collapsed to < 3 distinct
+            # vertices (a thin sliver whose own opposite-edge vertices
+            # got pulled together by the tol-sized weld).  Emptying it
+            # here silently deletes real pavement (KBNA Donelson: 275 m²
+            # aprons vanished this way).  HEAL, don't drop: keep the
+            # ORIGINAL un-clustered polygon so the area survives into the
+            # downstream weld / solve.  The shared-vertex INVARIANT
+            # validator (_validate_shared_vertex_invariant) is never run
+            # in production, so the un-welded sliver is harmless; a
+            # genuine (real-pavement) drop is the far worse outcome.
+            continue                                # keep original polygon
         # Rebuild interiors.
         new_interiors: list[list[tuple[float, float]]] = []
         for ri, ring in enumerate(poly.interiors):
@@ -1386,35 +1451,74 @@ def _enforce_shared_vertices(layout: "PavementLayout",
                 new_interiors.append(dedup_ring)
         try:
             new_poly = Polygon(dedup_ext, new_interiors)
-            # The cluster-rewrite step can create a self-touching
-            # ring when two NON-adjacent ring vertices end up at
-            # the same canonical cluster point — the consecutive-
-            # dedup above only catches adjacent duplicates.
-            # ``_drop_overlap_against_fixed_shapes`` runs buffer(0)
-            # on each shape and DROPS the whole shape if the result
-            # is a MultiPolygon.  Recover here by buffer(0) → keep
-            # largest piece, before the clip sees it (per user
-            # 2026-05-04 south-of-terminal1 130K-m² apron drop).
+            # The tol-sized weld can pull two NON-adjacent ring vertices of
+            # the SAME shape together (the consecutive-dedup above catches
+            # only adjacent duplicates), yielding an INVALID ring.  Two
+            # cases, distinguished by whether buffer(0) preserves the
+            # footprint:
+            #   (a) PINCH — the ring folds into lobes that merely TOUCH at
+            #       the shared corner (zero overlap); buffer(0) returns a
+            #       MultiPolygon reproducing the full area.  Keep EVERY lobe
+            #       (largest on this shape, the rest re-admitted as their own
+            #       airside pieces) so none is discarded.
+            #   (b) FOLD — a thin wedge folds back OVER itself (self-
+            #       crossing); buffer(0) returns only the un-folded footprint
+            #       and silently drops the overlapped half (KBNA Donelson: a
+            #       7,982 m² junction collapsed to 3,054 → a 4,928 m² hole;
+            #       plus 5,882 / 4,737 / 2,234 m² elsewhere airport-wide).
+            #       There is no valid welded ring, so REVERT to the original
+            #       un-welded polygon — the pavement survives and the
+            #       authoritative pre-solve weld (_unify_airside_geometry)
+            #       re-welds it against its neighbours.
             if (new_poly.geom_type == "Polygon"
                     and not new_poly.is_empty
                     and not new_poly.is_valid):
+                healed = None
                 try:
                     fixed = new_poly.buffer(0)
-                    if not fixed.is_empty:
-                        if fixed.geom_type == "MultiPolygon":
-                            fixed = max(fixed.geoms,
-                                        key=lambda g: g.area)
-                        if (fixed.geom_type == "Polygon"
-                                and fixed.is_valid
-                                and not fixed.is_empty):
-                            new_poly = fixed
+                    parts = [g for g in getattr(fixed, "geoms", [fixed])
+                             if g.geom_type == "Polygon" and g.is_valid
+                             and not g.is_empty]
+                    if parts and (sum(g.area for g in parts)
+                                  >= _area_before - _WELD_FOOTPRINT_TOL_M2):
+                        parts.sort(key=lambda g: g.area, reverse=True)
+                        healed = parts[0]
+                        for extra in parts[1:]:
+                            _recovered_parts.append((shape, extra))
                 except _GEOM_EXC:
-                    pass
+                    healed = None
+                if healed is None:
+                    # Fold: keep the original polygon (heal, never drop).
+                    continue
+                new_poly = healed
             if (new_poly.geom_type == "Polygon"
                     and not new_poly.is_empty):
                 shape.polygon = new_poly
+            # else: rewrite produced nothing usable — keep the original
+            # polygon (shape.polygon unchanged) rather than dropping it.
         except _GEOM_EXC:
             pass
+
+    # Re-admit the recovered pinch lobes as their own shapes.  They carry
+    # the source role/ref so they flow through the rest of the pipeline
+    # (spine slice / unify / per-surface solve) like any other airside
+    # piece; per-vertex node_altitudes are left to the (downstream) solve,
+    # matching how this function already reshapes the primary lobe's ring
+    # without re-deriving its altitudes.
+    for src_shape, part in _recovered_parts:
+        new_shape = BuiltShape(
+            polygon=part,
+            role=src_shape.role,
+            ref=src_shape.ref,
+            source_axis=src_shape.source_axis,
+            is_bridge=src_shape.is_bridge)
+        if src_shape.altitude is not None:
+            new_shape.altitude = src_shape.altitude
+        elif (src_shape.altitude_high is not None
+              and src_shape.altitude_low is not None):
+            new_shape.altitude_high = src_shape.altitude_high
+            new_shape.altitude_low = src_shape.altitude_low
+        layout.shapes.append(new_shape)
 
 
 def _validate_shared_vertex_invariant(layout: "PavementLayout",

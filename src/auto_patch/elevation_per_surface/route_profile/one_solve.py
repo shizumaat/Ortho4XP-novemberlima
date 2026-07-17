@@ -907,10 +907,26 @@ def feasibility_project(elev, shape_constraints, hard, *,
         # requeue.  The visit cap equals the old worst-case work
         # bound (max_iters full sweeps), so pathological cyclic
         # systems terminate exactly as before.
-        incident: dict = {}
-        for edge_index, (i, j, _budget, _kind) in enumerate(iter_edges):
-            incident.setdefault(i, []).append(edge_index)
-            incident.setdefault(j, []).append(edge_index)
+        # ``incident`` as a per-node list-of-lists indexed by node index
+        # (0..n-1) rather than a dict: every edge endpoint is a canonical node
+        # < n, so a plain list gives the same per-node adjacency (identical
+        # insertion order = edge order) at list-subscript speed instead of a
+        # dict hash+get on the hot re-enqueue path.  New lazy-expansion edges
+        # reference existing nodes (< n), so their sublists already exist.
+        incident: list = [None] * n
+        for edge_index in range(len(iter_edges)):
+            i = iter_edges[edge_index][0]
+            j = iter_edges[edge_index][1]
+            li = incident[i]
+            if li is None:
+                incident[i] = [edge_index]
+            else:
+                li.append(edge_index)
+            lj = incident[j]
+            if lj is None:
+                incident[j] = [edge_index]
+            else:
+                lj.append(edge_index)
         from collections import deque
         pending = deque(range(len(iter_edges)))
         in_pending = bytearray(len(iter_edges))
@@ -928,8 +944,36 @@ def feasibility_project(elev, shape_constraints, hard, *,
             _pops_sym = _pops_int = 0
             _noop_sym = _noop_int = 0
             _edge_pops = [0] * len(iter_edges)
+        # HOT-LOOP LOCALS (perf 2026-07-15, byte-identical): bind the bound
+        # deque methods to locals and re-index the interval bounds as a
+        # parallel list keyed by ``iter_edges`` position (the same key the dict
+        # used), so each visit pays a list subscript instead of a deque/dict
+        # attribute + hash lookup.  Every interval edge is created before the
+        # loop, so a fixed-length list covers every ``budget is None`` index;
+        # lazy-expansion edges are symmetric (budget not None) and never index
+        # this list.  ``incident`` is now a per-node list (built above), so the
+        # re-enqueue reads ``incident[node]`` directly (``None`` = no edges).
+        pending_popleft = pending.popleft
+        pending_append = pending.append
+        # ``interval_bounds_by_index`` is a dict keyed by ``iter_edges``
+        # position; re-index it as a parallel list so the hot loop pays a list
+        # subscript instead of a dict hash+get on every interval visit.  All
+        # interval edges are created before the loop, so a fixed-length list
+        # covers every ``budget is None`` index; lazy-expansion edges are
+        # symmetric (``budget`` not ``None``) and never index this list.
+        # Each slot also carries the tolerance-shifted comparands
+        # ``s_low - tol`` / ``s_high + tol`` precomputed ONCE (identical
+        # operands ⇒ identical IEEE result ⇒ bit-identical to the inline
+        # ``s_high + tol`` / ``s_low - tol``), so the no-op fast-path (the
+        # dominant visit class) skips two float additions per interval pop.
+        _interval_bounds = [None] * len(iter_edges)
+        for _bi, (_sl, _sh) in interval_bounds_by_index.items():
+            _interval_bounds[_bi] = (
+                _sl, _sh,
+                None if _sl is None else _sl - tol,
+                None if _sh is None else _sh + tol)
         while pending and visits < visit_cap:
-            edge_index = pending.popleft()
+            edge_index = pending_popleft()
             in_pending[edge_index] = 0
             visits += 1
             i, j, budget, kind = iter_edges[edge_index]
@@ -946,11 +990,12 @@ def feasibility_project(elev, shape_constraints, hard, *,
                 # ⇒ below the floor, raise it), so the same endpoint-weight
                 # split as the symmetric case applies with ``se`` in place of
                 # ``s·ex``.  A ``None`` side imposes no bound on that direction.
-                s_low, s_high = interval_bounds_by_index[edge_index]
+                s_low, s_high, s_low_tol, s_high_tol = \
+                    _interval_bounds[edge_index]
                 d = elev[i] - elev[j]
-                if s_high is not None and d > s_high + tol:
+                if s_high is not None and d > s_high_tol:
                     se = d - s_high
-                elif s_low is not None and d < s_low - tol:
+                elif s_low is not None and d < s_low_tol:
                     se = d - s_low
                 else:
                     if _reentry_dbg:
@@ -991,10 +1036,12 @@ def feasibility_project(elev, shape_constraints, hard, *,
                 if ex > _last_worst:
                     _last_worst = ex
             for moved_node in moved:
-                for neighbour_edge in incident.get(moved_node, ()):
-                    if not in_pending[neighbour_edge]:
-                        in_pending[neighbour_edge] = 1
-                        pending.append(neighbour_edge)
+                nbrs = incident[moved_node]
+                if nbrs is not None:
+                    for neighbour_edge in nbrs:
+                        if not in_pending[neighbour_edge]:
+                            in_pending[neighbour_edge] = 1
+                            pending_append(neighbour_edge)
             # MID-CALL lazy expansion: this node just moved — if it belongs
             # to still-certified shapes AND the move exceeds the entry's
             # slack-aware tolerance, the seed premise is gone; generate the
@@ -1018,12 +1065,18 @@ def feasibility_project(elev, shape_constraints, hard, *,
                                 _expand_lazy_entry_into_projection(lazy_entry):
                             edge_a, edge_b, _b2, _k2 = \
                                 iter_edges[new_edge_index]
-                            incident.setdefault(edge_a, []) \
-                                .append(new_edge_index)
-                            incident.setdefault(edge_b, []) \
-                                .append(new_edge_index)
+                            _la = incident[edge_a]
+                            if _la is None:
+                                incident[edge_a] = [new_edge_index]
+                            else:
+                                _la.append(new_edge_index)
+                            _lb = incident[edge_b]
+                            if _lb is None:
+                                incident[edge_b] = [new_edge_index]
+                            else:
+                                _lb.append(new_edge_index)
                             in_pending.append(1)
-                            pending.append(new_edge_index)
+                            pending_append(new_edge_index)
                     if still_watching:
                         lazy_entries_by_node[moved_node] = still_watching
                     else:

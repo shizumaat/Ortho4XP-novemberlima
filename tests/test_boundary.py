@@ -159,26 +159,11 @@ def test_boundary_bridge_flush_with_ribbon_at_shared_vertices():
         f"Matched {n_pairs} shared vertices.")
 
 
-@_requires_xplane
-def test_no_shape_crosses_airport_boundary():
-    """Invariant (user 2026-05-22): no emitted pavement shape may cross
-    the airport boundary (apt.dat row-130).  The boundary ribbon lies
-    entirely inside the line and pavement is clipped back to the ribbon's
-    inner edge, so every non-boundary shape stays within row-130."""
-    from auto_patch.boundary import find_boundary_crossings
-    from conftest import cached_airport_layout
-
-    # Shared session cache — built once per airport per run.
-    layout = cached_airport_layout("CYXY")
-    if layout.airport_boundary is None or layout.airport_boundary.is_empty:
-        pytest.skip("CYXY has no usable row-130 boundary to gate against")
-    crossings = find_boundary_crossings(layout)
-    assert not crossings, (
-        f"{len(crossings)} shape(s) cross the airport boundary: "
-        + ", ".join(
-            f"{s.role}/{s.ref} "
-            f"({s.polygon.difference(layout.airport_boundary).area:.1f} m²)"
-            for s in crossings[:8]))
+# (test_no_shape_crosses_airport_boundary RETIRED, user 2026-07-16: the
+# row-130 straddle invariant served the boundary ribbon, which the
+# adjacent-ground law superseded — the enforcement clip is gone from the
+# pipeline, and features like tunnel-ramp chains legitimately straddle
+# the boundary.)
 
 
 @_requires_xplane

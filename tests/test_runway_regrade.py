@@ -156,6 +156,39 @@ def test_segment_grade_cap_uses_tighter_endpoint():
         0.4, 0.6, MAX_RUNWAY_GRADE, RUNWAY_END_GRADE) == MAX_RUNWAY_GRADE
 
 
+def test_grade_cap_at_tiered_threshold_band():
+    """TIERED end-zone (defect G): with an escalated end-zone cap AND a
+    strict threshold band, the last ``threshold_strict_fraction`` before
+    each threshold keeps the strict cap while the rest of the end zone runs
+    at the escalated cap; the interior stays at the main cap."""
+    outer, strict, sfrac = 0.012, RUNWAY_END_GRADE, 0.05
+
+    def g(f):
+        return runway_grade_cap_at(f, MAX_RUNWAY_GRADE, outer, 0.25,
+                                   strict, sfrac)
+    # Threshold band (< 0.05 of each end) → strict.
+    assert g(0.0) == strict
+    assert g(0.03) == strict
+    assert g(0.97) == strict
+    assert g(1.0) == strict
+    # Outer end zone (0.05 .. 0.25) → escalated.
+    assert g(0.05) == outer
+    assert g(0.10) == outer
+    assert g(0.90) == outer
+    # Interior → main cap.
+    assert g(0.30) == MAX_RUNWAY_GRADE
+    assert g(0.5) == MAX_RUNWAY_GRADE
+
+
+def test_grade_cap_at_no_threshold_cap_matches_two_tier():
+    """threshold_strict_cap=None (the default) reproduces the historical
+    single-end-zone-cap behaviour exactly."""
+    for f in (0.0, 0.1, 0.25, 0.5, 0.9, 1.0):
+        assert (runway_grade_cap_at(f, MAX_RUNWAY_GRADE, RUNWAY_END_GRADE)
+                == runway_grade_cap_at(f, MAX_RUNWAY_GRADE, RUNWAY_END_GRADE,
+                                       0.25, None, 0.0))
+
+
 def test_regrade_end_cap_clips_threshold_tighter():
     """A single seam at 250 m on a 1000 m runway, CIFP threshold below
     the seam.  Under the 1.5% cap the threshold can sit within 3.75 m of
