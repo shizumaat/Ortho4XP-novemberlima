@@ -40,7 +40,9 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStatusBar,
+    QStyle,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -59,7 +61,7 @@ import O4_Qt_Settings as QTSET
 import O4_Qt_Wizard as QTWIZ
 
 PREFS_FILE = FNAMES.data_path(".qt_prefs.json")
-AIRPORT_CACHE = FNAMES.data_path(".airport_index.tsv")
+AIRPORT_CACHE = FNAMES.airport_index_cache()
 MAX_CONSOLE_LINES = 5000
 
 # Build-area texture-mode selector: user-visible label -> tile config value.
@@ -68,6 +70,31 @@ TEXTURE_MODE_CHOICES = (
     ("Full Ortho", "full_ortho"),
     ("Airport Ortho", "airport_ortho"),
     ("Default X-Plane", "default_xplane"),
+)
+
+# Build-area elevation-detail selector: user-visible label -> tile config
+# value (the elevation analogue of the imagery zoom level; see
+# docs/specs/elevation-level-spec.md).  Order is the popup-menu order.
+ELEVATION_LEVEL_CHOICES = (
+    ("Auto", "auto"),
+    ("Auto + coastline", "coastline"),
+    ("30 m", "30"),
+    ("10 m", "10"),
+    ("5 m", "5"),
+    ("1 m", "1"),
+)
+
+ELEVATION_LEVEL_TOOLTIP = (
+    "Tile-wide elevation detail level.\n"
+    "Auto: 30 m base data plus meter-class lidar at airports (standard).\n"
+    "Auto + coastline: additionally drapes a lidar band along shorelines,\n"
+    "graded by approach visibility — about 10 m detail within 20 km of an\n"
+    "airport, 20 m out to 50 km, 30 m beyond.\n"
+    "Numeric levels fetch the finest wide-area elevation source covering\n"
+    "the whole tile and densify the mesh grid to match. Levels never\n"
+    "coarsen the automatic choice and cap themselves to the finest source\n"
+    "actually available. Higher levels mean substantially larger\n"
+    "downloads, working files, memory use and triangle counts."
 )
 
 
@@ -127,6 +154,24 @@ def gui_provider_codes():
     )
     codes += sorted(set(IMG.combined_providers_dict))
     return [c for c in codes if c not in ("SEA",)]
+
+
+def _sync_combo_to_agreed_value(combo, configured_values):
+    """Select the single agreed value, or unresolve the combo to "--".
+
+    No configured values: the combo keeps its current choice.  Exactly one
+    value that the combo offers: select it.  Anything else — the tiles
+    disagree, or their agreed value is not offered by this combo — sets
+    ``currentIndex(-1)`` so the "--" placeholder shows and the build guard
+    in :meth:`MainWindow.start_build` trips until the user picks a value.
+    """
+    if not configured_values:
+        return
+    index = -1
+    if len(configured_values) == 1:
+        index = combo.findText(next(iter(configured_values)))
+    if index != combo.currentIndex():
+        combo.setCurrentIndex(index)
 
 
 class MainWindow(QMainWindow):
@@ -219,11 +264,18 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(QLabel(" Imagery "))
         self.imagery_combo = QComboBox()
         self.imagery_combo.addItems(gui_provider_codes())
+        # "--" shows when the selected tiles' configs disagree
+        # (currentIndex -1); start_build refuses to run until resolved.
+        self.imagery_combo.setPlaceholderText("--")
         self.imagery_combo.currentTextChanged.connect(self._imagery_changed)
         toolbar.addWidget(self.imagery_combo)
         toolbar.addWidget(QLabel(" Build ZL "))
         self.zl_combo = QComboBox()
         self.zl_combo.addItems([str(z) for z in range(12, 19)])
+        self.zl_combo.setPlaceholderText("--")
+        self.zl_combo.currentTextChanged.connect(
+            lambda _text: self._update_build_summary()
+        )
         toolbar.addWidget(self.zl_combo)
         toolbar.addSeparator()
         self.zones_btn = QPushButton("✏ Zones")
@@ -335,6 +387,23 @@ class MainWindow(QMainWindow):
         trl.addWidget(self.texture_combo, 1)
         bg.addWidget(self.texture_row)
 
+        # Elevation detail level: how fine the tile-wide terrain data is
+        # (per-tile config), mirroring the texture-mode row above.
+        self.elevation_row = QWidget()
+        erl = QHBoxLayout(self.elevation_row)
+        erl.setContentsMargins(0, 0, 0, 0)
+        self.elevation_label = QLabel("Elevation:")
+        erl.addWidget(self.elevation_label)
+        self.elevation_combo = QComboBox()
+        for label, value in ELEVATION_LEVEL_CHOICES:
+            self.elevation_combo.addItem(label, value)
+        self.elevation_combo.setToolTip(ELEVATION_LEVEL_TOOLTIP)
+        self.elevation_combo.currentIndexChanged.connect(
+            self._elevation_level_changed
+        )
+        erl.addWidget(self.elevation_combo, 1)
+        bg.addWidget(self.elevation_row)
+
         self.build_btn = QPushButton("▶ Build")
         self.build_btn.clicked.connect(self.start_build)
         bg.addWidget(self.build_btn)
@@ -350,8 +419,8 @@ class MainWindow(QMainWindow):
         rows_scroll.setWidgetResizable(True)
         rows_host = QWidget()
         self._rows_layout = QVBoxLayout(rows_host)
-        self._rows_layout.setContentsMargins(0, 0, 0, 0)
-        self._rows_layout.setSpacing(4)
+        self._rows_layout.setContentsMargins(0, 2, 0, 2)
+        self._rows_layout.setSpacing(6)
         self._rows_layout.addStretch(1)
         rows_scroll.setWidget(rows_host)
         pg.addWidget(rows_scroll, 1)
@@ -442,6 +511,9 @@ class MainWindow(QMainWindow):
         overlay_action = QAction("Link overlays folder in X-Plane", self)
         overlay_action.triggered.connect(self._toggle_overlay_link)
         tools_menu.addAction(overlay_action)
+        coral_atlas_action = QAction("Allen Coral Atlas reef bathymetry…", self)
+        coral_atlas_action.triggered.connect(self.open_coral_atlas_dialog)
+        tools_menu.addAction(coral_atlas_action)
 
         help_menu = self.menuBar().addMenu("&Help")
         wizard_action = QAction("Run setup assistant…", self)
@@ -514,22 +586,44 @@ class MainWindow(QMainWindow):
             except OSError as exc:
                 print("Could not save derived paths:", exc)
 
+    def open_coral_atlas_dialog(self):
+        """Tools menu: the Allen Coral Atlas reef bathymetry setup."""
+        import O4_Qt_Coral_Atlas as QTCORAL
+
+        tile = self.map.active_tile() or (
+            int(self.prefs.get("last_lat", 0)),
+            int(self.prefs.get("last_lon", 0)),
+        )
+        dialog = QTCORAL.CoralAtlasDialog(
+            self, initial_lat=tile[0], initial_lon=tile[1]
+        )
+        dialog.show()
+
     def open_settings(self):
+        # The whole map selection edits together (mixed states across
+        # tiles); the active tile alone when nothing is multi-selected.
+        selected = sorted(self.map.selection())
+        if not selected and self.map.active_tile():
+            selected = [self.map.active_tile()]
         dialog = QTSET.SettingsWindow(
             self.prefs,
-            self.map.active_tile(),
+            selected,
             self.output_dir(),
             self,
         )
-        if dialog.exec() == QDialog.Accepted:
-            old_xplane = self.prefs.get("xplane_dir", "")
-            self.prefs = dialog.result_prefs()
-            save_prefs(self.prefs)
-            self._apply_prefs()
-            if self.prefs.get("xplane_dir", "") != old_xplane:
-                self._seed_paths_from_xplane()
-                self._load_airports_async()
-            self.refresh_tiles()
+        dialog.exec()
+        # Blended settings apply immediately (Option C): every close path
+        # keeps the changes, so the result is consumed unconditionally.
+        old_xplane = self.prefs.get("xplane_dir", "")
+        self.prefs = dialog.result_prefs()
+        save_prefs(self.prefs)
+        self._apply_prefs()
+        if self.prefs.get("xplane_dir", "") != old_xplane:
+            self._seed_paths_from_xplane()
+            self._load_airports_async()
+        self.refresh_tiles()
+        if dialog.tile_written:
+            self._active_changed(self.map.active_tile())
 
     def output_dir(self):
         """Custom build dir semantics: '' = default Tiles dir; a path with a
@@ -661,6 +755,43 @@ class MainWindow(QMainWindow):
 
     def _selection_changed(self):
         sel = self.map.selection()
+        self._sync_build_controls_to_selection(sel)
+        self._update_build_summary(sel)
+
+    def _sync_build_controls_to_selection(self, selection):
+        """Point the Imagery / Build ZL combos at the selection's config.
+
+        Tiles whose per-tile config records build provenance
+        (``default_website`` / ``default_zl``) drive the toolbar combos:
+        one agreed value is selected outright; disagreement unresolves the
+        combo (it shows "--") and :meth:`start_build` refuses to run until
+        the user picks a value.  Tiles with no recorded value impose
+        nothing, and an empty selection leaves the combos alone.
+        """
+        import O4_Settings_Model as SM
+
+        websites = set()
+        zoomlevels = set()
+        for lat, lon in selection:
+            raw = SM.read_tile_raw(lat, lon, self.output_dir())
+            if not raw:
+                continue
+            website = raw.get("default_website", "").strip()
+            if website:
+                websites.add(website)
+            zoomlevel = str(raw.get("default_zl", "")).strip()
+            if zoomlevel:
+                try:
+                    zoomlevel = str(int(float(zoomlevel)))
+                except ValueError:
+                    pass
+                zoomlevels.add(zoomlevel)
+        _sync_combo_to_agreed_value(self.imagery_combo, websites)
+        _sync_combo_to_agreed_value(self.zl_combo, zoomlevels)
+
+    def _update_build_summary(self, sel=None):
+        if sel is None:
+            sel = self.map.selection()
         n = len(sel)
         if not n:
             self.build_summary.setText("No tiles selected")
@@ -695,6 +826,7 @@ class MainWindow(QMainWindow):
     def _active_changed(self, tile):
         self._selection_changed()
         self._refresh_texture_mode(tile)
+        self._refresh_elevation_level(tile)
         if tile is None:
             self.info_group.setVisible(False)
             return
@@ -816,6 +948,53 @@ class MainWindow(QMainWindow):
         self.texture_combo.blockSignals(True)
         self.texture_combo.setCurrentIndex(index)
         self.texture_combo.blockSignals(False)
+
+    def _refresh_elevation_level(self, tile):
+        """Load the active tile's ``elevation_level`` into the build-area combo.
+
+        Mirrors :meth:`_refresh_texture_mode`: reads the per-tile config via
+        :mod:`O4_Settings_Model`, falls back to "auto" when the tile has no
+        config or an unknown value, and blocks signals so the programmatic
+        update does not write back to disk.
+        """
+        import O4_Settings_Model as SM
+
+        value = "auto"
+        if tile is not None:
+            raw = SM.read_tile_raw(tile[0], tile[1], self.output_dir())
+            if raw and raw.get("elevation_level"):
+                value = raw["elevation_level"]
+        index = self.elevation_combo.findData(value)
+        if index < 0:
+            index = 0
+        self.elevation_combo.blockSignals(True)
+        self.elevation_combo.setCurrentIndex(index)
+        self.elevation_combo.blockSignals(False)
+
+    def _elevation_level_changed(self, index):
+        """Persist the chosen elevation detail level to the tile's config.
+
+        No-ops when no tile is active.  Writes only the ``elevation_level``
+        key; :func:`O4_Settings_Model.write_tile` preserves every other
+        tile var.
+        """
+        tile = self.map.active_tile()
+        if tile is None:
+            return
+        value = self.elevation_combo.itemData(index)
+        if value is None:
+            return
+        import O4_Settings_Model as SM
+
+        try:
+            SM.write_tile(
+                tile[0],
+                tile[1],
+                self.output_dir(),
+                {"elevation_level": value},
+            )
+        except OSError as exc:
+            print("Could not save elevation level:", exc)
 
     def _texture_mode_changed(self, index):
         """Persist the chosen texture mode to the active tile's config.
@@ -984,6 +1163,9 @@ class MainWindow(QMainWindow):
     # Building
     # ------------------------------------------------------------------
     def _imagery_changed(self, code):
+        if not code:
+            # Unresolved ("--"): the map keeps showing its last provider.
+            return
         self.map.set_provider(code)
         self._update_zoom_label()
 
@@ -993,6 +1175,17 @@ class MainWindow(QMainWindow):
         selection = sorted(self.map.selection())
         if not selection:
             self._status("Select at least one tile to build.")
+            return
+        unresolved = []
+        if self.imagery_combo.currentIndex() < 0:
+            unresolved.append("imagery source")
+        if self.zl_combo.currentIndex() < 0:
+            unresolved.append("build zoom level")
+        if unresolved:
+            self._status(
+                "The selected tiles disagree on the %s — pick one in the "
+                "toolbar before building." % " and the ".join(unresolved)
+            )
             return
         if self.chk_skip_built.isChecked():
             todo = [t for t in selection if t not in self._built]
@@ -1042,20 +1235,33 @@ class MainWindow(QMainWindow):
 
     def _setup_progress_page(self, todo):
         """Morph the Build box into the per-tile progress list."""
-        for bar, status, row in self._tile_rows.values():
+        for bar, status, row, cancel in self._tile_rows.values():
             row.deleteLater()
         self._tile_rows = {}
         for tile in todo:
             row = QWidget()
             rl = QVBoxLayout(row)
-            rl.setContentsMargins(0, 0, 0, 0)
-            rl.setSpacing(1)
+            rl.setContentsMargins(6, 4, 6, 4)
+            rl.setSpacing(2)
             head = QHBoxLayout()
+            head.setSpacing(6)
             head.addWidget(QLabel(FNAMES.short_latlon(*tile)))
             head.addStretch(1)
             status = QLabel("queued")
             status.setStyleSheet("color: gray; font-size: 11px;")
             head.addWidget(status)
+            # Per-tile cancel: the platform style's standard close icon
+            # (the operating-system-appropriate "X"), spec §3.6.
+            cancel = QToolButton()
+            cancel.setAutoRaise(True)
+            cancel.setIcon(self.style().standardIcon(
+                QStyle.SP_TitleBarCloseButton))
+            cancel.setToolTip("Cancel this tile")
+            cancel.setFixedSize(18, 18)
+            cancel.clicked.connect(
+                lambda _checked=False, t=tile: self._cancel_tile_clicked(t)
+            )
+            head.addWidget(cancel)
             rl.addLayout(head)
             bar = QProgressBar()
             bar.setRange(0, 100)
@@ -1066,7 +1272,7 @@ class MainWindow(QMainWindow):
             self._rows_layout.insertWidget(
                 self._rows_layout.count() - 1, row
             )
-            self._tile_rows[tile] = (bar, status, row)
+            self._tile_rows[tile] = (bar, status, row, cancel)
         self._done_count = 0
         self._ntiles = len(todo)
         self._build_t0 = __import__("time").time()
@@ -1098,7 +1304,7 @@ class MainWindow(QMainWindow):
         self._progress_states[tile] = (state, label, pct)
         self.map.set_progress(self._progress_states)
         if tile in self._tile_rows:
-            bar, status, _ = self._tile_rows[tile]
+            bar, status, _, cancel = self._tile_rows[tile]
             if state == "done":
                 bar.setValue(100)
                 status.setText("done ✓")
@@ -1108,6 +1314,8 @@ class MainWindow(QMainWindow):
                 status.setStyleSheet("color: red; font-size: 11px;")
             elif label == "stopped":
                 status.setText("stopped")
+            if state in ("done", "error") or label == "stopped":
+                cancel.setEnabled(False)
         if state == "done":
             self.refresh_tiles()
 
@@ -1116,9 +1324,17 @@ class MainWindow(QMainWindow):
 
     def _update_tile_row(self, tile, pct, label):
         if tile in self._tile_rows:
-            bar, status, _ = self._tile_rows[tile]
+            bar, status, _, _cancel = self._tile_rows[tile]
             bar.setValue(int(pct))
             status.setText("%s · %d%%" % (label, pct))
+
+    def _cancel_tile_clicked(self, tile):
+        """Per-tile X button: stop this tile, let the others continue."""
+        if self._session.cancel_tile(tile[0], tile[1]):
+            if tile in self._tile_rows:
+                _bar, status, _row, cancel = self._tile_rows[tile]
+                cancel.setEnabled(False)
+                status.setText("stopping…")
 
     def _update_build_clock(self):
         import time as _time
@@ -1212,12 +1428,21 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.Yes:
                 event.ignore()
                 return
+            # Through the session, not the raw flag: a parallel run must
+            # relay the cancel to its worker subprocesses — and quitting
+            # must also TERMINATE them (this process dies before their
+            # graceful step-end retirement; a child left behind keeps
+            # building headless and races the next session's caches).
+            self._session.shutdown()
             UI.red_flag = True
         tile = self.map.active_tile()
         if tile:
             self.prefs["last_lat"], self.prefs["last_lon"] = tile
-        self.prefs["imagery"] = self.imagery_combo.currentText()
-        self.prefs["zl"] = int(self.zl_combo.currentText())
+        # An unresolved combo ("--", index -1) keeps the previous pref.
+        if self.imagery_combo.currentIndex() >= 0:
+            self.prefs["imagery"] = self.imagery_combo.currentText()
+        if self.zl_combo.currentIndex() >= 0:
+            self.prefs["zl"] = int(self.zl_combo.currentText())
         save_prefs(self.prefs)
         event.accept()
 

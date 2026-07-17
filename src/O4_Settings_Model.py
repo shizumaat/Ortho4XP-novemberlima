@@ -74,7 +74,7 @@ class Setting:
 # Order within a category is significant and preserved.
 # ---------------------------------------------------------------------------
 _LAYOUT: list = [
-    ("general", "General & Paths", [
+    ("general", "General", [
         ("xplane_dir", "X-Plane installation", "pref", False,
          "Your X-Plane folder. Sets the Custom Scenery target, overlay "
          "source and the airport search index."),
@@ -88,7 +88,8 @@ _LAYOUT: list = [
         ("verbosity", "Console output", "app", False),
         ("cleaning_level", "Build file cleanup level", "app", False),
     ]),
-    ("network", "Network & Downloads", [
+    ("network", "Performance & Network", [
+        ("max_build_slots", "Parallel tile builds", "app", False),
         ("max_download_slots", "Parallel orthophoto downloads", "app", False),
         ("max_convert_slots", "Parallel DDS conversions", "app", False),
         ("overpass_server_choice", "OSM Overpass server", "app", False),
@@ -96,8 +97,6 @@ _LAYOUT: list = [
         ("max_connect_retries", "Connection retries", "app", True),
         ("max_baddata_retries", "Bad-data retries", "app", True),
         ("check_tms_response", "Retry on imagery server errors", "app", True),
-        ("skip_downloads", "Skip imagery downloads", "app", True),
-        ("skip_converts", "Skip DDS conversion", "app", True),
     ]),
     ("imagery", "Imagery & Zoom Levels", [
         ("texture_mode", "Texture mode", "tile", False),
@@ -106,11 +105,12 @@ _LAYOUT: list = [
         ("cover_zl", "Airport coverage ZL", "tile", False),
         ("cover_extent", "Airport coverage extent (km)", "tile", False),
         ("sea_texture_blur", "Sea texture blur (m)", "tile", True),
+        ("sea_nodata_fill", "Repair imagery no-data over water", "tile", False),
+        ("color_harmonization", "Harmonize texture colors", "tile", False),
+        ("skip_downloads", "Skip imagery downloads", "app", True),
+        ("skip_converts", "Skip DDS conversion", "app", True),
     ]),
-    ("mesh", "Mesh & Elevation", [
-        ("custom_dem", "Custom elevation data (DEM)", "tile", False),
-        ("fill_nodata", "Fill missing elevation data", "tile", False),
-        ("auto_patch", "Auto-patch airports (runway slopes)", "tile", False),
+    ("mesh", "Mesh", [
         ("curvature_tol", "Curvature tolerance", "tile", False),
         ("apt_curv_tol", "Airport curvature tolerance", "tile", False),
         ("apt_curv_ext", "Airport curvature extent (km)", "tile", False),
@@ -120,11 +120,15 @@ _LAYOUT: list = [
         ("min_angle", "Min triangle angle (°)", "tile", True),
         ("sea_smoothing_mode", "Sea surface smoothing", "tile", True),
         ("water_smoothing", "Inland water smoothing passes", "tile", True),
-        ("iterate", "Iterative refinement step", "tile", True),
         ("mesh_zl", "Max imagery zoom the mesh allows", "tile", True),
     ]),
-    ("elevation", "Elevation & Airport Lidar", [
+    ("elevation", "Elevation", [
+        ("elevation_level", "Elevation detail level", "tile", False),
+        ("elevation_coastline_band_km", "Coastline lidar band width (km)", "tile", True),
         ("base_elevation_source", "Base elevation source", "app", False),
+        ("custom_dem", "Custom elevation data (DEM)", "tile", False),
+        ("fill_nodata", "Fill missing elevation data", "tile", False),
+        ("auto_patch", "Auto-patch airports (runway slopes)", "tile", False),
         ("airport_elevation_insets", "Fetch airport lidar insets", "tile", False),
         ("airport_elevation_inset_margin_m", "Lidar extent beyond airport (m)", "tile", False),
         ("airport_elevation_inset_feather_m", "Lidar edge blend width (m)", "tile", False),
@@ -134,29 +138,42 @@ _LAYOUT: list = [
         ("apt_smoothing_pix", "Airport elevation smoothing (px)", "tile", True),
         ("apt_smoothing_auto", "Scale smoothing to data quality", "tile", True),
         ("working_grid_arc_seconds", "Working grid spacing", "tile", True),
+        ("iterate", "Iterative DEM refinement step", "tile", True),
     ]),
-    ("vector", "Roads & Vector Data", [
+    ("vector", "Roads & OSM Data", [
         ("road_level", "Road detail level", "tile", False),
         ("road_banking_limit", "Road banking limit (m)", "tile", True),
         ("lane_width", "Road lane width (m)", "tile", True),
         ("max_levelled_segs", "Max levelled road segments", "tile", True),
         ("clean_bad_geometries", "Repair bad OSM geometries", "tile", True),
-        ("water_simplification", "Water node simplification (m)", "tile", True),
-        ("min_area", "Min water area (km²)", "tile", True),
-        ("max_area", "Max unmasked water area (km²)", "tile", True),
     ]),
     ("water", "Water & Masks", [
         ("water_tech", "Water rendering tech", "tile", False),
+        ("water_simplification", "Water node simplification (m)", "tile", True),
+        ("min_area", "Min water area (km²)", "tile", True),
+        ("max_area", "Max unmasked water area (km²)", "tile", True),
         ("ratio_water", "Water transparency ratio", "tile", False),
         ("ratio_bathy", "Bathymetry multiplier", "tile", False),
         ("mask_zl", "Water mask resolution", "tile", False),
         ("masks_width", "Mask width (m)", "tile", False),
         ("masking_mode", "Coastline mask style", "tile", False),
+        ("coastal_foam_edge", "Wavy shoreline with foam band", "tile", False),
         ("use_masks_for_inland", "Mask inland water", "tile", True),
         ("imprint_masks_to_dds", "Imprint masks into DDS", "tile", True),
         ("distance_masks_too", "Build distance masks", "tile", True),
-        ("masks_use_DEM_too", "Use DEM for masks", "tile", True),
         ("masks_custom_extent", "Custom mask extent", "tile", True),
+    ]),
+    ("bathymetry", "Bathymetry", [
+        ("masks_use_DEM_too", "Measured depth in masks", "tile", False),
+        ("bathymetry_airport_radius_km", "Fetch radius around anchors (km)", "tile", False),
+        ("bathymetry_near_icao_airports", "Near ICAO airports", "tile", False),
+        ("bathymetry_near_other_airports", "Near small airfields (no ICAO)", "tile", False),
+        ("bathymetry_near_seaplane_bases", "Near seaplane bases", "tile", False),
+        ("bathymetry_near_heliports", "Near heliports", "tile", False),
+        ("reef_visibility_depth", "Reef visibility depth (m)", "tile", False),
+        ("osm_shallow_water_fallback", "Mapped shallow-water fallback", "tile", False),
+        ("bathymetry_band_km", "Band width along shoreline (km)", "tile", True),
+        ("dsf_bathymetry", "DSF sea_level raster source", "tile", True),
     ]),
     ("rendering", "Rendering & Overlays", [
         ("overlay_lod", "Overlay draw distance (m)", "tile", False),
@@ -358,21 +375,58 @@ def read_tile_raw(lat: int, lon: int, custom_build_dir: str) -> dict | None:
 _TILE_PRESERVED = ("zone_list", "default_website", "default_zl")
 
 
+def values_equivalent(name: str, first: str, second: str) -> bool:
+    """Whether two raw strings mean the same value for setting *name*.
+
+    Comparison happens on the coerce-normalized forms so ``25000`` and
+    ``25000.0`` are one value for a float setting — otherwise the sparse
+    override diffing would store phantom overrides.  Unknown names or
+    non-coercible values fall back to plain string equality.
+    """
+    if first == second:
+        return True
+    try:
+        ok_first, normalized_first, _ = coerce(name, first)
+        ok_second, normalized_second, _ = coerce(name, second)
+    except KeyError:
+        return False
+    if ok_first and ok_second:
+        return normalized_first == normalized_second
+    return False
+
+
+def global_effective_value(name: str, global_cfg: dict | None = None) -> str:
+    """The value a tile INHERITS for *name*: global config, else default.
+
+    :param global_cfg: pre-parsed global config (re-read when omitted).
+    """
+    if global_cfg is None:
+        global_cfg = read_global_raw()
+    if name in global_cfg:
+        return global_cfg[name]
+    return str(O4_Cfg_Vars.cfg_vars[name]["default"])
+
+
 def write_tile(lat: int, lon: int, custom_build_dir: str, values: dict) -> None:
-    """Write the complete tile config file in the legacy line-per-var format.
+    """Write the tile config file as SPARSE OVERRIDES (blended model).
 
-    One line is written for every var in ``O4_Cfg_Vars.list_tile_vars`` in
-    that order.  Value resolution per var:
+    Only settings that DIFFER from the value the tile would inherit (the
+    global config value, else the registry default) are written — every
+    other setting is pulled from global, live, at build time
+    (``O4_Config_Utils.Tile`` seeds every var from the global scope and
+    the tile file overwrites only the keys it contains).  Consequences:
 
-    * ``zone_list`` / ``default_website`` / ``default_zl``: always taken from
-      the existing tile file when it exists (never from *values*); otherwise
-      ``zone_list`` defaults to ``[]`` and the other two fall back to the
-      global config value then the registry default.
-    * every other var: *values* when present, else the existing tile file
-      value, else the global config value, else the registry default.
+    * Setting a var to exactly its inherited value REMOVES the override.
+    * Legacy full-snapshot tile configs shrink to their true differences
+      on their next write (reads of either format behave identically).
+    * ``zone_list`` / ``default_website`` / ``default_zl`` are build
+      provenance, not settings: they are preserved verbatim from the
+      existing file (never taken from *values*, never diffed away).
 
-    An existing file is backed up to ``*.cfg.bak``; the write is atomic and
-    parent directories are created as needed.
+    Value resolution per var: *values* when present, else the existing
+    tile file value; a var in neither stays inherited.  An existing file
+    is backed up to ``*.cfg.bak``; the write is atomic and parent
+    directories are created as needed.
 
     :raises ValueError: if any key in *values* is not a tile var.
     """
@@ -384,29 +438,83 @@ def write_tile(lat: int, lon: int, custom_build_dir: str, values: dict) -> None:
     file_exists = os.path.isfile(path)
     existing = _parse_cfg(path) if file_exists else {}
     global_cfg = read_global_raw()
-    cfg_vars = O4_Cfg_Vars.cfg_vars
 
     out: dict = {}
     for var in tile_vars:
         if var in _TILE_PRESERVED:
             if file_exists and var in existing:
                 out[var] = existing[var]
-            elif var == "zone_list":
-                out[var] = "[]"
-            elif var in global_cfg:
-                out[var] = global_cfg[var]
-            else:
-                out[var] = str(cfg_vars[var]["default"])
+            continue
+        if var in values:
+            candidate = str(values[var])
+        elif var in existing:
+            candidate = existing[var]
         else:
-            if var in values:
-                out[var] = str(values[var])
-            elif file_exists and var in existing:
-                out[var] = existing[var]
-            elif var in global_cfg:
-                out[var] = global_cfg[var]
-            else:
-                out[var] = str(cfg_vars[var]["default"])
+            continue
+        if values_equivalent(
+            var, candidate, global_effective_value(var, global_cfg)
+        ):
+            continue  # equal to inherited: no override to store
+        out[var] = candidate
     _write_atomic_with_backup(path, out)
+
+
+# Tile-scope settings most commonly customized per tile (the pinned
+# "This tile" section of the blended settings window): texture source
+# mode, elevation quality, the coastline lidar band, road detail, the
+# coastline mask blur, and the airport imagery zoom.
+CURATED_TILE_SETTINGS = (
+    "texture_mode",
+    "elevation_level",
+    "elevation_coastline_band_km",
+    "road_level",
+    "masks_width",
+    "cover_zl",
+)
+
+
+def effective_tile_settings(
+    lat: int, lon: int, custom_build_dir: str
+) -> dict:
+    """Blended view of every tile-scope setting for one tile.
+
+    :returns: ``{name: (value, origin)}`` for each tile-scope setting in
+        the window registry, where origin is ``"tile"`` (overridden in
+        the tile file — present AND different from the inherited value,
+        so legacy full-snapshot files report only true differences),
+        ``"global"`` (inherited from the global config file) or
+        ``"default"`` (inherited from the registry default).
+    """
+    tile_raw = read_tile_raw(lat, lon, custom_build_dir) or {}
+    global_cfg = read_global_raw()
+    blended = {}
+    for setting in settings():
+        if setting.scope != "tile":
+            continue
+        inherited = global_effective_value(setting.name, global_cfg)
+        tile_value = tile_raw.get(setting.name)
+        if tile_value is not None and not values_equivalent(
+            setting.name, tile_value, inherited
+        ):
+            blended[setting.name] = (tile_value, "tile")
+        elif setting.name in global_cfg:
+            blended[setting.name] = (inherited, "global")
+        else:
+            blended[setting.name] = (inherited, "default")
+    return blended
+
+
+def tile_override_names(
+    lat: int, lon: int, custom_build_dir: str
+) -> tuple:
+    """Names of the settings genuinely customized on this tile."""
+    return tuple(
+        name
+        for name, (_value, origin) in effective_tile_settings(
+            lat, lon, custom_build_dir
+        ).items()
+        if origin == "tile"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -23,7 +23,7 @@ def test_categories_ordered_and_titled():
     keys = [key for key, _ in SM.CATEGORIES]
     assert keys == [
         "general", "network", "imagery", "mesh", "elevation", "vector",
-        "water", "rendering",
+        "water", "bathymetry", "rendering",
     ]
     # Titles are non-empty strings.
     assert all(isinstance(title, str) and title for _, title in SM.CATEGORIES)
@@ -169,10 +169,12 @@ def test_read_tile_raw_parses(tmp_path):
     }
 
 
-def test_write_tile_full_and_preservation(tmp_path, monkeypatch):
+def test_write_tile_sparse_overrides_and_preservation(tmp_path, monkeypatch):
+    """The blended model (2026-07-16): a tile file stores ONLY overrides —
+    settings that differ from the inherited (global-else-default) value —
+    plus the preserved build-provenance trio."""
     # chdir so the default global cfg (FNAMES.resource_path) lives in tmp.
     monkeypatch.chdir(tmp_path)
-    # Global config providing a fallback value for road_level.
     (tmp_path / "Ortho4XP.cfg").write_text("road_level=4\n")
 
     build = _tile_dir(tmp_path)
@@ -189,37 +191,76 @@ def test_write_tile_full_and_preservation(tmp_path, monkeypatch):
     SM.write_tile(45, 5, build, {"limit_tris": "1.5"})
 
     result = SM.read_tile_raw(45, 5, build)
-    # Every tile var is present.
-    assert set(result.keys()) == set(O4_Cfg_Vars.list_tile_vars)
-
-    # Map-managed vars preserved from the existing file.
+    # SPARSE: only the preserved trio plus genuine overrides are present.
+    assert set(result.keys()) == {
+        "zone_list", "default_website", "default_zl",
+        "curvature_tol", "limit_tris",
+    }
     assert result["zone_list"] == "[['x']]"
     assert result["default_website"] == "BestOrtho"
     assert result["default_zl"] == "17"
-    # From caller-supplied values.
     assert result["limit_tris"] == "1.5"
-    # Preserved from the existing tile file.
     assert result["curvature_tol"] == "9.9"
-    # Filled from the global config.
-    assert result["road_level"] == "4"
-    # Filled from the registry default (present nowhere else).
-    assert result["lane_width"] == str(O4_Cfg_Vars.cfg_vars["lane_width"]["default"])
-
+    # Inherited settings are NOT in the file; the blended view reports
+    # their origin instead.
+    blended = SM.effective_tile_settings(45, 5, build)
+    assert blended["road_level"] == ("4", "global")
+    assert blended["lane_width"] == (
+        str(O4_Cfg_Vars.cfg_vars["lane_width"]["default"]), "default")
+    assert blended["limit_tris"] == ("1.5", "tile")
+    assert set(SM.tile_override_names(45, 5, build)) == {
+        "curvature_tol", "limit_tris",
+    }
     # Backup created.
     assert os.path.isfile(path + ".bak")
 
 
-def test_write_tile_defaults_when_no_existing_or_global(tmp_path, monkeypatch):
+def test_write_tile_equal_value_removes_the_override(tmp_path, monkeypatch):
+    """Setting a var to exactly its inherited value removes the override."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "Ortho4XP.cfg").write_text("road_level=4\n")
+    build = _tile_dir(tmp_path)
+
+    SM.write_tile(45, 5, build, {"road_level": "5"})
+    assert "road_level" in SM.read_tile_raw(45, 5, build)
+    SM.write_tile(45, 5, build, {"road_level": "4"})  # back to global
+    assert "road_level" not in SM.read_tile_raw(45, 5, build)
+    assert SM.tile_override_names(45, 5, build) == ()
+
+
+def test_legacy_snapshot_shrinks_to_true_differences(tmp_path, monkeypatch):
+    """A legacy full-snapshot tile file reports (and, on its next write,
+    keeps) only the settings that genuinely differ from global."""
+    monkeypatch.chdir(tmp_path)
+    build = _tile_dir(tmp_path)
+    path = os.path.join(build, "Ortho4XP_+45+005.cfg")
+    # Legacy snapshot: every var written, only road_level truly differs.
+    with open(path, "w") as f:
+        for var in O4_Cfg_Vars.list_tile_vars:
+            if var == "zone_list":
+                f.write("zone_list=[]\n")
+            elif var == "road_level":
+                f.write("road_level=5\n")
+            else:
+                f.write("%s=%s\n" % (var, O4_Cfg_Vars.cfg_vars[var]["default"]))
+
+    assert set(SM.tile_override_names(45, 5, build)) == {"road_level"}
+    SM.write_tile(45, 5, build, {})
+    result = SM.read_tile_raw(45, 5, build)
+    assert "road_level" in result
+    assert "lane_width" not in result, "snapshot noise must shrink away"
+
+
+def test_write_tile_with_no_overrides_writes_an_empty_config(
+    tmp_path, monkeypatch
+):
     monkeypatch.chdir(tmp_path)  # no global Ortho4XP.cfg present
     build = _tile_dir(tmp_path)
 
     SM.write_tile(45, 5, build, {})
 
     result = SM.read_tile_raw(45, 5, build)
-    assert set(result.keys()) == set(O4_Cfg_Vars.list_tile_vars)
-    assert result["zone_list"] == "[]"
-    assert result["default_zl"] == str(O4_Cfg_Vars.cfg_vars["default_zl"]["default"])
-    assert result["road_level"] == str(O4_Cfg_Vars.cfg_vars["road_level"]["default"])
+    assert result == {}, "a tile with no overrides inherits everything"
 
 
 def test_write_tile_rejects_non_tile_key(tmp_path):

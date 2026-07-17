@@ -43,7 +43,13 @@ def qapp():
 
 
 @pytest.fixture
-def window(qapp, tmp_path):
+def window(qapp, tmp_path, monkeypatch):
+    # Isolate the prefs file BEFORE construction: MainWindow loads the
+    # prefs in __init__ and closeEvent SAVES them — without this patch,
+    # closing a test window clobbers the user's real .qt_prefs.json with
+    # the pytest temp output_dir (which is exactly what once broke the
+    # tile scan of a real install).
+    monkeypatch.setattr(GUI, "PREFS_FILE", str(tmp_path / "prefs.json"))
     saved_stdout = sys.stdout
     win = GUI.MainWindow()
     # Route all per-tile config reads/writes into the isolated temp dir.

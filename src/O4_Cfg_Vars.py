@@ -69,14 +69,31 @@ cfg_app_vars = {
     "max_download_slots": {
         "module": "TILE",
         "type": int,
-        "default": 1,
-        "hint": "Each orthophoto being constructed uses 16 threads for network requests by default (unless specified otherwise in the provider file). This setting allows multiple orthophotos to be constructed in parallel, meaning increasing it to 2 will result in 32 threads for request across. If running Ortho4XP from an external drive, errors may occur at settings higher than 4.",
+        "default": 0,
+        "hint": "How many orthophotos are constructed in parallel; each uses 16 request threads by default (unless the provider file says otherwise). 0 (the default) means Auto, currently two — downloads are network-bound, so processor cores are irrelevant here. If running Ortho4XP from an external drive, errors may occur at settings higher than 4; set an explicit 1 to restore the historic behaviour.",
     },
     "max_convert_slots": {
         "module": "TILE",
         "type": int,
-        "default": 4,
-        "hint": "Number of parallel threads for dds conversion. Should be mainly dictated by the number of cores in your CPU.",
+        "default": 0,
+        "hint": "Number of parallel workers for dds conversion. 0 (the default) means Auto: every processor core but two, at least two, at most sixteen. Conversion is CPU-bound, so Auto tracks your machine.",
+    },
+    "max_build_slots": {
+        "type": int,
+        "default": 0,
+        "values": (0, 1, 2, 3, 4, 5, 6, 7, 8),
+        "value_labels": {
+            0: "Auto — scale to this machine",
+            1: "1 (one tile at a time)",
+            2: "2",
+            3: "3",
+            4: "4",
+            5: "5",
+            6: "6",
+            7: "7",
+            8: "8",
+        },
+        "hint": "How many tiles build at the same time when several are queued. 0 (the default) means Auto: one tile per three processor cores and one per six gigabytes of memory, whichever is smaller, capped at six. The memory rule is deliberately soft — modern systems page gracefully to fast storage — and guards against the slowdown of actively used rasters swapping, not against running out; the Auto cap of six keeps the default polite to the OpenStreetMap and imagery servers. Explicit values up to eight are honoured for big-memory machines (expect occasional server throttling at the top end — downloads retry — and prefer fewer slots when building at the fine elevation detail levels, whose tiles each hold multi-gigabyte rasters). 1 builds tiles one after another in the application process (the historic behaviour); higher values run each tile in its own worker process. Parallel conversion workers automatically share the processor between concurrent tiles.",
     },
     "check_tms_response": {
         "module": "IMG",
@@ -150,6 +167,26 @@ cfg_tile_vars = {
             "All": "All airports",
         },
         "hint": 'Controls Ortho4XP auto-generation of runway slope patches from CIFP/AIRAC data. Auto-patches provide accurate threshold-anchored elevation profiles and are overridden by any manual patches. "ICAO" (default) only patches airports with a 4-letter ICAO code, "All" patches every airport found in CIFP, "None" disables auto-patching entirely.',
+    },
+    # Elevation
+    "elevation_level": {
+        "type": str,
+        "default": "auto",
+        "values": ("auto", "coastline", "30", "10", "5", "1"),
+        "value_labels": {
+            "auto": "Auto — 30 m base + lidar at airports",
+            "coastline": "Auto + coastline lidar band",
+            "30": "30 m (1 arc-second)",
+            "10": "10 m (1/3 arc-second)",
+            "5": "5 m (1/6 arc-second)",
+            "1": "1 m sources (1/9 arc-second grid)",
+        },
+        "hint": 'Tile-wide elevation detail level — the elevation analogue of the imagery zoom level. "auto" (default) keeps the standard behaviour: a 30 m class base source plus meter-class lidar insets at airports only. "coastline" keeps the automatic behaviour and additionally drapes a lidar band along the tile\'s coastlines (width set by elevation_coastline_band_km), graded by approach visibility: about 10 m detail within 20 km of an airport, 20 m out to 50 km, and 30 m beyond — lidar\'s vertical accuracy everywhere on the shore without paying for detail invisible from cruise altitudes. A numeric level instead fetches the finest wide-area elevation source covering the tile (for example national lidar services) warped to that ground resolution over the whole tile, and densifies the working elevation grid to match: 30 m = 1 arc-second, 10 m = 1/3, 5 m = 1/6, 1 m = 1/9 arc-second (about 3.4 m posting, the practical whole-tile grid ceiling; airports keep their finer insets on top). Levels never coarsen what the automatic behaviour would have chosen, and are capped to the finest source actually covering the tile, so an over-ambitious level gracefully has no effect. Higher levels mean substantially larger downloads, working files and memory: the working raster alone is roughly 0.5 GB at 10 m, 2 GB at 5 m and 4 GB at 1 m, with peak memory several times that, and more mesh triangles unless curvature_tol is raised. Useful for islands and mountainous tiles where 30 m relief is visibly too coarse.',
+    },
+    "elevation_coastline_band_km": {
+        "type": float,
+        "default": 5.0,
+        "hint": 'Width in kilometres of the lidar band along coastlines fetched by the "coastline" elevation level, measured inland (and seaward) from the OpenStreetMap coastline. Only used when elevation_level is "coastline".',
     },
     # Vector
     "apt_smoothing_pix": {
@@ -360,14 +397,65 @@ cfg_tile_vars = {
         "hint": "This will additionally build distance to coastline masks that are used in Step 3 in order to improve the bathymetric profile (otherwise too low res) and avoid steep walls close to piers or rocks. Masks_zl should not be too low to grab these details.",
     },
     "masks_use_DEM_too": {
+        "type": str,
+        "default": "auto",
+        "values": ["auto", "True", "False"],
+        "value_labels": {
+            "auto": "Auto - measured depth near airports",
+            "True": "On - measured depth along the whole shoreline",
+            "False": "Off - vector coastline only",
+        },
+        "hint": "Draw the masks from elevation data in addition to the vector coastline. Auto turns itself on when a fine bathymetry provider covers the tile (see reef_visibility_depth), but only fetches measured depth within bathymetry_airport_radius_km of the anchor types checked below (ICAO airports, small airfields, seaplane bases, heliports) - that is where flying happens low; farther shoreline keeps the classic distance fade plus the mapped shallow-water fallback, which read fine from altitude. On fetches the whole shoreline band with any covering provider and keeps the legacy custom_dem land refinement (really shines with 5m or lower; a coarse DEM yields unpleasant pixellisation). Off is the pure vector fade.",
+    },
+    "bathymetry_band_km": {
+        "type": float,
+        "default": 5.0,
+        "hint": "How far from the coastline (and from large inland water), in kilometres, measured seabed depth is fetched for the depth-graded masks and the X-Plane 12 sea_level raster. The data is fetched as 0.1 degree cells, like the coastline elevation band.",
+    },
+    "bathymetry_airport_radius_km": {
+        "type": float,
+        "default": 20.0,
+        "hint": "In Auto mode, measured bathymetry is only fetched for shoreline cells within this many kilometres of the anchor types checked below - low flying over water happens around them, and from cruise altitude the classic coastline fade plus the mapped shallow-water fallback look identical. Each anchor projects a disk of this radius; 20 km covers the traffic pattern and most of a visual approach. 0 fetches the whole shoreline band regardless of anchors; masks_use_DEM_too=True always does. Cost scale: every 0.1 degree shoreline cell inside a disk is a separate download - on slow national lidar servers a first fetch runs minutes per cell. Needs the offline airport index, which the map window builds automatically once the X-Plane folder is set (without it, the whole band is fetched).",
+    },
+    "bathymetry_near_icao_airports": {
+        "type": bool,
+        "default": True,
+        "hint": "Fetch measured depth around airports carrying an ICAO code (about 15k worldwide). The anchor for airline and general-aviation flying: approaches and departures over water get real depth-graded shallows instead of the distance fade. Modest cost - ICAO fields are sparse along most coastlines.",
+    },
+    "bathymetry_near_other_airports": {
+        "type": bool,
+        "default": True,
+        "hint": "Fetch measured depth around small airfields without an ICAO code (about 16k worldwide: grass strips, bush and ultralight fields, local identifiers). The anchor for low-and-slow VFR flying - island strips and coastal bush fields sit exactly where tidal flats and reefs are. Cost grows in strip-dense regions: each field adds a full radius disk of cell downloads.",
+    },
+    "bathymetry_near_seaplane_bases": {
+        "type": bool,
+        "default": True,
+        "hint": "Fetch measured depth around seaplane bases (only ~150 worldwide, but you land ON the water there). Near-zero added cost and the highest value per anchor - leave it on unless you never fly floats.",
+    },
+    "bathymetry_near_heliports": {
         "type": bool,
         "default": False,
-        "hint": "If you have acces to high resolutions DEMs (really shines with 5m or lower), you can use the elevation in addition to the vector data in order to draw masks with higher precision. If the DEM is not high res, this option will yield unpleasant pixellisation.",
+        "hint": "Fetch measured depth around heliports (about 7k worldwide - hospital pads, offshore platforms, private rooftops). Off by default: they are the densest anchor type and most have no over-water approach, so they inflate downloads the most for the least gain (measured on the Portuguese coast: enabling them grew the fetched shoreline cells by a quarter). Turn on for offshore/HEMS helicopter flying.",
+    },
+    "reef_visibility_depth": {
+        "type": float,
+        "default": 25.0,
+        "hint": "Water shallower than this (in metres) keeps part of its imagery visible in the masks, fading smoothly from fully opaque at the waterline to the ratio_water transparency at this depth. Larger values keep deeper reef structure visible - Pacific atolls and lagoons read well around 30-40. Only effective where a bathymetry provider covers the tile.",
+    },
+    "osm_shallow_water_fallback": {
+        "type": bool,
+        "default": True,
+        "hint": "Where no measured bathymetry applies - no fine source covers the tile, or the shoreline lies beyond bathymetry_airport_radius_km in Auto mode - mapped OpenStreetMap shallow water is treated as such in the masks: natural=reef polygons as roughly 2 m deep and wetland=tidalflat polygons as roughly 1 m, so reef flats, atoll rings and tidal lagoons (the Ria Formosa, the Waddenzee) keep their imagery visible. Measured bathymetry always wins when available; this only fills the gaps (most Pacific atolls and European tidal lagoons are mapped in OpenStreetMap but have no open depth data).",
     },
     "masks_custom_extent": {
         "type": str,
         "default": "",
         "hint": 'Yet another tentative to draw masks with maximizing the use of the good imagery part. Requires to draw (JOSM) the "good imagery" threshold first, but it could be one order of magnitude faster to do compared to hand tweaking the masks and the imageries one by one.',
+    },
+    "coastal_foam_edge": {
+        "type": bool,
+        "default": False,
+        "hint": "Restyles the coastline transition in the water masks: the machine-straight land-to-water fade is replaced by an organically wavy shoreline with a semi-transparent foam band on the water side. Purely cosmetic and a matter of taste, hence off by default. The band width follows masks_width and the foam transparency follows ratio_water; within that band this overrides the masking_mode transition shape.",
     },
     # DSF/Imagery
     "texture_mode": {
@@ -417,11 +505,32 @@ cfg_tile_vars = {
         "default": 0.0,
         "hint": 'For layers of type "mask" in combined providers imageries, determines the extent (in meters) of the blur radius applied. This allows to smoothen some sea imageries where the wave or reflection pattern was too much present.',
     },
+    "color_harmonization": {
+        "type": bool,
+        "default": True,
+        "hint": "Harmonizes texture colors across the tile: each texture's color statistics are pulled toward the consensus of its neighborhood (about a 5x5 texture area), removing the patchwork caused by different acquisition dates and providers while preserving genuine geographic color gradients. Fully automatic; no reference imagery or manual correction needed. Adds a short wait before conversions start (statistics need every download finished) and changes the output textures.",
+    },
+    "sea_nodata_fill": {
+        "type": bool,
+        "default": True,
+        "hint": "Repairs imagery provider no-data defects (large saturated white or black rectangles over coastal water) by cloning nearby genuine sea pixels into the hole. Only regions that are simultaneously saturated, perfectly flat, larger than 2% of the texture and mostly on the water side of the coastline mask are touched, so real photographed water and land are never modified. Applies at the texture conversion step on coastal textures.",
+    },
     "water_tech": {
         "type": str,
         "default": "XP11 + bathy",
         "values": ("XP12", "XP11 + bathy"),
         "hint": "Water tech type. XP12 uses a new (partly in construction) rendering tech, XP11 + bathy uses a more traditionnal blend. Both allows for 3D water.",
+    },
+    "dsf_bathymetry": {
+        "type": str,
+        "default": "auto",
+        "values": ["auto", "True", "False"],
+        "value_labels": {
+            "auto": "Auto - synthesize when Global Scenery is missing",
+            "True": "On - always splice measured depths in",
+            "False": "Off - copy the Global Scenery rasters only",
+        },
+        "hint": "Where the X-Plane 12 DSF gets its sea_level (bathymetry) raster, which drives the simulator's depth-aware water light filtering. Auto copies the raster from the installed Global Scenery as before, and synthesizes it from measured coastal depths when that Global Scenery tile is not installed. On additionally replaces the sea part of the copied raster with measured depths where a bathymetry provider covers the tile. Only meaningful with water_tech=XP12.",
     },
     # "add_low_res_sea_ovl": {
     #    "type": bool,
@@ -496,6 +605,7 @@ list_app_vars = [
     "skip_converts",
     "max_download_slots",
     "max_convert_slots",
+    "max_build_slots",
     "check_tms_response",
     "http_timeout",
     "max_connect_retries",
@@ -514,6 +624,8 @@ gui_app_vars_long = list_app_vars[-4:]
 
 list_vector_vars = [
     "auto_patch",
+    "elevation_level",
+    "elevation_coastline_band_km",
     "apt_smoothing_pix",
     "apt_smoothing_auto",
     "airport_elevation_insets",
@@ -555,7 +667,16 @@ list_mask_vars = [
     "imprint_masks_to_dds",
     "distance_masks_too",
     "masks_use_DEM_too",
+    "bathymetry_band_km",
+    "bathymetry_airport_radius_km",
+    "bathymetry_near_icao_airports",
+    "bathymetry_near_other_airports",
+    "bathymetry_near_seaplane_bases",
+    "bathymetry_near_heliports",
+    "reef_visibility_depth",
+    "osm_shallow_water_fallback",
     "masks_custom_extent",
+    "coastal_foam_edge",
 ]
 
 list_dsf_vars = [
@@ -565,10 +686,13 @@ list_dsf_vars = [
     "cover_extent",
     "cover_zl",
     "water_tech",
+    "dsf_bathymetry",
     "ratio_bathy",
     "ratio_water",
     "overlay_lod",
     "sea_texture_blur",
+    "sea_nodata_fill",
+    "color_harmonization",
     # "add_low_res_sea_ovl",
     # "experimental_water",
     "normal_map_strength",
