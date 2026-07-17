@@ -857,7 +857,9 @@ def test_stac_strategy_registered_and_dispatches(tmp_path, monkeypatch):
 
     warp_calls = {}
 
-    def _fake_warp(vsicurl_inputs, bbox, resolution_m, destination_path):
+    def _fake_warp(
+        vsicurl_inputs, bbox, resolution_m, destination_path, **keyword_arguments
+    ):
         warp_calls["inputs"] = list(vsicurl_inputs)
         with open(destination_path, "wb") as handle:
             handle.write(b"stub-geotiff")
@@ -1110,7 +1112,7 @@ def test_wcs_fetch_writes_inset_and_provenance(tmp_path, monkeypatch):
     monkeypatch.setattr(INSETS, "has_gdal", True)
     warp_calls = {}
 
-    def _fake_warp(inputs, bounding_box, resolution, destination):
+    def _fake_warp(inputs, bounding_box, resolution, destination, **keyword_arguments):
         warp_calls["inputs"] = list(inputs)
         (west, south, east, north) = bounding_box
         _write_constant_geotiff(
@@ -1145,7 +1147,7 @@ def test_wcs_all_nodata_window_is_no_coverage(tmp_path, monkeypatch):
     # report no coverage (so the orchestration caches the negative).
     monkeypatch.setattr(INSETS, "has_gdal", True)
 
-    def _fake_warp(inputs, bounding_box, resolution, destination):
+    def _fake_warp(inputs, bounding_box, resolution, destination, **keyword_arguments):
         (west, south, east, north) = bounding_box
         _write_constant_geotiff(
             destination, west, south, east, north, -32768.0
@@ -1169,7 +1171,7 @@ def test_wcs_failed_warp_is_no_coverage(tmp_path, monkeypatch):
     monkeypatch.setattr(
         INSETS,
         "warp_vsicurl_sources_to_geotiff",
-        lambda *arguments: False,
+        lambda *arguments, **keyword_arguments: False,
     )
     destination = str(tmp_path / "EGLL_testwcs.tif")
     assert (
@@ -1253,7 +1255,7 @@ def test_direct_cog_fetch_and_bbox_gate(tmp_path, monkeypatch):
     monkeypatch.setattr(INSETS, "has_gdal", True)
     warp_calls = {}
 
-    def _fake_warp(inputs, bounding_box, resolution, destination):
+    def _fake_warp(inputs, bounding_box, resolution, destination, **keyword_arguments):
         warp_calls["inputs"] = list(inputs)
         (west, south, east, north) = bounding_box
         _write_constant_geotiff(destination, west, south, east, north, 60.0)
