@@ -102,6 +102,17 @@ def step_progress(step_key, bars):
     return None
 
 
+# The legacy bars that carry a live rate for each step.  The imagery
+# step runs its three activities CONCURRENTLY (1 = DSF render,
+# 2 = texture downloads, 3 = DDS conversion), so its remaining time is
+# the slowest bar's remaining, measured per bar — extrapolating the
+# blended step_progress percent instead let the fast early DSF-render
+# motion dominate the window, and the estimate then climbed for
+# minutes as that transient aged out and the rate collapsed to
+# download pace.
+STEP_RATE_BARS = {"vector": (1,), "masks": (1,), "imagery": (1, 2, 3)}
+
+
 def _predict_step_seconds(lat, lon, features, steps):
     """Learned per-step estimates, or static-weight-scaled defaults when the
     time model is unavailable (module optional during bring-up)."""
@@ -215,9 +226,10 @@ class _EtaTracker:
         self.tile_index = 0
         self.step_key = None
         self.step_started_at = None
-        # (t, percent) in current step; maxlen bounds a percent that
-        # stalls forever (the gain-based trim below only fires on gain).
-        self.samples = deque(maxlen=10000)
+        # bar number -> deque of (t, percent) in the current step;
+        # maxlen bounds a percent that stalls forever (the gain-based
+        # trim below only fires on gain).
+        self.bar_windows = {}
         self.autopatch = None                  # {"icao": (t_begin, eta_total)}
         self.finished_steps = {}               # (lat,lon) -> set(step)
 
@@ -226,29 +238,45 @@ class _EtaTracker:
         self.tile_index = max(self.tile_index, self.tiles.index(tile))
         self.step_key = key
         self.step_started_at = time.time()
-        self.samples.clear()
+        self.bar_windows = {}
 
     def step_finished(self, tile, key):
         self.finished_steps.setdefault(tile, set()).add(key)
         self.step_key = None
         self.autopatch = None
 
-    def percent_sample(self, percent):
-        self.samples.append((time.time(), float(percent)))
+    def percent_sample(self, bar, percent):
+        window = self.bar_windows.setdefault(bar, deque(maxlen=10000))
+        window.append((time.time(), float(percent)))
         # Keep the TIGHTEST window that still carries a measurable
         # rate: drop the oldest sample only while the ones behind it
-        # still span the minimum time and percent gain.  The old fixed
-        # 20 s window meant an hours-long download step never gained
-        # 0.5 % inside it, so the live rate NEVER engaged and the
-        # estimate fell back to the crude model heuristics.
-        while len(self.samples) > 2:
-            (t_next, p_next) = self.samples[1]
-            (t_last, p_last) = self.samples[-1]
+        # still span the minimum time and percent gain.  A fixed time
+        # window (the old 20 s one) meant an hours-long download step
+        # never gained 0.5 % inside it, so the live rate NEVER engaged
+        # and the estimate fell back to the crude model heuristics.
+        while len(window) > 2:
+            (t_next, p_next) = window[1]
+            (t_last, p_last) = window[-1]
             if (t_last - t_next >= RATE_MIN_SPAN_SECONDS
                     and p_last - p_next >= RATE_MIN_GAIN_PERCENT):
-                self.samples.popleft()
+                window.popleft()
             else:
                 break
+
+    def _bar_remaining(self, bar):
+        """This bar's remaining seconds by its own live rate, 0.0 for
+        a finished bar, or None with no usable rate yet."""
+        window = self.bar_windows.get(bar)
+        if not window:
+            return None
+        (t_first, p_first), (t_last, p_last) = window[0], window[-1]
+        if p_last >= 100.0:
+            return 0.0
+        span, gained = t_last - t_first, p_last - p_first
+        if (span >= RATE_MIN_SPAN_SECONDS
+                and gained >= RATE_MIN_GAIN_PERCENT):
+            return (100.0 - p_last) * span / gained
+        return None
 
     def autopatch_begin(self, airports):
         now = time.time()
@@ -285,14 +313,19 @@ class _EtaTracker:
                         eta_total, now - t_begin)
             if have_any:
                 return remaining
-        # Live in-step rate once the window has substance.
-        if len(self.samples) >= 2:
-            (t_a, p_a), (t_b, p_b) = self.samples[0], self.samples[-1]
-            span, gained = t_b - t_a, p_b - p_a
-            if (span >= RATE_MIN_SPAN_SECONDS
-                    and gained >= RATE_MIN_GAIN_PERCENT):
-                rate = gained / span
-                return max((100.0 - p_b) / rate, 0.0)
+        # Live per-bar rates once any window has substance: the step's
+        # activities run concurrently, so the SLOWEST bar is the step's
+        # remaining time (bars without a rate yet simply don't vote —
+        # by the time they matter they have one).
+        bar_estimates = [
+            self._bar_remaining(bar)
+            for bar in STEP_RATE_BARS.get(self.step_key, ())
+        ]
+        bar_estimates = [
+            value for value in bar_estimates if value is not None
+        ]
+        if bar_estimates:
+            return max(bar_estimates)
         # No live signal: the model estimate, degrading into
         # overrun-proportional remaining once outlived (a None estimate
         # prices the running step by pure elapsed extrapolation rather
@@ -760,7 +793,7 @@ class EngineSession:
             return
         percent = min(100.0, (base + width * min(inside, 100) / 100.0) * 100)
         if self._eta:
-            self._eta.percent_sample(min(inside, 100.0))
+            self._eta.percent_sample(nbr, min(float(percentage), 100.0))
         self._emit(StepProgress(
             lat=tile[0], lon=tile[1], step_key=key,
             label=STEP_LABELS.get(key, key), percent=percent))

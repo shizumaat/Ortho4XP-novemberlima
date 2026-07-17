@@ -239,16 +239,44 @@ def test_run_eta_live_rate_engages_on_slow_steps(session, monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr(SESSION.time, "time", lambda: clock[0])
     s._eta.step_started((30, 31), "imagery")
-    # 0.1 % every 10 s — a near-three-hour step.
+    # Download bar: 0.1 % every 10 s — a near-three-hour step.
     percent = 0.0
     for _ in range(12):
         clock[0] += 10.0
         percent += 0.1
-        s._eta.percent_sample(percent)
+        s._eta.percent_sample(2, percent)
     remaining = s._eta._current_step_remaining()
     # Live rate 0.01 %/s: (100 − 1.2) / 0.01 ≈ 9880 s — nowhere near
     # the 300 s model estimate the old window fell back to.
     assert remaining == pytest.approx((100.0 - percent) / 0.01, rel=0.01)
+
+
+def test_run_eta_slowest_concurrent_bar_wins(session, monkeypatch):
+    """The imagery step's activities run concurrently, and the FAST
+    early DSF-render motion must not drown out the slow download rate
+    — extrapolating the blended step percent did exactly that, and
+    the display then climbed for minutes ("counting up") as the
+    transient aged out.  Each bar rates itself; the slowest wins,
+    and a finished bar prices as zero."""
+    s, events = session
+    s._eta = SESSION._EtaTracker(
+        [(30, 31)], SESSION.plan_steps(True, True, False),
+        {(30, 31): {"imagery": 300.0}})
+    clock = [1000.0]
+    monkeypatch.setattr(SESSION.time, "time", lambda: clock[0])
+    s._eta.step_started((30, 31), "imagery")
+    # DSF render (bar 1) races to done while downloads (bar 2) crawl.
+    render = downloads = 0.0
+    for _ in range(20):
+        clock[0] += 5.0
+        render = min(render + 10.0, 100.0)
+        downloads += 0.1
+        s._eta.percent_sample(1, render)
+        s._eta.percent_sample(2, downloads)
+    remaining = s._eta._current_step_remaining()
+    # Downloads gained 2 % in 100 s → (100 − 2) / 0.02 = 4900 s; the
+    # finished render bar votes 0 and must not shrink the figure.
+    assert remaining == pytest.approx(4900.0, rel=0.05)
 
 
 def test_run_eta_overrun_step_estimate_keeps_receding(session):

@@ -1514,7 +1514,7 @@ class MainWindow(QMainWindow):
         eta = self._last_run_eta
         if eta is not None and eta.remaining_seconds is not None:
             self.eta_label.setText(
-                "Remaining ≈ %s" % _fmt_duration(eta.remaining_seconds)
+                "Remaining ≈ %s" % _fmt_remaining(eta.remaining_seconds)
             )
         else:
             self.eta_label.setText("Remaining —")
@@ -1749,6 +1749,18 @@ def _fmt_duration(seconds):
     if seconds < 3600:
         return "%d m %02d s" % (seconds // 60, seconds % 60)
     return "%d h %02d m" % (seconds // 3600, (seconds % 3600) // 60)
+
+
+def _fmt_remaining(seconds):
+    """Remaining-time display: an ESTIMATE, so past two minutes it
+    rounds to whole minutes — second-level digits on a figure that
+    honestly drifts both ways read as a clock counting up."""
+    seconds = int(seconds)
+    if seconds < 120:
+        return _fmt_duration(seconds)
+    if seconds < 3600:
+        return "%d m" % round(seconds / 60.0)
+    return _fmt_duration(seconds)
 
 
 def _fmt_size(nbytes):
