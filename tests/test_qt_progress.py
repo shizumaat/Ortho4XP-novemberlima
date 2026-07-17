@@ -203,3 +203,39 @@ def test_run_eta_uses_autopatch_model(session):
     # An airport finishing removes its share.
     s.autopatch_event("KBNA", 1.0, 1.0, "done", "done")
     assert s._eta.remaining() < remaining
+
+
+def test_run_eta_autopatch_overrun_keeps_receding(session):
+    """An airport that outlives its predicted total must not pin the
+    run clock at "almost done" — the live HECA defect (2026-07-17):
+    the display sat under a minute for the five minutes the overrun
+    lasted.  Overrun remaining grows with elapsed instead."""
+    s, events = session
+    s._eta = SESSION._EtaTracker(
+        [(30, 31)], SESSION.plan_steps(True, True, False),
+        {(30, 31): {"vector": 30.0, "mesh": 10.0, "masks": 5.0,
+                    "imagery": 20.0}})
+    s._eta.step_started((30, 31), "vector")
+    s.autopatch_begin(["HECA"])
+    s.autopatch_event("HECA", 0.5, 1.0, "solving", "run",
+                      eta_total_seconds=60.0)
+    # Simulate the airport running 360 s against its 60 s prediction.
+    s._eta.autopatch["HECA"][0] -= 360.0
+    remaining = s._eta.remaining()
+    # 0.5 × 300 s overrun + 35 s of future steps — nowhere near zero.
+    assert 175.0 < remaining < 195.0
+
+
+def test_run_eta_overrun_step_estimate_keeps_receding(session):
+    """Same guarantee on the plain per-step estimate path (no
+    auto-patch signal): a step 500 s into a 30 s prediction reads as
+    receding overrun, not as finished."""
+    s, events = session
+    s._eta = SESSION._EtaTracker(
+        [(30, 31)], SESSION.plan_steps(True, True, False),
+        {(30, 31): {"mesh": 30.0, "masks": 5.0, "imagery": 20.0}})
+    s._eta.step_started((30, 31), "mesh")
+    s._eta.step_started_at -= 500.0
+    remaining = s._eta.remaining()
+    # 0.5 × 470 s overrun + the 25 s of future steps.
+    assert 255.0 < remaining < 265.0

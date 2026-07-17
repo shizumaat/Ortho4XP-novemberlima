@@ -252,6 +252,8 @@ class _EtaTracker:
 
     # -- read ------------------------------------------------------------
     def _current_step_remaining(self):
+        from .tile_time_model import remaining_step_seconds
+
         if self.step_key is None or self.step_started_at is None:
             return 0.0
         tile = self.tiles[self.tile_index]
@@ -267,7 +269,8 @@ class _EtaTracker:
                     continue
                 if eta_total is not None:
                     have_any = True
-                    remaining += max(eta_total - (now - t_begin), 0.0)
+                    remaining += remaining_step_seconds(
+                        eta_total, now - t_begin)
             if have_any:
                 return remaining
         # Live in-step rate once the window has substance.
@@ -277,9 +280,12 @@ class _EtaTracker:
             if span >= RATE_MIN_SPAN_SECONDS and gained > 0.5:
                 rate = gained / span
                 return max((100.0 - p_b) / rate, 0.0)
-        if estimate is not None:
-            return max(estimate - elapsed, 0.0)
-        return 0.0
+        # No live signal: the model estimate, degrading into
+        # overrun-proportional remaining once outlived (a None estimate
+        # prices the running step by pure elapsed extrapolation rather
+        # than as free — "free" made the whole-run figure absurdly low
+        # exactly when the current step was the expensive one).
+        return remaining_step_seconds(estimate, elapsed)
 
     def remaining(self):
         """Whole-run remaining seconds, or None with no basis at all."""

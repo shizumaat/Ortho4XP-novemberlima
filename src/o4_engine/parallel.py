@@ -45,6 +45,7 @@ from collections import deque
 from typing import Optional
 
 from . import events as EVENTS
+from . import tile_time_model
 from .events import BuildDone, RunDone, RunEta, StepProgress, TileState
 from .session import (
     _predict_step_seconds, plan_steps, prediction_features,
@@ -59,11 +60,14 @@ def estimate_remaining_wall_seconds(estimates, program, queued_tiles,
 
     Work model: every queued tile contributes its full predicted plan;
     every active tile contributes its remaining steps, the in-flight
-    step credited for its elapsed time.  The total work is divided by
-    the effective parallelism (``slots`` capped by the tiles still
-    holding work) — coarse (class limits and the memory gate are not
-    modelled) but a defensible estimate where there was previously an
-    honest dash.  Returns ``None`` when no work remains.
+    step credited for its elapsed time (degrading into
+    overrun-proportional remaining once it outlives its prediction —
+    see :func:`tile_time_model.remaining_step_seconds`).  The total
+    work is divided by the effective parallelism (``slots`` capped by
+    the tiles still holding work) — coarse (class limits and the
+    memory gate are not modelled) but a defensible estimate where
+    there was previously an honest dash.  Returns ``None`` when no
+    work remains.
 
     ``estimates``: ``{tile: {step: seconds}}``; ``next_step_index``:
     ``{tile: index of the running-or-next step}``; ``in_flight_steps``:
@@ -90,11 +94,12 @@ def estimate_remaining_wall_seconds(estimates, program, queued_tiles,
             if position < index:
                 continue
             estimate = step_estimate(tile, key)
-            if estimate is None:
-                continue
             started_at = in_flight_steps.get((tile, key))
             if started_at is not None:
-                estimate = max(estimate - (now - started_at), 0.0)
+                estimate = tile_time_model.remaining_step_seconds(
+                    estimate, now - started_at)
+            elif estimate is None:
+                continue
             total_work += estimate
     if not tiles_with_work:
         return None

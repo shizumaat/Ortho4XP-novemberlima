@@ -66,6 +66,31 @@ DEFAULT_STEP_SECONDS = {
     "overlays": 60.0,
 }
 
+# When a running step outlives its prediction, the prediction is
+# known-broken — but remaining time must NOT pin at "almost done" (the
+# old zero floor showed "less than a minute" for however long the
+# overrun lasted).  Instead the underestimate is assumed proportional
+# to the overrun: remaining grows at this fraction of the time run
+# past the estimate.  Continuous at the boundary (both sides reach 0).
+OVERRUN_REMAINING_FRACTION = 0.5
+
+
+def remaining_step_seconds(estimate_seconds, elapsed_seconds):
+    """Remaining seconds for a step given its prediction and elapsed run.
+
+    Under the estimate: the plain difference.  Past it (or with no
+    estimate at all — ``None`` prices as zero, i.e. pure elapsed
+    extrapolation), remaining is ``OVERRUN_REMAINING_FRACTION`` of the
+    overrun, so an underestimated step reads as steadily receding
+    rather than perpetually finished.
+    """
+    estimate = float(estimate_seconds) if estimate_seconds else 0.0
+    elapsed = max(float(elapsed_seconds), 0.0)
+    if elapsed < estimate:
+        return estimate - elapsed
+    return OVERRUN_REMAINING_FRACTION * (elapsed - estimate)
+
+
 # Learned OSM/vector overhead is floored here.  The vector step always
 # does some fixed parsing/serialization work even when the tile has no
 # airports, so a learned overhead below this is treated as noise.
