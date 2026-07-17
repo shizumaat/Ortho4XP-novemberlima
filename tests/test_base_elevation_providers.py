@@ -58,6 +58,7 @@ def test_shipped_definitions_parse(shipped_registry):
     assert set(shipped_registry) == {
         "USGS3DEP",
         "HRDEM",
+        "COPERNICUSGLO30",
         "VIEWFINDER1",
         "VIEWFINDER3",
         "NED1",
@@ -627,9 +628,10 @@ def test_summary_reports_base_and_inset_availability(
     assert summary["base_is_fallback"] is False
     assert ("ENGLAND1M", 1.0) in summary["inset_providers"]
     assert summary["fetched_airports"] is None
-    # Doha tile: no inset provider reaches the Middle East.
+    # Doha tile: no national source reaches the Middle East, so the
+    # only inset provider is the global surface-model fallback.
     summary = INSETS.summarize_tile_elevation_sources(25, 51)
-    assert summary["inset_providers"] == []
+    assert summary["inset_providers"] == [("COPERNICUSGLO30", 30.0)]
     # Zurich tile: the swisstopo 0.5 m lidar.
     summary = INSETS.summarize_tile_elevation_sources(47, 8)
     assert ("SWISSALTI3D", 0.5) in summary["inset_providers"]
@@ -677,9 +679,12 @@ def test_summary_reads_cached_inset_index_ground_truth(
 
 
 def test_tiles_with_inset_coverage_subset(shipped_registry):
+    # The global COPERNICUSGLO30 fallback reaches every tile, so the
+    # coverage question is now "which tiles" only in the degenerate
+    # sense; the Doha tile (25, 51) is the one this feature added.
     tiles = [(51, -1), (25, 51), (47, 8), (60, 10)]
     covered = INSETS.tiles_with_inset_coverage(tiles)
-    assert covered == [(51, -1), (47, 8), (60, 10)]
+    assert covered == [(51, -1), (25, 51), (47, 8), (60, 10)]
 
 
 # =====================================================================

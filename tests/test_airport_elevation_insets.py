@@ -261,6 +261,233 @@ def test_negative_result_is_cached_and_not_requeried(tmp_path, monkeypatch):
 
 
 # =====================================================================
+# Margin-aware cache invalidation (bounding-box staleness)
+# =====================================================================
+_SMALL_BOX = (-135.06, 60.69, -135.04, 60.72)
+_LARGE_BOX = (-135.10, 60.65, -135.00, 60.76)
+
+
+def _register_box_recording_strategy(name, calls, fail_when=None):
+    """Register a dummy strategy whose fetches record the requested box.
+
+    ``calls`` collects one ``(west, south, east, north)`` tuple per fetch.
+    ``fail_when(bounding_box)`` returning True makes that fetch report no
+    coverage (after possibly leaving a partial file behind, like a broken
+    ``gdal.Warp`` would).
+    """
+
+    @INSETS.register_access_strategy(name)
+    class _BoxRecordingStrategy:
+        def discover(self, definition, bounding_box_wgs84):
+            if fail_when is not None and fail_when(bounding_box_wgs84):
+                return None
+            return [{"note": "covers"}]
+
+        def fetch(
+            self,
+            definition,
+            bounding_box_wgs84,
+            target_resolution_m,
+            destination_path,
+        ):
+            calls.append(tuple(bounding_box_wgs84))
+            os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+            if fail_when is not None and fail_when(bounding_box_wgs84):
+                with open(destination_path, "wb") as handle:
+                    handle.write(b"partial-garbage")
+                return None
+            with open(destination_path, "wb") as handle:
+                handle.write(repr(tuple(bounding_box_wgs84)).encode())
+            return {
+                "provider": definition["code"],
+                "bounding_box_wgs84": list(bounding_box_wgs84),
+            }
+
+    return _BoxRecordingStrategy
+
+
+def _box_definition(code, strategy_name):
+    return {
+        "code": code,
+        "access_strategy": strategy_name,
+        "role": INSETS.ROLE_AIRPORT_INSET,
+        "enabled": True,
+        "priority": 1.0,
+    }
+
+
+def test_margin_growth_refetches_cached_inset(tmp_path, monkeypatch):
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    fetch_calls = []
+    _register_box_recording_strategy("box_growth_strategy", fetch_calls)
+    try:
+        definition = _box_definition("BOXGROW", "box_growth_strategy")
+        destination = FNAMES.airport_inset_dem(60, -136, "CYXY", "BOXGROW")
+
+        INSETS.ensure_airport_insets(
+            60, -136, {"CYXY": _SMALL_BOX}, [definition], 3.0
+        )
+        assert fetch_calls == [_SMALL_BOX]
+
+        # Same box again: the cache holds, nothing is refetched.
+        INSETS.ensure_airport_insets(
+            60, -136, {"CYXY": _SMALL_BOX}, [definition], 3.0
+        )
+        assert fetch_calls == [_SMALL_BOX]
+
+        # A larger box (margin grew) outreaches the recorded fetch:
+        # the inset is refetched and the raster now covers the large box.
+        INSETS.ensure_airport_insets(
+            60, -136, {"CYXY": _LARGE_BOX}, [definition], 3.0
+        )
+        assert fetch_calls == [_SMALL_BOX, _LARGE_BOX]
+        with open(destination, "rb") as handle:
+            assert handle.read() == repr(_LARGE_BOX).encode()
+        assert not os.path.isfile(destination + ".refetch")
+
+        # The enlarged cache is fresh in its turn.
+        INSETS.ensure_airport_insets(
+            60, -136, {"CYXY": _LARGE_BOX}, [definition], 3.0
+        )
+        assert fetch_calls == [_SMALL_BOX, _LARGE_BOX]
+    finally:
+        INSETS.ACCESS_STRATEGIES.pop("box_growth_strategy", None)
+
+
+def test_margin_shrink_reuses_superset_inset(tmp_path, monkeypatch):
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    fetch_calls = []
+    _register_box_recording_strategy("box_shrink_strategy", fetch_calls)
+    try:
+        definition = _box_definition("BOXSHRINK", "box_shrink_strategy")
+        INSETS.ensure_airport_insets(
+            60, -136, {"CYXY": _LARGE_BOX}, [definition], 3.0
+        )
+        # A smaller request is inside the cached raster: no refetch.
+        INSETS.ensure_airport_insets(
+            60, -136, {"CYXY": _SMALL_BOX}, [definition], 3.0
+        )
+        assert fetch_calls == [_LARGE_BOX]
+    finally:
+        INSETS.ACCESS_STRATEGIES.pop("box_shrink_strategy", None)
+
+
+def test_failed_refetch_keeps_previous_inset(tmp_path, monkeypatch):
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    fetch_calls = []
+    _register_box_recording_strategy(
+        "box_fail_large_strategy",
+        fetch_calls,
+        fail_when=lambda box: tuple(box) == _LARGE_BOX,
+    )
+    try:
+        definition = _box_definition("BOXFAIL", "box_fail_large_strategy")
+        destination = FNAMES.airport_inset_dem(60, -136, "CYXY", "BOXFAIL")
+
+        INSETS.ensure_airport_insets(
+            60, -136, {"CYXY": _SMALL_BOX}, [definition], 3.0
+        )
+        index = INSETS.ensure_airport_insets(
+            60, -136, {"CYXY": _LARGE_BOX}, [definition], 3.0
+        )
+        assert fetch_calls == [_SMALL_BOX, _LARGE_BOX]
+        # The enlargement failed: the smaller raster survives untouched,
+        # stays recorded as usable, and no scratch file is left behind.
+        with open(destination, "rb") as handle:
+            assert handle.read() == repr(_SMALL_BOX).encode()
+        assert index["CYXY"]["BOXFAIL"] == "ok"
+        assert not os.path.isfile(destination + ".refetch")
+
+        # The surviving cache is still smaller than requested, so the next
+        # run tries the enlargement again (self-healing after outages).
+        INSETS.ensure_airport_insets(
+            60, -136, {"CYXY": _LARGE_BOX}, [definition], 3.0
+        )
+        assert fetch_calls == [_SMALL_BOX, _LARGE_BOX, _LARGE_BOX]
+    finally:
+        INSETS.ACCESS_STRATEGIES.pop("box_fail_large_strategy", None)
+
+
+def test_margin_growth_rechecks_negative_results(tmp_path, monkeypatch):
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    fetch_calls = []
+    _register_box_recording_strategy(
+        "box_small_no_coverage_strategy",
+        fetch_calls,
+        fail_when=lambda box: tuple(box) == _SMALL_BOX,
+    )
+    try:
+        definition = _box_definition(
+            "BOXNEG", "box_small_no_coverage_strategy"
+        )
+        first = INSETS.ensure_airport_insets(
+            60, -136, {"CYXY": _SMALL_BOX}, [definition], 3.0
+        )
+        assert first["CYXY"]["BOXNEG"] == INSETS.NO_COVERAGE
+        assert first["CYXY"]["bounding_box"] == list(_SMALL_BOX)
+
+        # Same box: the negative result caches, no re-query.
+        INSETS.ensure_airport_insets(
+            60, -136, {"CYXY": _SMALL_BOX}, [definition], 3.0
+        )
+        assert fetch_calls == [_SMALL_BOX]
+
+        # A larger box outgrows the box the negative was evaluated
+        # against, so the provider is re-checked and now delivers.
+        second = INSETS.ensure_airport_insets(
+            60, -136, {"CYXY": _LARGE_BOX}, [definition], 3.0
+        )
+        assert fetch_calls == [_SMALL_BOX, _LARGE_BOX]
+        assert second["CYXY"]["BOXNEG"] == "ok"
+    finally:
+        INSETS.ACCESS_STRATEGIES.pop(
+            "box_small_no_coverage_strategy", None
+        )
+
+
+def test_legacy_caches_without_recorded_box_are_reused(
+    tmp_path, monkeypatch
+):
+    """Pre-margin-aware caches carry no box anywhere: never refetched.
+
+    A cached GeoTIFF without a provenance sidecar and an index record
+    without ``"bounding_box"`` predate this bookkeeping; both are
+    grandfathered as covering whatever is requested (only ``refresh``
+    renews them), and the record heals by gaining the current box.
+    """
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    fetch_calls = []
+    _register_box_recording_strategy("box_legacy_strategy", fetch_calls)
+    try:
+        definition = _box_definition("BOXLEGACY", "box_legacy_strategy")
+        destination = FNAMES.airport_inset_dem(
+            60, -136, "CYXY", "BOXLEGACY"
+        )
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        with open(destination, "wb") as handle:
+            handle.write(b"legacy-raster")
+        INSETS._write_index(
+            60, -136, {"CYXY": {"BOXLEGACY": "ok"}, "CYYY": {
+                "BOXLEGACY": INSETS.NO_COVERAGE}}
+        )
+
+        index = INSETS.ensure_airport_insets(
+            60,
+            -136,
+            {"CYXY": _LARGE_BOX, "CYYY": _LARGE_BOX},
+            [definition],
+            3.0,
+        )
+        assert fetch_calls == []
+        with open(destination, "rb") as handle:
+            assert handle.read() == b"legacy-raster"
+        assert index["CYXY"]["bounding_box"] == list(_LARGE_BOX)
+        assert index["CYYY"]["BOXLEGACY"] == INSETS.NO_COVERAGE
+    finally:
+        INSETS.ACCESS_STRATEGIES.pop("box_legacy_strategy", None)
+
+
+# =====================================================================
 # Composite-source assembly determinism (step 1 == step 2)
 # =====================================================================
 class _FakeTile:
@@ -2263,3 +2490,475 @@ def test_xyz_archive_drop_indexes_geotiffs_in_place(tmp_path, monkeypatch):
         name for name in os.listdir(converted) if name.endswith(".tif")
     ]
     assert copies == []
+
+
+# =====================================================================
+# The degree_named_cog access strategy (deterministic per-degree COGs,
+# e.g. the Copernicus GLO-30 global surface model on AWS Open Data)
+# =====================================================================
+class _FakeHeadResponse:
+    """Minimal stand-in for a ``requests`` HEAD response."""
+
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+
+def _fake_head_from_status_map(status_by_url, recorded_urls):
+    """Build a ``requests.head`` replacement over a URL->status map.
+
+    Each call appends the probed URL to ``recorded_urls`` (so the test can
+    count real probes vs. memo hits) and returns the mapped status,
+    defaulting unmapped URLs to 404.
+    """
+
+    def _fake_head(url, timeout=None):
+        recorded_urls.append(url)
+        return _FakeHeadResponse(status_by_url.get(url, 404))
+
+    return _fake_head
+
+
+_DEGREE_URL_TEMPLATE = (
+    "https://example.test/cog/{latitude_token}_{longitude_token}.tif"
+)
+
+
+def _degree_cell_url(cell_latitude, cell_longitude):
+    latitude_token, longitude_token = (
+        INSETS.DegreeNamedCogStrategy.degree_cell_tokens(
+            cell_latitude, cell_longitude
+        )
+    )
+    return _DEGREE_URL_TEMPLATE.format(
+        latitude_token=latitude_token, longitude_token=longitude_token
+    )
+
+
+def _degree_definition(**overrides):
+    definition = {
+        "code": "COPERTEST",
+        "access_strategy": "degree_named_cog",
+        "role": INSETS.ROLE_AIRPORT_INSET,
+        "enabled": True,
+        "priority": 1.0,
+        "url_template": _DEGREE_URL_TEMPLATE,
+        "coverage_bbox": (-180.0, -90.0, 180.0, 90.0),
+        "native_resolution_m": 30.0,
+    }
+    definition.update(overrides)
+    return definition
+
+
+def test_degree_cell_tokens_encode_hemispheres_and_zero_padding():
+    tokens = INSETS.DegreeNamedCogStrategy.degree_cell_tokens
+    # Northern / eastern positives, zero-padded to 2 and 3 digits.
+    assert tokens(25, 51) == ("N25", "E051")
+    assert tokens(5, 7) == ("N05", "E007")
+    # Southern / western negatives take S / W on the magnitude.
+    assert tokens(-14, -29) == ("S14", "W029")
+    assert tokens(-5, -7) == ("S05", "W007")
+    # The origin cell is N/E (zero is non-negative).
+    assert tokens(0, 0) == ("N00", "E000")
+
+
+def test_degree_cells_of_bounding_box_enumeration():
+    cells = INSETS.DegreeNamedCogStrategy.degree_cells_of_bounding_box
+    # A box wholly inside one degree cell -> exactly that cell.
+    assert cells((51.1, 25.1, 51.9, 25.9)) == [(25, 51)]
+    # A box straddling both integer boundaries -> the four cells it spans.
+    assert sorted(cells((50.5, 24.5, 51.5, 25.5))) == [
+        (24, 50),
+        (24, 51),
+        (25, 50),
+        (25, 51),
+    ]
+    # A box whose edges land exactly on integer degrees does NOT pull in
+    # the cell beyond the top/right edge -> a single containing cell.
+    assert cells((51.0, 25.0, 52.0, 26.0)) == [(25, 51)]
+    # A degenerate (zero-area) box still yields at least its cell.
+    assert cells((51.5, 25.5, 51.5, 25.5)) == [(25, 51)]
+
+
+def test_degree_discover_filters_by_head_probe_and_memoises(monkeypatch):
+    import requests
+
+    # A fresh per-test memo dict (monkeypatch restores the class attribute).
+    monkeypatch.setattr(
+        INSETS.DegreeNamedCogStrategy, "_cell_exists_by_url", {}
+    )
+    # Four cells span the box; two objects exist, two are absent (ocean).
+    present = {
+        _degree_cell_url(25, 51): 200,
+        _degree_cell_url(24, 50): 200,
+    }
+    probed = []
+    monkeypatch.setattr(
+        requests, "head", _fake_head_from_status_map(present, probed)
+    )
+
+    strategy = INSETS.DegreeNamedCogStrategy()
+    definition = _degree_definition()
+    box = (50.5, 24.5, 51.5, 25.5)
+    sources = strategy.discover(definition, box)
+
+    # Only the two existing cells survive, each prefixed for /vsicurl/ warp.
+    survivor_urls = {entry["source"] for entry in sources}
+    assert survivor_urls == {
+        "/vsicurl/" + _degree_cell_url(25, 51),
+        "/vsicurl/" + _degree_cell_url(24, 50),
+    }
+    # Every source carries its integer SW-corner cell.
+    cells = {tuple(entry["cell"]) for entry in sources}
+    assert cells == {(25, 51), (24, 50)}
+
+    # All four definitive 200/404 answers are memoised on the class dict.
+    memo = INSETS.DegreeNamedCogStrategy._cell_exists_by_url
+    assert memo[_degree_cell_url(25, 51)] is True
+    assert memo[_degree_cell_url(24, 50)] is True
+    assert memo[_degree_cell_url(24, 51)] is False
+    assert memo[_degree_cell_url(25, 50)] is False
+
+    # A second discover over the same box is served entirely from the memo:
+    # no further HEAD probes are issued.
+    probes_after_first = len(probed)
+    strategy.discover(definition, box)
+    assert len(probed) == probes_after_first
+
+
+def test_degree_discover_all_absent_returns_none(monkeypatch):
+    import requests
+
+    monkeypatch.setattr(
+        INSETS.DegreeNamedCogStrategy, "_cell_exists_by_url", {}
+    )
+    probed = []
+    # Empty status map -> every cell probes 404 (absent from the bucket).
+    monkeypatch.setattr(
+        requests, "head", _fake_head_from_status_map({}, probed)
+    )
+    strategy = INSETS.DegreeNamedCogStrategy()
+    assert (
+        strategy.discover(_degree_definition(), (51.1, 25.1, 51.9, 25.9))
+        is None
+    )
+
+
+def test_degree_discover_transient_status_is_not_memoised(monkeypatch):
+    import requests
+
+    monkeypatch.setattr(
+        INSETS.DegreeNamedCogStrategy, "_cell_exists_by_url", {}
+    )
+    probed = []
+    # A 5xx is transient: treated as absent for this call but NOT memoised,
+    # so a network blip cannot poison later airports of the run.
+    monkeypatch.setattr(
+        requests,
+        "head",
+        _fake_head_from_status_map({_degree_cell_url(25, 51): 500}, probed),
+    )
+    strategy = INSETS.DegreeNamedCogStrategy()
+    definition = _degree_definition()
+    box = (51.1, 25.1, 51.9, 25.9)
+
+    assert strategy.discover(definition, box) is None
+    memo = INSETS.DegreeNamedCogStrategy._cell_exists_by_url
+    assert _degree_cell_url(25, 51) not in memo
+    # A second run re-probes (the 500 left nothing cached).
+    probes_after_first = len(probed)
+    strategy.discover(definition, box)
+    assert len(probed) > probes_after_first
+
+
+def test_degree_discover_empty_url_template_returns_none(monkeypatch):
+    import requests
+
+    monkeypatch.setattr(
+        INSETS.DegreeNamedCogStrategy, "_cell_exists_by_url", {}
+    )
+    probed = []
+    monkeypatch.setattr(
+        requests, "head", _fake_head_from_status_map({}, probed)
+    )
+    strategy = INSETS.DegreeNamedCogStrategy()
+    assert (
+        strategy.discover(
+            _degree_definition(url_template=""), (51.1, 25.1, 51.9, 25.9)
+        )
+        is None
+    )
+    # No probe was even attempted without a URL template.
+    assert probed == []
+
+
+def test_degree_discover_coverage_miss_returns_none(monkeypatch):
+    import requests
+
+    monkeypatch.setattr(
+        INSETS.DegreeNamedCogStrategy, "_cell_exists_by_url", {}
+    )
+    probed = []
+    monkeypatch.setattr(
+        requests, "head", _fake_head_from_status_map({}, probed)
+    )
+    strategy = INSETS.DegreeNamedCogStrategy()
+    # A coverage_bbox that does not intersect the requested box short-circuits.
+    definition = _degree_definition(coverage_bbox=(0.0, 0.0, 10.0, 10.0))
+    assert (
+        strategy.discover(definition, (51.1, 25.1, 51.9, 25.9)) is None
+    )
+    assert probed == []
+
+
+@requires_gdal
+def test_degree_fetch_provenance_strips_vsicurl_and_records_warp_inputs(
+    tmp_path, monkeypatch
+):
+    import requests
+
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    monkeypatch.setattr(
+        INSETS.DegreeNamedCogStrategy, "_cell_exists_by_url", {}
+    )
+    # Two of the four spanned cells exist; the other two are ocean (absent).
+    present = {
+        _degree_cell_url(25, 51): 200,
+        _degree_cell_url(24, 50): 200,
+    }
+    probed = []
+    monkeypatch.setattr(
+        requests, "head", _fake_head_from_status_map(present, probed)
+    )
+
+    warp_calls = {}
+
+    def _fake_warp(
+        vsicurl_inputs,
+        bounding_box_wgs84,
+        target_resolution_m,
+        destination_path,
+        **keyword_arguments,
+    ):
+        warp_calls["inputs"] = list(vsicurl_inputs)
+        (west, south, east, north) = bounding_box_wgs84
+        _write_constant_geotiff(
+            destination_path, west, south, east, north, 10.0
+        )
+        return True
+
+    monkeypatch.setattr(
+        INSETS, "warp_vsicurl_sources_to_geotiff", _fake_warp
+    )
+
+    strategy = INSETS.DegreeNamedCogStrategy()
+    definition = _degree_definition()
+    box = (50.5, 24.5, 51.5, 25.5)
+    destination = str(tmp_path / "copernicus.tif")
+    provenance = strategy.fetch(definition, box, 30.0, destination)
+
+    assert provenance is not None
+    assert provenance["provider"] == "COPERTEST"
+    # source_urls are the surviving cells with the /vsicurl/ prefix stripped.
+    assert set(provenance["source_urls"]) == {
+        _degree_cell_url(25, 51),
+        _degree_cell_url(24, 50),
+    }
+    assert all(
+        not url.startswith("/vsicurl/") for url in provenance["source_urls"]
+    )
+    assert provenance["bounding_box_wgs84"] == list(box)
+    # The warp core received exactly the surviving /vsicurl/ inputs.
+    assert set(warp_calls["inputs"]) == {
+        "/vsicurl/" + _degree_cell_url(25, 51),
+        "/vsicurl/" + _degree_cell_url(24, 50),
+    }
+    assert os.path.isfile(destination)
+
+
+# =====================================================================
+# Surface-model building-footprint masking (post-fetch pass)
+# =====================================================================
+_MASK_PIXEL_DEGREES = 0.00027  # ~30 m at the equator; exact value unimportant
+_MASK_WEST = -87.0
+_MASK_NORTH = 36.0
+_MASK_COLUMNS = 60
+_MASK_ROWS = 60
+_MASK_EAST = _MASK_WEST + _MASK_COLUMNS * _MASK_PIXEL_DEGREES
+_MASK_SOUTH = _MASK_NORTH - _MASK_ROWS * _MASK_PIXEL_DEGREES
+_MASK_BOX = (_MASK_WEST, _MASK_SOUTH, _MASK_EAST, _MASK_NORTH)
+
+
+def _write_surface_model_with_building_bump(path):
+    """~60x60, ~30 m flat 10 m ground with a 45 m building bump and a
+    nodata corner far from the bump.  Returns the footprint polygon (in
+    absolute lon/lat) covering the bump for the masking test to inject."""
+    from shapely import geometry as shapely_geometry
+
+    values = numpy.full((_MASK_ROWS, _MASK_COLUMNS), 10.0, dtype=numpy.float32)
+    # A rectangular rooftop bump in the interior (rows/cols 25..34).
+    values[25:35, 25:35] = 45.0
+    # A genuine-nodata corner far from the building (rows/cols 0..7).
+    values[0:8, 0:8] = -32768.0
+    _write_terrain_geotiff(
+        path, _MASK_WEST, _MASK_SOUTH, _MASK_EAST, _MASK_NORTH, values
+    )
+    longitude_min = _MASK_WEST + 25 * _MASK_PIXEL_DEGREES
+    longitude_max = _MASK_WEST + 35 * _MASK_PIXEL_DEGREES
+    latitude_max = _MASK_NORTH - 25 * _MASK_PIXEL_DEGREES
+    latitude_min = _MASK_NORTH - 35 * _MASK_PIXEL_DEGREES
+    footprint = shapely_geometry.box(
+        longitude_min, latitude_min, longitude_max, latitude_max
+    )
+    return footprint
+
+
+@requires_gdal
+def test_masking_replaces_building_bump_and_preserves_ground_and_nodata(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    path = str(tmp_path / "surface_model.tif")
+    footprint = _write_surface_model_with_building_bump(path)
+    monkeypatch.setattr(
+        INSETS,
+        "openstreetmap_building_footprints",
+        lambda bounding_box_wgs84: [footprint],
+    )
+
+    definition = {"code": "COPERTEST", "footprint_mask_buffer_m": 35}
+    summary = INSETS.mask_building_footprints_in_surface_model(
+        path, _MASK_BOX, definition
+    )
+
+    # The pass reports its work, not a skip.
+    assert "skipped" not in summary
+    assert summary["footprint_source"] == "OpenStreetMap building footprints"
+    assert summary["footprint_count"] == 1
+    assert summary["masked_pixel_count"] > 0
+    assert summary["footprint_mask_buffer_m"] == 35
+
+    dataset = gdal.Open(path)
+    result = dataset.GetRasterBand(1).ReadAsArray()
+    dataset = None
+    # The rooftop bump was interpolated back down to the surrounding ground.
+    bump = result[27:33, 27:33]
+    assert numpy.all(numpy.abs(bump - 10.0) < 0.5)
+    # A pixel far from the footprint is byte-for-byte the original ground.
+    assert result[50, 50] == numpy.float32(10.0)
+    # The genuine-nodata corner is restored verbatim (never a fill source).
+    assert numpy.all(result[0:8, 0:8] == numpy.float32(-32768.0))
+
+
+@requires_gdal
+def test_masking_skips_when_no_footprints_and_leaves_raster_unchanged(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    path = str(tmp_path / "surface_model.tif")
+    _write_surface_model_with_building_bump(path)
+    monkeypatch.setattr(
+        INSETS,
+        "openstreetmap_building_footprints",
+        lambda bounding_box_wgs84: [],
+    )
+
+    dataset = gdal.Open(path)
+    before = dataset.GetRasterBand(1).ReadAsArray().copy()
+    dataset = None
+
+    summary = INSETS.mask_building_footprints_in_surface_model(
+        path, _MASK_BOX, {"code": "COPERTEST"}
+    )
+    # No footprints -> an explicit skip carrying a zero count...
+    assert "skipped" in summary
+    assert summary["footprint_count"] == 0
+
+    dataset = gdal.Open(path)
+    after = dataset.GetRasterBand(1).ReadAsArray()
+    dataset = None
+    # ...and the raster is left exactly as it was fetched.
+    assert numpy.array_equal(after, before)
+
+
+@requires_gdal
+def test_fetch_inset_runs_masking_only_when_flag_true(tmp_path, monkeypatch):
+    """The dispatcher runs the masking pass and stores its summary iff the
+    definition opts in, and never calls it otherwise."""
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    mask_calls = {"count": 0}
+    mask_summary = {"masked_pixel_count": 7, "footprint_count": 1}
+
+    def _fake_mask(inset_path, bounding_box_wgs84, definition):
+        mask_calls["count"] += 1
+        return mask_summary
+
+    monkeypatch.setattr(
+        INSETS, "mask_building_footprints_in_surface_model", _fake_mask
+    )
+
+    class _FlagStrategy:
+        def discover(self, definition, bounding_box_wgs84):
+            return [{"note": "covers"}]
+
+        def fetch(
+            self,
+            definition,
+            bounding_box_wgs84,
+            target_resolution_m,
+            destination_path,
+        ):
+            os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+            with open(destination_path, "wb") as handle:
+                handle.write(b"synthetic-surface-model")
+            return {"provider": definition["code"]}
+
+    monkeypatch.setitem(
+        INSETS.ACCESS_STRATEGIES, "flag_test_strategy", _FlagStrategy
+    )
+    box = (-1.0, -1.0, 1.0, 1.0)
+
+    # Flag ON -> masking runs and its summary lands under the flag key.
+    definition_on = {
+        "code": "MASKON",
+        "access_strategy": "flag_test_strategy",
+        "role": INSETS.ROLE_AIRPORT_INSET,
+        "enabled": True,
+        "priority": 1.0,
+        INSETS.SURFACE_MODEL_BUILDING_MASKING: True,
+    }
+    provenance_on = INSETS.fetch_inset(
+        definition_on, box, 30.0, str(tmp_path / "on.tif")
+    )
+    assert provenance_on[INSETS.SURFACE_MODEL_BUILDING_MASKING] is mask_summary
+    assert mask_calls["count"] == 1
+
+    # Flag OFF -> no masking, no key, no call.
+    definition_off = dict(definition_on)
+    definition_off["code"] = "MASKOFF"
+    definition_off[INSETS.SURFACE_MODEL_BUILDING_MASKING] = False
+    provenance_off = INSETS.fetch_inset(
+        definition_off, box, 30.0, str(tmp_path / "off.tif")
+    )
+    assert INSETS.SURFACE_MODEL_BUILDING_MASKING not in provenance_off
+    assert mask_calls["count"] == 1
+
+
+# =====================================================================
+# The shipped COPERNICUSGLO30 definition (global surface-model fallback)
+# =====================================================================
+def test_copernicus_glo30_ships_with_masking_flag_and_ranks_last():
+    INSETS.initialize_elevation_providers_dict()
+    assert "COPERNICUSGLO30" in INSETS.elevation_providers_dict
+    copernicus = INSETS.elevation_providers_dict["COPERNICUSGLO30"]
+    # The surface-model masking flag parses to a real boolean True.
+    assert copernicus[INSETS.SURFACE_MODEL_BUILDING_MASKING] is True
+    assert copernicus["access_strategy"] == "degree_named_cog"
+    assert copernicus["role"] == INSETS.ROLE_AIRPORT_INSET
+    assert copernicus["priority"] == 1.0
+
+    # It is the global fallback: LAST among the enabled airport_inset
+    # providers in the auto ordering (every real source outranks it).
+    selected = INSETS.select_provider_definitions("auto")
+    codes = [definition["code"] for definition in selected]
+    assert "COPERNICUSGLO30" in codes
+    assert codes[-1] == "COPERNICUSGLO30"

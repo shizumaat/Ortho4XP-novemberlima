@@ -84,7 +84,7 @@ import datetime
 import numpy
 
 try:
-    from osgeo import gdal, osr
+    from osgeo import gdal, ogr, osr
 
     has_gdal = True
     gdal.UseExceptions()
@@ -207,6 +207,11 @@ def initialize_elevation_providers_dict(providers_directory=None):
         # masks_use_DEM_too=True fetches them (spec section 4.5).
         definition["intertidal"] = _parse_boolean(
             definition.get("intertidal", "False")
+        )
+        # Surface-model (DSM) providers opt into the post-fetch building
+        # masking pass (see mask_building_footprints_in_surface_model).
+        definition[SURFACE_MODEL_BUILDING_MASKING] = _parse_boolean(
+            definition.get(SURFACE_MODEL_BUILDING_MASKING, "False")
         )
         # Base-tier (role=base) fields, spec section 3.6.
         if "resolution_arc_seconds" in definition:
@@ -436,12 +441,25 @@ def fetch_inset(
         )
         return None
     strategy = strategy_factory()
-    return strategy.fetch(
+    provenance = strategy.fetch(
         definition,
         bounding_box_wgs84,
         target_resolution_m,
         destination_path,
     )
+    # Surface-model providers (radar DSMs) opt into a post-fetch pass that
+    # replaces building-contaminated pixels by interpolated ground; the
+    # pass and its summary live with the fetch so every consumer of the
+    # cached inset (composite source, bake, probes) sees corrected values.
+    if provenance is not None and definition.get(
+        SURFACE_MODEL_BUILDING_MASKING
+    ):
+        provenance[SURFACE_MODEL_BUILDING_MASKING] = (
+            mask_building_footprints_in_surface_model(
+                destination_path, bounding_box_wgs84, definition
+            )
+        )
+    return provenance
 
 
 def discover_inset(definition, bounding_box_wgs84):
@@ -4282,6 +4300,417 @@ class XyzArchiveDropStrategy:
 
 
 # =====================================================================
+# Strategy 15: degree_named_cog (deterministic per-degree COG names)
+# =====================================================================
+@register_access_strategy("degree_named_cog")
+class DegreeNamedCogStrategy:
+    """Cloud-Optimized GeoTIFFs named by their 1-degree cell coordinates.
+
+    The Copernicus GLO-30 mirror on AWS Open Data publishes one COG per
+    1-degree cell with the cell's south-west corner encoded in the object
+    name as hemisphere tokens (``N25``/``E051`` style) -- no discovery
+    API, no index file: every cell's URL is computable.  Discovery
+    enumerates the cells touching the requested box and keeps those whose
+    object actually exists (ocean-only cells are simply absent from the
+    bucket; one cheap HEAD request per cell separates the two, memoised
+    for the process so neighbouring airports in the same cell never
+    re-ask).  The fetch is the shared windowed ``/vsicurl/`` warp.
+
+    Deliberately NOT eligible for whole-tile overlay fetches
+    (``supports_wide_area = False``): the only shipped user is a global
+    SURFACE model (buildings and canopy baked into the heights) whose
+    building artifacts are corrected by the airport-scoped footprint
+    masking pass -- a tile-wide use would spread uncorrected rooftop
+    elevations across every city in the tile.
+    """
+
+    supports_wide_area = False
+
+    # Process-lifetime memo of definitive existence answers (HTTP 200 /
+    # 404) keyed by URL.  Transient failures (timeouts, 5xx) are NOT
+    # memoised: one network blip must not poison every later airport of
+    # the run with a false "absent".
+    _cell_exists_by_url = {}
+
+    @staticmethod
+    def degree_cell_tokens(cell_latitude, cell_longitude):
+        """Hemisphere-coded name tokens of a 1-degree cell's SW corner.
+
+        ``(25, 51) -> ("N25", "E051")``; ``(-14, -29) -> ("S14", "W029")``.
+        Latitude is zero-padded to 2 digits, longitude to 3, matching the
+        Copernicus DEM object-name grammar.
+        """
+        latitude_token = "%s%02d" % (
+            "N" if cell_latitude >= 0 else "S",
+            abs(cell_latitude),
+        )
+        longitude_token = "%s%03d" % (
+            "E" if cell_longitude >= 0 else "W",
+            abs(cell_longitude),
+        )
+        return latitude_token, longitude_token
+
+    @staticmethod
+    def degree_cells_of_bounding_box(bounding_box_wgs84):
+        """The integer SW corners of every 1-degree cell a box touches.
+
+        A box edge lying exactly on an integer degree does not pull in the
+        cell beyond it (``ceil`` on the top/right edges).
+        """
+        import math
+
+        (west, south, east, north) = bounding_box_wgs84
+        return [
+            (cell_latitude, cell_longitude)
+            for cell_latitude in range(
+                int(math.floor(south)), max(int(math.ceil(north)),
+                                            int(math.floor(south)) + 1)
+            )
+            for cell_longitude in range(
+                int(math.floor(west)), max(int(math.ceil(east)),
+                                           int(math.floor(west)) + 1)
+            )
+        ]
+
+    def _cell_url(self, definition, cell_latitude, cell_longitude):
+        latitude_token, longitude_token = self.degree_cell_tokens(
+            cell_latitude, cell_longitude
+        )
+        return str(definition.get("url_template", "")).format(
+            latitude_token=latitude_token, longitude_token=longitude_token
+        )
+
+    def _url_exists(self, url):
+        memo = DegreeNamedCogStrategy._cell_exists_by_url
+        if url in memo:
+            return memo[url]
+        import requests
+
+        try:
+            response = requests.head(url, timeout=30)
+        except Exception as error:
+            UI.vprint(
+                1,
+                "   WARNING: existence probe failed for",
+                url,
+                ":",
+                str(error),
+            )
+            return False
+        if response.status_code == 200:
+            memo[url] = True
+        elif response.status_code == 404:
+            memo[url] = False
+        else:
+            UI.vprint(
+                1,
+                "   WARNING: existence probe for",
+                url,
+                "returned status",
+                response.status_code,
+            )
+            return False
+        return memo[url]
+
+    def discover(self, definition, bounding_box_wgs84):
+        if not _coverage_bbox_intersects(definition, bounding_box_wgs84):
+            return None
+        if not str(definition.get("url_template", "")).strip():
+            return None
+        sources = [
+            {"source": "/vsicurl/" + url, "cell": [cell_latitude, cell_longitude]}
+            for (cell_latitude, cell_longitude) in (
+                self.degree_cells_of_bounding_box(bounding_box_wgs84)
+            )
+            for url in [
+                self._cell_url(definition, cell_latitude, cell_longitude)
+            ]
+            if self._url_exists(url)
+        ]
+        return sources or None
+
+    def fetch(
+        self,
+        definition,
+        bounding_box_wgs84,
+        target_resolution_m,
+        destination_path,
+    ):
+        if not has_gdal:
+            return None
+        sources = self.discover(definition, bounding_box_wgs84)
+        if not sources:
+            return None
+        vsicurl_inputs = [entry["source"] for entry in sources]
+        if not warp_vsicurl_sources_to_geotiff(
+            vsicurl_inputs,
+            bounding_box_wgs84,
+            target_resolution_m,
+            destination_path,
+            value_floor_m=float(definition.get("value_floor_m", -600.0)),
+        ):
+            return None
+        if not _geotiff_has_valid_data(destination_path):
+            try:
+                os.remove(destination_path)
+            except OSError:
+                pass
+            return None
+        return {
+            "provider": definition.get("code"),
+            "access_strategy": definition.get("access_strategy"),
+            "source_urls": [
+                entry["source"].replace("/vsicurl/", "", 1)
+                for entry in sources
+            ],
+            "native_resolution_m": definition.get("native_resolution_m"),
+            "license": definition.get("license"),
+            "attribution": definition.get("attribution"),
+            "vertical_datum": definition.get("vertical_datum"),
+            "datum_note": (
+                "Elevations are in the source vertical datum; the source "
+                "is treated as truth and is NOT shifted toward the base "
+                "DEM."
+            ),
+            "fetch_date": datetime.date.today().isoformat(),
+            "bounding_box_wgs84": list(bounding_box_wgs84),
+            "resolution_m": target_resolution_m,
+        }
+
+
+# =====================================================================
+# Surface-model building masking (strategy-agnostic post-fetch pass)
+# =====================================================================
+# Definition flag naming the pass; parsed to bool at registry load.
+SURFACE_MODEL_BUILDING_MASKING = "surface_model_building_masking"
+
+# One buffered pixel of a 30 m grid plus a margin for radar layover: the
+# X-band return of a building smears roughly one resolution cell beyond
+# its walls, so the mask must reach past the mapped footprint.
+DEFAULT_FOOTPRINT_MASK_BUFFER_M = 35.0
+
+# Upper bound, in pixels, on how far the inpainting looks for valid
+# ground values.  100 pixels at a 30 m grid is 3 km -- beyond any single
+# terminal complex while keeping gdal.FillNodata cheap.
+DEFAULT_FOOTPRINT_FILL_SEARCH_PIXELS = 100
+
+
+def openstreetmap_building_footprints(bounding_box_wgs84):
+    """Absolute-WGS84 building footprint polygons from OpenStreetMap.
+
+    Queries Overpass for every ``building`` way and relation in the box
+    and returns a list of shapely polygons in plain (longitude, latitude)
+    coordinates (``OSM_to_MultiPolygon`` with a zero origin, so nothing
+    here is tile-relative).  Returns ``[]`` on any failure -- the caller
+    then skips the masking pass rather than failing the fetch: an
+    uncorrected surface-model inset is still better than no inset.
+
+    Deliberately NOT cached on disk: an inset fetch is already a rare,
+    cached event, and reusing a footprint file fetched for a smaller
+    margin would silently miss buildings in the enlarged ring (the exact
+    staleness class the margin-aware inset cache invalidation fixed).
+    """
+    import O4_OSM_Utils as OSM
+
+    (west, south, east, north) = bounding_box_wgs84
+    osm_layer = OSM.OSM_layer()
+    try:
+        queried = OSM.OSM_query_to_OSM_layer(
+            ['way["building"]', 'rel["building"]'],
+            (south, west, north, east),
+            osm_layer,
+        )
+    except Exception as error:
+        UI.vprint(
+            1,
+            "   WARNING: OpenStreetMap building query failed:",
+            str(error),
+        )
+        return []
+    if not queried:
+        return []
+    try:
+        footprints = OSM.OSM_to_MultiPolygon(osm_layer, 0, 0)
+    except Exception as error:
+        UI.vprint(
+            1,
+            "   WARNING: OpenStreetMap building polygons unreadable:",
+            str(error),
+        )
+        return []
+    return [polygon for polygon in getattr(footprints, "geoms", []) if polygon.area]
+
+
+def _buffer_footprints_in_metres(footprints, buffer_m, centre_latitude):
+    """Buffer WGS84 polygons by ``buffer_m`` true metres.
+
+    Degrees are anisotropic away from the equator, so each polygon is
+    scaled into a local equirectangular metre frame at the box's centre
+    latitude, buffered there, and scaled back.
+    """
+    from shapely.ops import transform as shapely_transform
+
+    metres_per_degree_longitude = GEO.lon_to_m(centre_latitude)
+    metres_per_degree_latitude = GEO.lat_to_m
+    buffered = []
+    for polygon in footprints:
+        in_metres = shapely_transform(
+            lambda x, y: (
+                x * metres_per_degree_longitude,
+                y * metres_per_degree_latitude,
+            ),
+            polygon,
+        )
+        back_in_degrees = shapely_transform(
+            lambda x, y: (
+                x / metres_per_degree_longitude,
+                y / metres_per_degree_latitude,
+            ),
+            in_metres.buffer(buffer_m),
+        )
+        if back_in_degrees.is_valid and not back_in_degrees.is_empty:
+            buffered.append(back_in_degrees)
+    return buffered
+
+
+def _rasterize_footprint_mask(footprints, reference_dataset):
+    """Boolean array marking ``reference_dataset`` pixels under a footprint."""
+    memory_raster = gdal.GetDriverByName("MEM").Create(
+        "",
+        reference_dataset.RasterXSize,
+        reference_dataset.RasterYSize,
+        1,
+        gdal.GDT_Byte,
+    )
+    memory_raster.SetGeoTransform(reference_dataset.GetGeoTransform())
+    memory_raster.SetProjection(reference_dataset.GetProjection())
+    # GDAL 3.11 renamed the in-memory OGR driver "Memory" -> "MEM";
+    # accept both so older installs keep working.
+    vector_driver = ogr.GetDriverByName("MEM") or ogr.GetDriverByName(
+        "Memory"
+    )
+    vector_dataset = vector_driver.CreateDataSource("")
+    spatial_reference = osr.SpatialReference()
+    spatial_reference.ImportFromEPSG(4326)
+    vector_layer = vector_dataset.CreateLayer(
+        "footprints", spatial_reference, ogr.wkbPolygon
+    )
+    for polygon in footprints:
+        feature = ogr.Feature(vector_layer.GetLayerDefn())
+        feature.SetGeometry(ogr.CreateGeometryFromWkb(polygon.wkb))
+        vector_layer.CreateFeature(feature)
+        feature = None
+    gdal.RasterizeLayer(memory_raster, [1], vector_layer, burn_values=[1])
+    mask = memory_raster.GetRasterBand(1).ReadAsArray().astype(bool)
+    memory_raster = None
+    vector_dataset = None
+    return mask
+
+
+def mask_building_footprints_in_surface_model(
+    inset_path, bounding_box_wgs84, definition
+):
+    """Replace building-contaminated surface-model pixels by ground.
+
+    Surface models (radar DSMs like Copernicus GLO-30) bake rooftop
+    heights into the terrain.  Height subtraction cannot repair that (a
+    30 m pixel straddling a wall holds a roof/ground mixture, radar
+    layover smears the return past the footprint, and mapped heights
+    rarely match what the radar saw), so contaminated pixels are simply
+    NOT TRUSTED: every pixel within ``footprint_mask_buffer_m`` of an
+    OpenStreetMap building footprint is masked and re-interpolated from
+    the surrounding ground with ``gdal.FillNodata``.  Under an airport
+    terminal the true ground is nearly planar, which makes the fill an
+    excellent estimate.  Genuine nodata cells are excluded from the
+    interpolation sources and restored verbatim afterwards.
+
+    Returns a summary dictionary for the provenance sidecar; on any
+    failure the summary carries a ``skipped`` reason and the raster is
+    left as fetched (an uncorrected inset beats a failed fetch).
+    """
+    if not has_gdal:
+        return {"skipped": "GDAL unavailable"}
+    footprints = openstreetmap_building_footprints(bounding_box_wgs84)
+    buffer_m = _parse_float(
+        definition.get("footprint_mask_buffer_m"),
+        default=DEFAULT_FOOTPRINT_MASK_BUFFER_M,
+    )
+    if not footprints:
+        return {
+            "skipped": "no OpenStreetMap building footprints in the box",
+            "footprint_count": 0,
+        }
+    (west, south, east, north) = bounding_box_wgs84
+    centre_latitude = (south + north) / 2.0
+    try:
+        buffered = _buffer_footprints_in_metres(
+            footprints, buffer_m, centre_latitude
+        )
+        dataset = gdal.Open(inset_path, gdal.GA_Update)
+        band = dataset.GetRasterBand(1)
+        values = band.ReadAsArray()
+        nodata_value = band.GetNoDataValue()
+        if nodata_value is None:
+            nodata_value = -32768.0
+        building_mask = _rasterize_footprint_mask(buffered, dataset)
+        genuine_nodata = (values == nodata_value) | ~numpy.isfinite(values)
+        pixels_to_fill = building_mask & ~genuine_nodata
+        if not pixels_to_fill.any():
+            dataset = None
+            return {
+                "footprint_source": "OpenStreetMap building footprints",
+                "footprint_count": len(footprints),
+                "masked_pixel_count": 0,
+                "footprint_mask_buffer_m": buffer_m,
+            }
+        # gdal.FillNodata fills every mask==0 pixel from mask!=0 pixels:
+        # zero out buildings AND genuine nodata (so sentinel values are
+        # never interpolation sources), then restore the genuine nodata
+        # afterwards -- only building pixels end up changed.
+        interpolation_sources = ~building_mask & ~genuine_nodata
+        source_mask_raster = gdal.GetDriverByName("MEM").Create(
+            "", dataset.RasterXSize, dataset.RasterYSize, 1, gdal.GDT_Byte
+        )
+        source_mask_raster.SetGeoTransform(dataset.GetGeoTransform())
+        source_mask_band = source_mask_raster.GetRasterBand(1)
+        source_mask_band.WriteArray(
+            interpolation_sources.astype(numpy.uint8) * 255
+        )
+        search_pixels = _parse_float(
+            definition.get("footprint_fill_search_pixels"),
+            default=DEFAULT_FOOTPRINT_FILL_SEARCH_PIXELS,
+        )
+        gdal.FillNodata(
+            targetBand=band,
+            maskBand=source_mask_band,
+            maxSearchDist=float(search_pixels),
+            smoothingIterations=2,
+        )
+        filled_values = band.ReadAsArray()
+        filled_values[genuine_nodata] = nodata_value
+        band.WriteArray(filled_values)
+        band.FlushCache()
+        dataset = None
+        source_mask_raster = None
+    except Exception as error:
+        UI.vprint(
+            1,
+            "   WARNING: building-footprint masking failed:",
+            str(error),
+        )
+        return {"skipped": str(error), "footprint_count": len(footprints)}
+    return {
+        "footprint_source": "OpenStreetMap building footprints",
+        "footprint_count": len(footprints),
+        "masked_pixel_count": int(pixels_to_fill.sum()),
+        "masked_fraction": round(
+            float(pixels_to_fill.sum()) / float(values.size), 4
+        ),
+        "footprint_mask_buffer_m": buffer_m,
+    }
+
+
+# =====================================================================
 # Orchestration (strategy-agnostic): discovery loop, cache, index
 # =====================================================================
 def _read_index(lat, lon):
@@ -4302,6 +4731,57 @@ def _write_index(lat, lon, index):
         json.dump(index, handle, indent=2, sort_keys=True)
 
 
+# ~0.1 m at the equator: a real margin change (metres) always exceeds it,
+# while float noise from recomputing the same box never does.
+INSET_BOUNDING_BOX_TOLERANCE_DEGREES = 1e-6
+
+
+def _bounding_box_extends_beyond(
+    requested_box, recorded_box,
+    tolerance=INSET_BOUNDING_BOX_TOLERANCE_DEGREES,
+):
+    """True when ``requested_box`` reaches outside ``recorded_box`` anywhere.
+
+    Both are ``(west, south, east, north)`` in EPSG:4326 degrees.  A
+    requested box fully inside the recorded one (margin shrunk or equal)
+    is NOT beyond it: a superset raster stays valid.
+    """
+    (requested_west, requested_south, requested_east, requested_north) = (
+        requested_box
+    )
+    (recorded_west, recorded_south, recorded_east, recorded_north) = (
+        recorded_box
+    )
+    return (
+        requested_west < recorded_west - tolerance
+        or requested_south < recorded_south - tolerance
+        or requested_east > recorded_east + tolerance
+        or requested_north > recorded_north + tolerance
+    )
+
+
+def _fetched_bounding_box(lat, lon, icao, provider_code):
+    """The bounding box a cached inset was actually fetched with.
+
+    Read from the provenance sidecar's ``bounding_box_wgs84`` (every access
+    strategy records the requested box verbatim).  ``None`` when the sidecar
+    is missing or unreadable — pre-sidecar caches cannot be judged and are
+    treated as covering whatever is requested.
+    """
+    provenance_path = FNAMES.airport_inset_provenance(
+        lat, lon, icao, provider_code
+    )
+    try:
+        with open(provenance_path, "r") as handle:
+            provenance = json.load(handle)
+        recorded_box = provenance.get("bounding_box_wgs84")
+        if isinstance(recorded_box, (list, tuple)) and len(recorded_box) == 4:
+            return tuple(float(value) for value in recorded_box)
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
 def ensure_airport_insets(
     lat,
     lon,
@@ -4319,6 +4799,14 @@ def ensure_airport_insets(
     NEGATIVE (``no-coverage``) results so a rebuild never re-queries the
     discovery API; ``refresh`` forces a re-query and re-fetch.
 
+    The caches are margin-aware: a cached GeoTIFF whose provenance sidecar
+    records a smaller bounding box than requested (the user enlarged
+    ``airport_elevation_inset_margin_m``) is refetched, and negative results
+    are re-checked when the request outgrows the box they were evaluated
+    against (stored per airport under ``"bounding_box"``).  A request equal
+    to or inside what is cached never refetches.  Records written before
+    this key existed keep their negative results until a ``refresh``.
+
     Returns the updated index dictionary.  Strategy-agnostic: it only calls
     :func:`discover_inset` / :func:`fetch_inset`.
     """
@@ -4330,15 +4818,41 @@ def ensure_airport_insets(
     for icao in sorted(airport_bounding_boxes, key=str):
         bounding_box = airport_bounding_boxes[icao]
         airport_record = index.get(icao, {})
+        recorded_box = airport_record.get("bounding_box")
+        negatives_are_stale = (
+            recorded_box is not None
+            and _bounding_box_extends_beyond(bounding_box, recorded_box)
+        )
         for definition in provider_definitions:
             code = definition["code"]
             destination = FNAMES.airport_inset_dem(lat, lon, icao, code)
+            cached_inset_is_stale = False
             if os.path.isfile(destination) and not refresh:
-                airport_record[code] = airport_record.get(code) or "ok"
-                _store_acceptance_probes_in_record(airport_record, destination)
-                break
+                fetched_box = _fetched_bounding_box(lat, lon, icao, code)
+                cached_inset_is_stale = (
+                    fetched_box is not None
+                    and _bounding_box_extends_beyond(
+                        bounding_box, fetched_box
+                    )
+                )
+                if not cached_inset_is_stale:
+                    airport_record[code] = airport_record.get(code) or "ok"
+                    _store_acceptance_probes_in_record(
+                        airport_record, destination
+                    )
+                    break
+                UI.vprint(
+                    1,
+                    "    Cached elevation inset for",
+                    icao,
+                    "from",
+                    code,
+                    "covers a smaller area than the requested margin"
+                    " - refetching.",
+                )
             if (
                 not refresh
+                and not negatives_are_stale
                 and airport_record.get(code) == NO_COVERAGE
             ):
                 continue
@@ -4353,13 +4867,44 @@ def ensure_airport_insets(
                 "from",
                 code,
             )
+            fetch_destination = destination
+            if cached_inset_is_stale:
+                # A failed warp can leave a partial file behind; the
+                # still-valid smaller inset must survive a failed
+                # enlargement, so fetch beside it and replace on success.
+                fetch_destination = destination + ".refetch"
             provenance = fetch_inset(
-                definition, bounding_box, target_resolution_m, destination
+                definition,
+                bounding_box,
+                target_resolution_m,
+                fetch_destination,
             )
             if provenance is None:
+                if cached_inset_is_stale:
+                    if os.path.isfile(fetch_destination):
+                        os.remove(fetch_destination)
+                    UI.vprint(
+                        1,
+                        "   WARNING: could not refetch a larger inset for",
+                        icao,
+                        "from",
+                        code,
+                        "- keeping the previous smaller one.",
+                    )
+                    airport_record[code] = "ok"
+                    airport_record["checked"] = checked_stamp
+                    break
+                if os.path.isfile(destination):
+                    # No cache existed before this fetch (that branch breaks
+                    # or refetches beside it), so this is a partial file
+                    # from a broken warp; left in place it would pass the
+                    # cache check and bake garbage on the next run.
+                    os.remove(destination)
                 airport_record[code] = NO_COVERAGE
                 airport_record["checked"] = checked_stamp
                 continue
+            if cached_inset_is_stale:
+                os.replace(fetch_destination, destination)
             provenance_path = FNAMES.airport_inset_provenance(
                 lat, lon, icao, code
             )
@@ -4367,10 +4912,15 @@ def ensure_airport_insets(
                 json.dump(provenance, handle, indent=2, sort_keys=True)
             airport_record[code] = "ok"
             airport_record["checked"] = checked_stamp
+            # refresh=True: the raster on disk is new, so cached acceptance
+            # probes from a previous (smaller) fetch must recompute.
             _store_acceptance_probes_in_record(
-                airport_record, destination, refresh=refresh
+                airport_record, destination, refresh=True
             )
             break
+        airport_record["bounding_box"] = [
+            float(value) for value in bounding_box
+        ]
         index[icao] = airport_record
     _write_index(lat, lon, index)
     return index
@@ -4887,7 +5437,7 @@ def _airport_bounding_boxes(tile, dico_airports):
     back and expands by ``airport_elevation_inset_margin_m`` converted to
     degrees at the tile latitude.
     """
-    margin_m = getattr(tile, "airport_elevation_inset_margin_m", 1000.0)
+    margin_m = getattr(tile, "airport_elevation_inset_margin_m", 2000.0)
     metres_per_degree_latitude = GEO.lat_to_m
     metres_per_degree_longitude = GEO.lon_to_m(tile.lat + 0.5)
     margin_lon = margin_m / metres_per_degree_longitude
@@ -6559,7 +7109,7 @@ def summarize_tile_elevation_sources(
             statuses = [
                 value
                 for (key, value) in airport_record.items()
-                if key not in ("checked", "probes")
+                if key not in ("checked", "probes", "bounding_box")
             ]
             if "ok" in statuses:
                 fetched_airports += 1
@@ -6611,6 +7161,14 @@ def _finest_automatic_resolution_m(lat, lon):
         # their resolution must never inform the "better elevation is
         # available" comparison.
         if definition.get("role") == ROLE_BATHYMETRY:
+            continue
+        # Surface models (radar DSMs, building-masked only at airport
+        # footprints) are a FALLBACK quality class: whatever their grid
+        # size says, they never make a genuine terrain model "not
+        # better", so they must not veto the affordance (the global
+        # 30 m GLO-30 would otherwise suppress the ~30.9 m lidar-derived
+        # Sonny drop folder over all of Europe).
+        if definition.get(SURFACE_MODEL_BUILDING_MASKING):
             continue
         strategy_factory = ACCESS_STRATEGIES.get(
             definition.get("access_strategy")

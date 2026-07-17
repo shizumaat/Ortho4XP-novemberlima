@@ -221,7 +221,7 @@ cfg_tile_vars = {
     },
     "airport_elevation_inset_margin_m": {
         "type": float,
-        "default": 1000.0,
+        "default": 2000.0,
         "hint": "How far beyond each airport's smoothing mask, in metres, the elevation inset bounding box is expanded. The clearance band and custom object neighbourhoods extend well past the boundary polygon, so a generous margin is deliberate.",
     },
     "airport_elevation_inset_feather_m": {

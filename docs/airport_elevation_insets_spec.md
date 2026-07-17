@@ -176,7 +176,7 @@ Elevation_data/+30-090/N36W087_airport_insets/
 - Airports keyed by ICAO from the same airport collection the smoothing
   driver iterates (`smooth_raster_over_airports`,
   `src/O4_Airport_Utils.py:924`); bbox = that airport's mask union
-  expanded by `airport_elevation_inset_margin_m` (default **1000 m** —
+  expanded by `airport_elevation_inset_margin_m` (default **2000 m** —
   the clearance band and object neighbourhoods extend well beyond the
   boundary polygon; KBNA's pond is ~100 m outside it).
 
@@ -237,7 +237,7 @@ change the physical footprint.
 | `base_elevation_source` | "auto" | base-tier pick (§3.6): auto = best covering `role=base` ≤ 1″; legacy keywords still valid |
 | `airport_elevation_providers` | "auto" | "auto" = enabled `.elv` files by priority; or explicit comma list |
 | `airport_elevation_inset_resolution_m` | 3.0 | warp target resolution |
-| `airport_elevation_inset_margin_m` | 1000.0 | bbox margin beyond airport mask |
+| `airport_elevation_inset_margin_m` | 2000.0 | bbox margin beyond airport mask |
 | `airport_elevation_inset_feather_m` | 60.0 | inset→base blend band |
 | `apt_smoothing_auto` | True | per-airport radius rule (§3.4) |
 
@@ -304,7 +304,54 @@ behaviour), so existing configs and the GUI dropdown keep working.
 - The de Ferranti "don't overwrite a 1″ file with a 3″ neighbour"
   zip-extraction guard (`O4_DEM_Utils.py:698-708`) must be preserved.
 
-### 3.7 GDAL dependency policy
+### 3.7 Global surface-model fallback + building masking (2026-07-17)
+
+`COPERNICUSGLO30.elv` closes the "no inset provider covers this
+airport" gap worldwide: Copernicus DEM GLO-30 (30 m TanDEM-X radar),
+one Cloud-Optimized GeoTIFF per 1° cell on the registration-free AWS
+Open Data bucket, cell coordinates encoded in the object name.  The
+`degree_named_cog` strategy computes each cell URL outright (no
+discovery API), HEAD-probes existence (ocean-only cells are absent
+from the bucket; definitive 200/404 answers are memoised per process,
+transient failures are not) and reuses the shared windowed `/vsicurl/`
+warp core.  `priority=1` so every national source outranks it.
+
+GLO-30 is a SURFACE model — rooftops and canopy are baked into the
+heights, which is exactly what an airport grading solver must not see.
+Two consequences are load-bearing:
+
+- **Inset-only.** The strategy sets `supports_wide_area = False`, so
+  the tile-wide `elevation_level` overlay can never select it: outside
+  airports (cities, forests) the corrected footprint set does not
+  exist and uncorrected rooftop heights would be worse than the 90 m
+  base they replaced.
+- **Building masking, not height subtraction.** A post-fetch pass
+  (`mask_building_footprints_in_surface_model`, gated by the
+  definition flag `surface_model_building_masking`) queries Overpass
+  for every OpenStreetMap `building` way/relation in the inset box,
+  buffers each footprint by `footprint_mask_buffer_m` (default 35 m ≈
+  one 30 m pixel + radar-layover smear), rasterizes the union onto the
+  inset grid and re-interpolates every covered pixel from surrounding
+  ground with `gdal.FillNodata`.  Height subtraction was rejected:
+  partial pixels hold roof/ground mixtures, layover displaces returns
+  beyond the walls, and mapped heights rarely match what the radar
+  saw — whereas the ground under a terminal is nearly planar, so
+  interpolation from its surroundings is accurate and needs footprints
+  only (no height data).  Genuine nodata cells are excluded as
+  interpolation sources and restored verbatim afterwards.  On any
+  failure (Overpass down, zero footprints) the pass records a
+  `skipped` reason in the provenance sidecar and keeps the uncorrected
+  raster — an uncorrected inset still beats no inset.  The correction
+  runs inside `fetch_inset`, so the cached GeoTIFF is the corrected
+  one and every consumer (composite source, bake, acceptance probes)
+  sees corrected values; a margin enlargement refetches and re-queries
+  footprints for the grown box (no stale-footprint cache class).
+
+Live-verified 2026-07-17 at OTHH (871 footprints, 9.4 % of pixels
+masked, terminal concourse 30.9 m → 5.9 m with runways/aprons
+byte-unchanged) and HECA (343 footprints, corrections to −24 m).
+
+### 3.8 GDAL dependency policy
 
 GDAL python bindings (`osgeo`) are already an optional core dependency
 (`has_gdal`). This feature requires them AND network access; absence of
