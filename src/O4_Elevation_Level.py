@@ -926,6 +926,8 @@ def bake_tile_overlay_into_alt_dem(tile):
 
     Returns ``True`` when at least one strip blended overlay data.
     """
+    import O4_Airport_Elevation_Insets as INSETS
+
     plan = resolve_tile_overlay_plan(tile)
     if plan is None:
         return False
@@ -1189,14 +1191,18 @@ def bake_tile_overlay_into_alt_dem(tile):
 
     if ring_samples:
         offset = float(numpy.median(numpy.concatenate(ring_samples)))
-        if abs(offset) > 3.0:
+        # A few metres is the normal surface-vs-bare-earth gap along the
+        # tile-edge feather band; only datum-class magnitudes are
+        # actionable (see INSETS.INSET_DATUM_WARNING_THRESHOLD_M).
+        if abs(offset) > INSETS.INSET_DATUM_WARNING_THRESHOLD_M:
             UI.vprint(
                 1,
                 "   WARNING: tile elevation overlay",
                 os.path.basename(overlay_path),
                 "differs from the base DEM by a median",
                 round(offset, 2),
-                "m over the feather band (>3 m; check vertical datum).",
+                "m over the feather band (>%d m; check vertical datum)."
+                % int(INSETS.INSET_DATUM_WARNING_THRESHOLD_M),
             )
     if blended_any:
         base_dem.tile_overlay_provenance = {

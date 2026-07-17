@@ -632,6 +632,88 @@ def test_alt_bake_applies_inset_with_feather(tmp_path, monkeypatch):
     assert written.max() <= 100.001
 
 
+def _bake_tile_with_insets(tmp_path, monkeypatch, insets):
+    """Bake constant-value insets over a flat 0 m base; return the tile.
+
+    ``insets`` is a list of ``(icao, provider_code, west, south, east,
+    north, value_m)`` tuples written into the tile's inset cache
+    directory before the bake.
+    """
+    import O4_DEM_Utils as DEM
+
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    INSETS.initialize_elevation_providers_dict()
+
+    base_path = str(tmp_path / "base.tif")
+    _write_constant_geotiff(
+        base_path, 0.0, 0.0, 1.0, 1.0, 0.0, columns=301, rows=301
+    )
+    tile = _FakeTile(0, 0)
+    tile.dem = DEM.DEM(0, 0, base_path, fill_nodata=False)
+    tile.airport_elevation_inset_feather_m = 2000.0
+
+    inset_directory = FNAMES.airport_inset_directory(0, 0)
+    os.makedirs(inset_directory, exist_ok=True)
+    for (icao, provider_code, west, south, east, north, value) in insets:
+        _write_constant_geotiff(
+            FNAMES.airport_inset_dem(0, 0, icao, provider_code),
+            west, south, east, north, value, columns=60, rows=60,
+        )
+    INSETS.bake_airport_insets_into_alt_dem(tile)
+    return tile
+
+
+@requires_gdal
+def test_canopy_scale_offset_bakes_without_warning(
+    tmp_path, monkeypatch, capsys
+):
+    # A ~5 m offset is the normal surface-vs-bare-earth gap (the coarse
+    # base reads canopy): it must bake silently.  Two insets from one
+    # provider stay below the systematic minimum of three.
+    _bake_tile_with_insets(
+        tmp_path,
+        monkeypatch,
+        [
+            ("AAAA", "USGS3DEP", 0.10, 0.10, 0.25, 0.25, -5.0),
+            ("BBBB", "USGS3DEP", 0.60, 0.60, 0.75, 0.75, -5.0),
+        ],
+    )
+    assert "WARNING" not in capsys.readouterr().out
+
+
+@requires_gdal
+def test_datum_scale_offset_warns_per_inset(tmp_path, monkeypatch, capsys):
+    _bake_tile_with_insets(
+        tmp_path,
+        monkeypatch,
+        [("AAAA", "USGS3DEP", 0.10, 0.10, 0.25, 0.25, 25.0)],
+    )
+    output = capsys.readouterr().out
+    assert "check vertical datum" in output
+
+
+@requires_gdal
+def test_systematic_provider_offset_warns_once(tmp_path, monkeypatch, capsys):
+    # Three insets from ONE provider, all ~5 m below the base: each is
+    # under the per-inset threshold, but the agreement in sign across
+    # airports is the datum-bug signature and warns once for the provider.
+    _bake_tile_with_insets(
+        tmp_path,
+        monkeypatch,
+        [
+            ("AAAA", "USGS3DEP", 0.10, 0.10, 0.22, 0.22, -5.0),
+            ("BBBB", "USGS3DEP", 0.40, 0.40, 0.52, 0.52, -5.0),
+            ("CCCC", "USGS3DEP", 0.70, 0.70, 0.82, 0.82, -5.0),
+        ],
+    )
+    output = capsys.readouterr().out
+    assert output.count("provider-wide vertical-datum problem") == 1
+    assert "usgs3dep" in output
+    # ...while the per-inset datum warning stays quiet at this magnitude.
+    assert "check vertical datum" not in output
+
+
 @requires_gdal
 def test_alt_bake_is_noop_without_cached_insets(tmp_path, monkeypatch):
     import O4_DEM_Utils as DEM

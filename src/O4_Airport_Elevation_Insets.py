@@ -5658,6 +5658,56 @@ def assemble_inset_composite_source(tile, base_source):
     return ";".join([base_source] + inset_paths)
 
 
+# Feather-ring offset sanity thresholds.  A few metres of median offset
+# between an inset and the base DEM is the NORMAL surface-vs-bare-earth
+# gap (the coarse base reads canopy, hedgerows and buildings; lidar reads
+# ground) and warrants no action, so a single inset only warns at the
+# magnitude a genuine datum/height-system mistake produces (the SWEDEN1M
+# compound-CRS shift measured +23..36 m).  The OTHER actionable signature
+# is systematic: many insets from ONE provider offset in the same
+# direction, which vegetation cannot explain -- that fires at a lower
+# per-inset magnitude but only across several airports agreeing in sign.
+INSET_DATUM_WARNING_THRESHOLD_M = 10.0
+SYSTEMATIC_OFFSET_MINIMUM_INSETS = 3
+SYSTEMATIC_OFFSET_THRESHOLD_M = 3.0
+SYSTEMATIC_OFFSET_SIGN_FRACTION = 0.8
+
+
+def _warn_if_provider_offsets_systematic(provider_ring_offsets):
+    """One warning per provider whose insets share a consistent DEM offset.
+
+    ``provider_ring_offsets`` maps a provider code (the cache-file suffix)
+    to the median feather-ring offsets of its baked insets.  A provider
+    with at least SYSTEMATIC_OFFSET_MINIMUM_INSETS measured insets whose
+    overall median exceeds SYSTEMATIC_OFFSET_THRESHOLD_M and whose
+    per-inset offsets agree in sign (SYSTEMATIC_OFFSET_SIGN_FRACTION)
+    looks datum-shifted, not vegetated, and is worth reporting.
+    """
+    for (provider_code, offsets) in sorted(provider_ring_offsets.items()):
+        if len(offsets) < SYSTEMATIC_OFFSET_MINIMUM_INSETS:
+            continue
+        median_offset = float(numpy.median(offsets))
+        if abs(median_offset) <= SYSTEMATIC_OFFSET_THRESHOLD_M:
+            continue
+        agreeing = sum(
+            1
+            for offset in offsets
+            if (offset > 0) == (median_offset > 0)
+        )
+        if agreeing / len(offsets) < SYSTEMATIC_OFFSET_SIGN_FRACTION:
+            continue
+        UI.vprint(
+            1,
+            "   WARNING:",
+            len(offsets),
+            "airport insets from",
+            provider_code,
+            "differ from the base DEM in the same direction (median",
+            str(round(median_offset, 2)) + " m)",
+            "- a provider-wide vertical-datum problem is likely.",
+        )
+
+
 def bake_airport_insets_into_alt_dem(tile):
     """Bake cached insets into ``tile.dem.alt_dem`` with a feather band.
 
@@ -5688,9 +5738,10 @@ def bake_airport_insets_into_alt_dem(tile):
     if not inset_paths:
         return
     feather_m = getattr(tile, "airport_elevation_inset_feather_m", 60.0)
+    provider_ring_offsets = {}
     for inset_path in inset_paths:
         try:
-            _bake_one_inset(tile, inset_path, feather_m)
+            ring_offset_m = _bake_one_inset(tile, inset_path, feather_m)
         except Exception as error:
             UI.vprint(
                 1,
@@ -5700,7 +5751,15 @@ def bake_airport_insets_into_alt_dem(tile):
                 str(error),
             )
             continue
+        if ring_offset_m is not None:
+            stem = os.path.basename(inset_path)
+            stem = stem[:-4] if stem.endswith(".tif") else stem
+            provider_code = stem.rsplit("_", 1)[-1]
+            provider_ring_offsets.setdefault(provider_code, []).append(
+                ring_offset_m
+            )
         baked_provenance.append(_inset_bake_provenance_entry(inset_path))
+    _warn_if_provider_offsets_systematic(provider_ring_offsets)
 
 
 def _inset_bake_provenance_entry(inset_path):
@@ -5736,6 +5795,10 @@ def _bake_one_inset(tile, inset_path, feather_m):
     The blend weight ramps linearly from 0 at the inset's data edge to 1 at
     ``feather_m`` inside it, so the seam is a ramp not a cliff.  Cells with
     inset nodata keep the base value.
+
+    Returns the median inset-vs-base offset (metres) measured over the
+    feather ring, or ``None`` when nothing was measured -- the caller
+    aggregates these per provider for the systematic-offset warning.
     """
     base_dem = tile.dem
     inset = DEM.DEM(
@@ -5804,18 +5867,22 @@ def _bake_one_inset(tile, inset_path, feather_m):
     # Datum sanity: median base-vs-inset offset across the feather ring
     # (base nodata cells carry the sentinel, not terrain -- exclude them).
     ring = (weight > 0) & (weight < 1) & valid & ~base_nodata
+    ring_offset_m = None
     if numpy.any(ring):
-        offset = float(
+        ring_offset_m = float(
             numpy.median(inset_values[ring] - window[ring])
         )
-        if abs(offset) > 3.0:
+        # A few metres is the normal surface-vs-bare-earth gap (canopy in
+        # the coarse base); only datum-class magnitudes warrant a warning.
+        if abs(ring_offset_m) > INSET_DATUM_WARNING_THRESHOLD_M:
             UI.vprint(
                 1,
                 "   WARNING: elevation inset",
                 os.path.basename(inset_path),
                 "differs from the base DEM by a median",
-                round(offset, 2),
-                "m over the feather ring (>3 m; check vertical datum).",
+                round(ring_offset_m, 2),
+                "m over the feather ring (>%d m; check vertical datum)."
+                % int(INSET_DATUM_WARNING_THRESHOLD_M),
             )
     blended = weight * inset_values + (1.0 - weight) * window
     # Where the base holds its nodata sentinel (possible on the step-2
@@ -5832,6 +5899,7 @@ def _bake_one_inset(tile, inset_path, feather_m):
     base_dem.alt_dem[
         row_min : row_max + 1, column_min : column_max + 1
     ] = blended.astype(base_dem.alt_dem.dtype)
+    return ring_offset_m
 
 
 # =====================================================================
