@@ -410,7 +410,7 @@ cfg_tile_vars = {
     "bathymetry_band_km": {
         "type": float,
         "default": 5.0,
-        "hint": "How far from the coastline (and from large inland water), in kilometres, measured seabed depth is fetched for the depth-graded masks and the X-Plane 12 sea_level raster. The data is fetched as 0.1 degree cells, like the coastline elevation band.",
+        "hint": "How far from the coastline (and from large inland water), in kilometres, measured seabed depth is fetched for the depth-graded masks and the X-Plane 12 sea level raster. The data is fetched as 0.1 degree cells, like the coastline elevation band.",
     },
     "bathymetry_airport_radius_km": {
         "type": float,
@@ -530,7 +530,7 @@ cfg_tile_vars = {
             "True": "On - always splice measured depths in",
             "False": "Off - copy the Global Scenery rasters only",
         },
-        "hint": "Where the X-Plane 12 DSF gets its sea_level (bathymetry) raster, which drives the simulator's depth-aware water light filtering. Auto copies the raster from the installed Global Scenery as before, and synthesizes it from measured coastal depths when that Global Scenery tile is not installed. On additionally replaces the sea part of the copied raster with measured depths where a bathymetry provider covers the tile. Only meaningful with water_tech=XP12.",
+        "hint": "Where the X-Plane 12 DSF gets its sea level (bathymetry) raster, which drives the simulator's depth-aware water light filtering. Auto copies the raster from the installed Global Scenery as before, and synthesizes it from measured coastal depths when that Global Scenery tile is not installed. On additionally replaces the sea part of the copied raster with measured depths where a bathymetry provider covers the tile. Only meaningful with water_tech=XP12.",
     },
     # "add_low_res_sea_ovl": {
     #    "type": bool,

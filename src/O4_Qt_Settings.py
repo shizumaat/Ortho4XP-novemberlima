@@ -581,12 +581,14 @@ class _ProviderSignInSection(QWidget):
             % (definition.get("attribution") or session_name, codes)
         )
         title.setTextFormat(Qt.RichText)
+        # Long attributions wrap rather than forcing the row (and with
+        # it the whole settings window) wider than the viewport.
+        title.setWordWrap(True)
         if definition.get("registration_url"):
             title.setToolTip(
                 "Create an account: %s" % definition["registration_url"]
             )
-        row.addWidget(title)
-        row.addStretch(1)
+        row.addWidget(title, 1)
         status = QLabel("")
         row.addWidget(status)
         sign_in_button = QPushButton("Sign in…")
@@ -707,8 +709,57 @@ class SettingsWindow(QDialog):
                 if origin == "tile"
             }
 
+        self._width_clamped = False
         self._build_ui()
         self._load_values()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._clamp_width_to_content()
+
+    def _clamp_width_to_content(self):
+        """Keep every description wrapped inside the window width.
+
+        The scroll area re-wraps description labels only down to the
+        content widget's minimum width; narrower than that it scrolls
+        horizontally — which macOS draws as an invisible overlay
+        scrollbar, so long descriptions simply look clipped at the
+        right edge.  The dialog's own minimum does not cover this
+        because QScrollArea never propagates its content's minimum.
+        Clamp the dialog minimum so the viewport always fits the
+        widest row of ANY category (hidden categories count: switching
+        category must not start clipping).  Needs the window shown
+        once, to measure the chrome between window and viewport.
+        """
+        if self._width_clamped:
+            return
+        self._width_clamped = True
+        widest_row = 0
+        for index in range(self.content_layout.count()):
+            widget = self.content_layout.itemAt(index).widget()
+            if widget is None:
+                continue
+            width = widget.minimumSizeHint().width()
+            scope_tag = getattr(widget, "scope_tag", None)
+            if (
+                scope_tag is not None
+                and scope_tag.isVisibleTo(widget)
+                and not scope_tag.isVisible()
+            ):
+                # A hidden row measures without its pending "app-wide"
+                # tag; count the tag so switching to that row's
+                # category never starts clipping.
+                width += scope_tag.sizeHint().width() + 8
+            widest_row = max(widest_row, width)
+        margins = self.content_layout.contentsMargins()
+        chrome = self.width() - self.scroll.viewport().width()
+        scrollbar_allowance = (
+            self.scroll.verticalScrollBar().sizeHint().width()
+        )
+        self.setMinimumWidth(
+            widest_row + margins.left() + margins.right()
+            + chrome + scrollbar_allowance
+        )
 
     @property
     def blended(self):

@@ -173,7 +173,7 @@ _LAYOUT: list = [
         ("reef_visibility_depth", "Reef visibility depth (m)", "tile", False),
         ("osm_shallow_water_fallback", "Mapped shallow-water fallback", "tile", False),
         ("bathymetry_band_km", "Band width along shoreline (km)", "tile", True),
-        ("dsf_bathymetry", "DSF sea_level raster source", "tile", True),
+        ("dsf_bathymetry", "DSF sea level raster source", "tile", True),
     ]),
     ("rendering", "Rendering & Overlays", [
         ("overlay_lod", "Overlay draw distance (m)", "tile", False),
