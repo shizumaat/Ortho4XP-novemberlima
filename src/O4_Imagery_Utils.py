@@ -4,6 +4,7 @@ import queue
 import random
 import subprocess
 import sys
+import threading
 import time
 from math import ceil, log, pi, tan
 from pathlib import Path
@@ -12,11 +13,13 @@ import numpy
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 import requests
 
+import O4_Color_Harmonization as HARMONIZE
 import O4_File_Names as FNAMES
 import O4_Geo_Utils as GEO
 import O4_Mask_Utils as MASK
 import O4_Mesh_Utils as MESH
 import O4_OSM_Utils as OSM
+import O4_Sea_Nodata_Fill as SEA_FILL
 import O4_UI_Utils as UI
 import O4_Vector_Utils as VECT
 from O4_Parallel_Utils import parallel_execute
@@ -91,6 +94,18 @@ combined_providers_dict = {}
 local_combined_providers_dict = {}
 extents_dict = {"global": {"dir": None, "code": "global"}}
 color_filters_dict = {"none": []}
+
+################################################################################
+def extent_mask_image_path(extent_code):
+    """Path of an extent's layer-mask image. Auto-generated masks live in
+    the writable data root; shipped extents stay with the app resources."""
+    dir_name = extents_dict[extent_code]["dir"]
+    if dir_name == "Auto":
+        base = FNAMES.Auto_extent_dir
+    else:
+        base = os.path.join(FNAMES.Extent_dir, dir_name)
+    return os.path.join(base, extents_dict[extent_code]["code"] + ".png")
+
 
 ################################################################################
 def initialize_extents_dict():
@@ -674,15 +689,14 @@ def initialize_local_combined_providers_dict(tile):
                 }
                 if os.path.exists(
                     os.path.join(
-                        FNAMES.Extent_dir, "Auto", new_extent_code + ".png"
+                        FNAMES.Auto_extent_dir, new_extent_code + ".png"
                     )
                 ):
                     UI.vprint(1, "    Recycling layer mask for ", name)
                     continue
                 UI.vprint(1, "    Building layer mask for ", name)
                 # need to build the extent mask over that tile
-                if not os.path.isdir(os.path.join(FNAMES.Extent_dir, "Auto")):
-                    os.makedirs(os.path.join(FNAMES.Extent_dir, "Auto"))
+                os.makedirs(FNAMES.Auto_extent_dir, exist_ok=True)
                 cached_file_name = os.path.join(
                     FNAMES.Extent_dir, "LowRes", name + ".osm.bz2"
                 )
@@ -786,7 +800,7 @@ def initialize_local_combined_providers_dict(tile):
                     mask_im = Image.fromarray(img_array)
                 mask_im.save(
                     os.path.join(
-                        FNAMES.Extent_dir, "Auto", new_extent_code + ".png"
+                        FNAMES.Auto_extent_dir, new_extent_code + ".png"
                     )
                 )
                 for f in [
@@ -890,11 +904,7 @@ def has_data(
             return negative
         if (not is_mask_layer) or (x1 - x0) == 1:
             mask_im = Image.open(
-                os.path.join(
-                    FNAMES.Extent_dir,
-                    extents_dict[extent_code]["dir"],
-                    extents_dict[extent_code]["code"] + ".png",
-                )
+                extent_mask_image_path(extent_code)
             ).convert("L")
             (sizex, sizey) = mask_im.size
             pxx0 = int((x0 - xmin) / (xmax - xmin) * sizex)
@@ -940,11 +950,7 @@ def has_data(
             # build extent mask_im
             if extent_code != "global":
                 mask_im = Image.open(
-                    os.path.join(
-                        FNAMES.Extent_dir,
-                        extents_dict[extent_code]["dir"],
-                        extents_dict[extent_code]["code"] + ".png",
-                    )
+                    extent_mask_image_path(extent_code)
                 ).convert("L")
                 (sizex, sizey) = mask_im.size
                 pxx0 = int((x0 - xmin) / (xmax - xmin) * sizex)
@@ -2330,6 +2336,133 @@ def combine_textures(tile, til_x_left, til_y_top, zoomlevel, provider_code):
 ################################################################################
 
 ################################################################################
+def initialize_color_harmonization(tile):
+    """Prepare the per-tile state for color harmonization (spec:
+    docs/specs/color-harmonization-spec.md).  Called once per tile build
+    before the download workers start."""
+    tile.color_harmonization_statistics = {}
+    tile.color_harmonization_targets = None
+    tile.color_harmonization_lock = threading.Lock()
+
+
+def collect_color_statistics_for_harmonization(
+    tile, til_x_left, til_y_top, zoomlevel, provider_code
+):
+    """Record the color statistics of one downloaded texture.
+
+    Runs on the download workers, right after the source JPEG landed on
+    disk.  The JPEG is decoded at 1/8 scale via ``Image.draft`` so this
+    costs milliseconds, not a full 4096 decode.  Textures without a cached
+    source JPEG of their own (combined-provider compositions) are skipped
+    and will simply receive no shift.
+    """
+    if provider_code not in providers_dict:
+        return
+    jpeg_path = os.path.join(
+        FNAMES.jpeg_file_dir_from_attributes(
+            tile.lat, tile.lon, zoomlevel, providers_dict[provider_code]
+        ),
+        FNAMES.jpeg_file_name_from_attributes(
+            til_x_left, til_y_top, zoomlevel, provider_code
+        ),
+    )
+    try:
+        with Image.open(jpeg_path) as jpeg_image:
+            jpeg_image.draft("RGB", (512, 512))
+            statistics = HARMONIZE.compute_texture_color_statistics(
+                jpeg_image
+            )
+    except Exception as exception:
+        UI.vprint(2, "      Color statistics skipped:", str(exception))
+        return
+    if statistics is None:
+        return
+    with tile.color_harmonization_lock:
+        tile.color_harmonization_statistics[
+            (til_x_left, til_y_top, zoomlevel, provider_code)
+        ] = numpy.array(statistics["channel_medians"], dtype=numpy.float64)
+
+
+def compute_color_harmonization_targets(tile):
+    """Turn the collected per-texture statistics into per-texture targets.
+
+    Called once, after the last download finished and before the convert
+    workers are launched (the barrier described in the spec).  Textures are
+    grouped by (zoomlevel, provider) so each group forms one regular grid
+    for the neighborhood-median target field.
+    """
+    statistics = getattr(tile, "color_harmonization_statistics", None)
+    if not statistics:
+        tile.color_harmonization_targets = {}
+        return
+    groups = {}
+    for (til_x, til_y, zoomlevel, provider_code), medians in (
+        statistics.items()
+    ):
+        groups.setdefault((zoomlevel, provider_code), {})[
+            (til_x, til_y)
+        ] = medians
+    targets = {}
+    for (zoomlevel, provider_code), group in groups.items():
+        target_field = HARMONIZE.compute_target_field(group)
+        for (til_x, til_y), target in target_field.items():
+            targets[(til_x, til_y, zoomlevel, provider_code)] = target
+    tile.color_harmonization_targets = targets
+    UI.vprint(
+        1,
+        "-> Color harmonization targets computed for",
+        len(targets),
+        "texture(s).",
+    )
+
+
+def color_harmonization_shift_for_texture(
+    tile, til_x_left, til_y_top, zoomlevel, provider_code
+):
+    """Return the per-channel shift for one texture, or None when the
+    texture has no target (feature off, no statistics, excluded texture)
+    or the shift rounds to zero."""
+    targets = getattr(tile, "color_harmonization_targets", None)
+    if not targets:
+        return None
+    key = (til_x_left, til_y_top, zoomlevel, provider_code)
+    if key not in targets:
+        return None
+    shift = HARMONIZE.compute_harmonization_shift(
+        tile.color_harmonization_statistics[key], targets[key], zoomlevel
+    )
+    if not numpy.round(shift).any():
+        return None
+    return shift
+
+
+def repair_sea_nodata_in_texture(
+    big_image, mask_im, til_x_left, til_y_top, zoomlevel
+):
+    """Fill imagery provider no-data defects in an assembled texture.
+
+    Large saturated white or black regions over coastal water (typical
+    where an aerial imagery campaign stops at the shoreline) are
+    synthesized from nearby genuine sea pixels.  The coastline mask
+    scopes the repair to the water side, so land is never touched.
+    Returns the repaired image, or the input image unchanged when
+    nothing qualifies as no-data.
+    """
+    water_mask = numpy.array(
+        mask_im.resize(big_image.size, Image.Resampling.BICUBIC),
+        dtype=numpy.uint8,
+    )
+    # Seed from the texture identity so rebuilds are byte-reproducible.
+    random_seed = (til_x_left << 24) ^ (til_y_top << 4) ^ zoomlevel
+    filled_image = SEA_FILL.fill_sea_nodata(
+        big_image, water_mask=water_mask, random_seed=random_seed
+    )
+    if filled_image is None:
+        return big_image
+    UI.vprint(1, "      Filled imagery no-data over water.")
+    return filled_image
+
+
 def convert_texture(
     tile, til_x_left, til_y_top, zoomlevel, provider_code, type="dds"
 ):
@@ -2349,7 +2482,7 @@ def convert_texture(
                 pass
         png_file_name = out_file_name.replace("tif", "png")
         tmp_tif_file_name = os.path.join(
-            FNAMES.resource_path("tmp"), out_file_name.replace("4326", "3857"))
+            FNAMES.Tmp_dir, out_file_name.replace("4326", "3857"))
     UI.vprint(
         1, "   Converting orthophoto(s) to build texture " + out_file_name + "."
     )
@@ -2406,6 +2539,9 @@ def convert_texture(
         file_dir = FNAMES.jpeg_file_dir_from_attributes(
             tile.lat, tile.lon, zoomlevel, providers_dict[provider_code]
         )
+    harmonization_shift = color_harmonization_shift_for_texture(
+        tile, til_x_left, til_y_top, zoomlevel, provider_code
+    )
     if (provider_code in local_combined_providers_dict) and (
         (provider_code not in providers_dict)
         or not os.path.exists(os.path.join(file_dir, jpeg_file_name))
@@ -2413,7 +2549,15 @@ def convert_texture(
         big_image = combine_textures(
             tile, til_x_left, til_y_top, zoomlevel, provider_code
         )
+        if harmonization_shift is not None:
+            big_image = HARMONIZE.apply_color_shift(
+                big_image, harmonization_shift
+            )
         if masked_texture:
+            if tile.sea_nodata_fill:
+                big_image = repair_sea_nodata_in_texture(
+                    big_image, mask_im, til_x_left, til_y_top, zoomlevel
+                )
             UI.vprint(2, "      Applying alpha mask directly to orthophoto.")
             big_image.putalpha(mask_im.resize((4096, 4096), Image.Resampling.BICUBIC))
             if type == "dds":
@@ -2430,7 +2574,7 @@ def convert_texture(
                 except:
                     pass
             dxt5 = True
-        file_to_convert = os.path.join(FNAMES.resource_path("tmp"), png_file_name)
+        file_to_convert = os.path.join(FNAMES.Tmp_dir, png_file_name)
         erase_tmp_png = True
         big_image.save(file_to_convert)
         # If one wanted to distribute jpegs instead of dds, uncomment the
@@ -2440,8 +2584,10 @@ def convert_texture(
     # now if provider_code was not in local_combined_providers_dict but
     # color correction is required.
     elif (
-        providers_dict[provider_code]["color_filters"] != "none"
-    ) or masked_texture:
+        (providers_dict[provider_code]["color_filters"] != "none")
+        or masked_texture
+        or harmonization_shift is not None
+    ):
         big_image = Image.open(
             os.path.join(file_dir, jpeg_file_name), "r"
         ).convert("RGB")
@@ -2449,7 +2595,15 @@ def convert_texture(
             big_image = color_transform(
                 big_image, providers_dict[provider_code]["color_filters"]
             )
+        if harmonization_shift is not None:
+            big_image = HARMONIZE.apply_color_shift(
+                big_image, harmonization_shift
+            )
         if masked_texture:
+            if tile.sea_nodata_fill:
+                big_image = repair_sea_nodata_in_texture(
+                    big_image, mask_im, til_x_left, til_y_top, zoomlevel
+                )
             UI.vprint(2, "      Applying alpha mask directly to orthophoto.")
             big_image.putalpha(mask_im.resize((4096, 4096), Image.Resampling.BICUBIC))
             if type == "dds":
@@ -2466,7 +2620,7 @@ def convert_texture(
                 except:
                     pass
             dxt5 = True
-        file_to_convert = os.path.join(FNAMES.resource_path("tmp"), png_file_name)
+        file_to_convert = os.path.join(FNAMES.Tmp_dir, png_file_name)
         erase_tmp_png = True
         big_image.save(file_to_convert)
     # finally if nothing needs to be done prior to the conversion
@@ -2550,7 +2704,7 @@ def convert_texture(
             erase_tmp_tif = True
             if subprocess.call(
                 geotag_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-                env=UI.subprocess_env()
+                **UI.external_tool_keyword_arguments()
             ):
                 UI.vprint(
                     1,
@@ -2559,7 +2713,7 @@ def convert_texture(
                 )
                 try:
                     os.remove(
-                        os.path.join(FNAMES.resource_path("tmp"), png_file_name)
+                        os.path.join(FNAMES.Tmp_dir, png_file_name)
                     )
                 except:
                     pass
@@ -2585,7 +2739,7 @@ def convert_texture(
     while True:
         if not subprocess.call(
             conv_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-            env=UI.subprocess_env()
+            **UI.external_tool_keyword_arguments()
         ):
             break
         tentative += 1
@@ -2605,7 +2759,7 @@ def convert_texture(
         time.sleep(1)
     if erase_tmp_png:
         try:
-            os.remove(os.path.join(FNAMES.resource_path("tmp"), png_file_name))
+            os.remove(os.path.join(FNAMES.Tmp_dir, png_file_name))
         except:
             pass
     if erase_tmp_tif:
@@ -2648,7 +2802,7 @@ def geotag(input_file_name):
     ]
     tentative = 0
     while True:
-        if not subprocess.call(conv_cmd, env=UI.subprocess_env()):
+        if not subprocess.call(conv_cmd, **UI.external_tool_keyword_arguments()):
             break
         tentative += 1
         if tentative == 10:
