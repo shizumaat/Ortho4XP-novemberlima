@@ -1334,9 +1334,30 @@ def test_wcs_discover_honours_coverage_bbox():
     assert strategy.discover(definition, doha) is None
 
 
+def _stub_wcs_open(monkeypatch, open_calls=None):
+    """Replace ``gdal.OpenEx`` with a network-free stub for WCS tests.
+
+    Returns the sentinel object the stub hands back, so tests can assert
+    the opened dataset (not the connection string) reaches the warp.
+    """
+    opened_dataset = object()
+
+    def _fake_open(dataset_name, flags=0, open_options=None, **_keywords):
+        if open_calls is not None:
+            open_calls.append(
+                {"dataset_name": dataset_name, "open_options": open_options}
+            )
+        return opened_dataset
+
+    monkeypatch.setattr(INSETS.gdal, "OpenEx", _fake_open)
+    return opened_dataset
+
+
 @requires_gdal
 def test_wcs_fetch_writes_inset_and_provenance(tmp_path, monkeypatch):
     monkeypatch.setattr(INSETS, "has_gdal", True)
+    open_calls = []
+    opened_dataset = _stub_wcs_open(monkeypatch, open_calls)
     warp_calls = {}
 
     def _fake_warp(inputs, bounding_box, resolution, destination, **keyword_arguments):
@@ -1357,10 +1378,16 @@ def test_wcs_fetch_writes_inset_and_provenance(tmp_path, monkeypatch):
     )
     assert provenance is not None
     assert os.path.isfile(destination)
-    assert warp_calls["inputs"] == [
+    # The strategy opens the coverage itself (to pass the request-timeout
+    # open option) and hands the OPENED dataset to the warp.
+    assert open_calls[0]["dataset_name"] == (
         "WCS:https://example.test/wcs"
         "?version=2.0.1&coverage=national__DTM_1m"
+    )
+    assert open_calls[0]["open_options"] == [
+        "TIMEOUT=%d" % INSETS.WCS_REQUEST_TIMEOUT_SECONDS
     ]
+    assert warp_calls["inputs"] == [opened_dataset]
     assert provenance["provider"] == "TESTWCS"
     assert provenance["access_strategy"] == "wcs"
     assert provenance["wcs_coverage"] == "national__DTM_1m"
@@ -1373,6 +1400,7 @@ def test_wcs_all_nodata_window_is_no_coverage(tmp_path, monkeypatch):
     # extent warps to all nodata: the strategy must delete the file and
     # report no coverage (so the orchestration caches the negative).
     monkeypatch.setattr(INSETS, "has_gdal", True)
+    _stub_wcs_open(monkeypatch)
 
     def _fake_warp(inputs, bounding_box, resolution, destination, **keyword_arguments):
         (west, south, east, north) = bounding_box
@@ -1395,6 +1423,7 @@ def test_wcs_all_nodata_window_is_no_coverage(tmp_path, monkeypatch):
 @requires_gdal
 def test_wcs_failed_warp_is_no_coverage(tmp_path, monkeypatch):
     monkeypatch.setattr(INSETS, "has_gdal", True)
+    _stub_wcs_open(monkeypatch)
     monkeypatch.setattr(
         INSETS,
         "warp_vsicurl_sources_to_geotiff",
@@ -1407,6 +1436,123 @@ def test_wcs_failed_warp_is_no_coverage(tmp_path, monkeypatch):
         )
         is None
     )
+
+
+@requires_gdal
+def test_wcs_open_timeout_raises_transient_fetch_error(tmp_path, monkeypatch):
+    # The exact libcurl total-transfer timeout message from the EGLL /
+    # ENGLAND1M failure: a transient network answer, never a durable
+    # no-coverage one.
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+
+    def _timeout_open(*arguments, **keyword_arguments):
+        raise RuntimeError(
+            "HTTP error: Operation timed out after 30000 milliseconds"
+            " with 20607784 bytes received"
+        )
+
+    monkeypatch.setattr(INSETS.gdal, "OpenEx", _timeout_open)
+    with pytest.raises(INSETS.TransientFetchError):
+        INSETS.fetch_inset(
+            _wcs_definition(),
+            (-0.49, 51.44, -0.41, 51.49),
+            1.0,
+            str(tmp_path / "EGLL_testwcs.tif"),
+        )
+
+
+@requires_gdal
+def test_wcs_durable_open_failure_is_no_coverage(tmp_path, monkeypatch):
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+
+    def _broken_open(*arguments, **keyword_arguments):
+        raise RuntimeError("Unable to parse coverage description")
+
+    monkeypatch.setattr(INSETS.gdal, "OpenEx", _broken_open)
+    assert (
+        INSETS.fetch_inset(
+            _wcs_definition(),
+            (-0.49, 51.44, -0.41, 51.49),
+            1.0,
+            str(tmp_path / "EGLL_testwcs.tif"),
+        )
+        is None
+    )
+
+
+@requires_gdal
+def test_warp_curl_timeout_raises_transient_fetch_error(tmp_path, monkeypatch):
+    def _timeout_warp(*arguments, **keyword_arguments):
+        raise RuntimeError(
+            "Operation timed out after 30000 milliseconds with"
+            " 20607784 bytes received"
+        )
+
+    monkeypatch.setattr(INSETS.gdal, "Warp", _timeout_warp)
+    with pytest.raises(INSETS.TransientFetchError):
+        INSETS.warp_vsicurl_sources_to_geotiff(
+            ["/vsicurl/https://example.test/tile.tif"],
+            (-0.49, 51.44, -0.41, 51.49),
+            1.0,
+            str(tmp_path / "out.tif"),
+        )
+
+
+@requires_gdal
+def test_warp_durable_failure_still_returns_false(tmp_path, monkeypatch):
+    def _broken_warp(*arguments, **keyword_arguments):
+        raise RuntimeError("Unsupported band data type")
+
+    monkeypatch.setattr(INSETS.gdal, "Warp", _broken_warp)
+    assert (
+        INSETS.warp_vsicurl_sources_to_geotiff(
+            ["/vsicurl/https://example.test/tile.tif"],
+            (-0.49, 51.44, -0.41, 51.49),
+            1.0,
+            str(tmp_path / "out.tif"),
+        )
+        is False
+    )
+
+
+def test_transient_fetch_failure_is_not_cached_as_negative(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    fetch_calls = {"count": 0}
+
+    @INSETS.register_access_strategy("transient_failure_strategy")
+    class _TransientFailureStrategy:
+        def discover(self, definition, bounding_box_wgs84):
+            return [{}]
+
+        def fetch(self, definition, bbox, resolution_m, destination_path):
+            fetch_calls["count"] += 1
+            raise INSETS.TransientFetchError(
+                "Operation timed out after 30000 milliseconds"
+            )
+
+    try:
+        definition = {
+            "code": "FLAKY",
+            "access_strategy": "transient_failure_strategy",
+            "role": INSETS.ROLE_AIRPORT_INSET,
+            "enabled": True,
+            "priority": 1.0,
+        }
+        boxes = {"EGLL": (-0.49, 51.44, -0.41, 51.49)}
+
+        first = INSETS.ensure_airport_insets(51, -1, boxes, [definition], 3.0)
+        # No durable record: neither "ok" nor a no-coverage negative.
+        assert first["EGLL"].get("FLAKY") is None
+        assert fetch_calls["count"] == 1
+
+        # A later run retries the fetch (a no-coverage negative would
+        # have blocked it, as test_negative_result_is_cached... proves).
+        INSETS.ensure_airport_insets(51, -1, boxes, [definition], 3.0)
+        assert fetch_calls["count"] == 2
+    finally:
+        INSETS.ACCESS_STRATEGIES.pop("transient_failure_strategy", None)
 
 
 # =====================================================================

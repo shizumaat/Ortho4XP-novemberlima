@@ -518,12 +518,21 @@ def test_wcs_fetch_login_error_warns_exactly_once(
 def test_wcs_fetch_happy_path_provenance_hides_api_key(
     monkeypatch, gdal_stub, tmp_path
 ):
-    """The key rides the warp input but never lands in the provenance."""
+    """The key rides the coverage open but never lands in the provenance."""
     monkeypatch.setattr(
         SESSIONS, "ensure_api_key", lambda definition: "SECRETKEY"
     )
 
-    captured_inputs: List[List[str]] = []
+    opened_names: List[str] = []
+    opened_dataset = object()
+
+    def _open(dataset_name, flags=0, open_options=None, **kwargs):
+        opened_names.append(dataset_name)
+        return opened_dataset
+
+    monkeypatch.setattr(INSETS.gdal, "OpenEx", _open)
+
+    captured_inputs: List[list] = []
 
     def _warp(vsicurl_inputs, *args, **kwargs):
         captured_inputs.append(list(vsicurl_inputs))
@@ -539,8 +548,10 @@ def test_wcs_fetch_happy_path_provenance_hides_api_key(
     )
 
     assert provenance is not None
-    # The warp dataset name carries the substituted key.
-    assert any("SECRETKEY" in name for name in captured_inputs[0])
+    # The opened dataset name carries the substituted key, and the warp
+    # receives that OPENED dataset (opened with the request timeout).
+    assert any("SECRETKEY" in name for name in opened_names)
+    assert captured_inputs[0] == [opened_dataset]
 
     # The provenance keeps the literal placeholder, never the secret.
     serialized = json.dumps(provenance)

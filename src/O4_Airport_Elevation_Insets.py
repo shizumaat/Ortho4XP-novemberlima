@@ -101,6 +101,52 @@ import O4_DEM_Utils as DEM
 # survives access-strategy refactors (spec section 3.2).
 NO_COVERAGE = "no-coverage"
 
+
+class TransientFetchError(Exception):
+    """A network-shaped fetch failure that may succeed on a later run.
+
+    Raised (instead of a no-coverage answer) when a remote read dies in a
+    way that says nothing about whether the provider has data: curl
+    timeouts, connection failures, 5xx server responses.  The module-wide
+    convention every :func:`fetch_inset` caller honours: a RAISED failure
+    is never recorded as a durable no-coverage negative, while a returned
+    ``None`` is.
+    """
+
+
+# Substrings (lower-cased) of libcurl / GDAL HTTP error messages that mean
+# "the network or the server had a bad moment", not "there is no data
+# here".  Matched against the stringified GDAL exception; anything else is
+# treated as a durable answer as before.
+_TRANSIENT_NETWORK_ERROR_FRAGMENTS = (
+    # libcurl CURLE_OPERATION_TIMEDOUT ("Operation timed out after 30000
+    # milliseconds with 20607784 bytes received") and connect timeouts.
+    "timed out",
+    "timeout was reached",
+    # Connection-level failures.
+    "connection reset",
+    "connection was reset",
+    "failed to connect",
+    "could not resolve host",
+    "recv failure",
+    "transfer closed",
+    "empty reply from server",
+    # Server-side conditions worth retrying; GDAL formats these as
+    # "HTTP error code : 503".
+    "http error code : 5",
+    "http error code: 5",
+    "service unavailable",
+)
+
+
+def error_message_indicates_transient_network_failure(message):
+    """Does an error message describe a retryable network/server failure?"""
+    lowered = str(message).lower()
+    return any(
+        fragment in lowered
+        for fragment in _TRANSIENT_NETWORK_ERROR_FRAGMENTS
+    )
+
 # Detail tier (spec section 3.6).  A definition without an explicit ``role``
 # is an airport inset; ``role=base`` definitions describe tile-wide sources
 # (the Phase A2 legacy refactor) and are ignored by the inset path here.
@@ -494,8 +540,11 @@ def warp_vsicurl_sources_to_geotiff(
     source (the full source tiles, hundreds of megabytes each, are never
     downloaded), mosaics them (later inputs win on overlap), reprojects to
     EPSG:4326 and resamples to ``target_resolution_m`` at the bounding
-    box's centre latitude.  Returns ``True`` on success, ``False`` on any
-    GDAL failure (the caller records no-coverage).  A no-op returning
+    box's centre latitude.  Returns ``True`` on success, ``False`` on a
+    durable GDAL failure (the caller records no-coverage), and raises
+    :class:`TransientFetchError` when the failure is network-shaped (a
+    curl timeout, a connection failure, a 5xx) so callers can skip the
+    provider WITHOUT caching a no-coverage negative.  A no-op returning
     ``False`` when GDAL is unavailable.
 
     ``value_floor_m`` is the lowest value the post-warp sanitizer treats as
@@ -552,6 +601,11 @@ def warp_vsicurl_sources_to_geotiff(
                 destination_path, list(vsicurl_inputs), options=warp_options
             )
     except Exception as error:
+        if error_message_indicates_transient_network_failure(error):
+            raise TransientFetchError(
+                "elevation warp died on a network timeout or outage: "
+                + str(error)
+            ) from error
         UI.vprint(1, "   WARNING: elevation warp failed:", str(error))
         return False
     if dataset is None:
@@ -1313,6 +1367,16 @@ def geotiff_is_constant_value(geotiff_path):
     return bool((values == values[0]).all())
 
 
+# GDAL's WCS driver defaults its curl TOTAL-transfer timeout to 30
+# seconds (frmts/wcs/wcsdataset.cpp falls back to Timeout "30"), which a
+# windowed GetCoverage for a large airport at meter-class resolution
+# cannot honour: Heathrow's 1 m window from the Environment Agency
+# service died mid-stream at 20 MB.  The driver-level open option is the
+# ONLY override -- the driver always passes its own TIMEOUT to curl, so
+# the GDAL_HTTP_TIMEOUT configuration option never applies to WCS reads.
+WCS_REQUEST_TIMEOUT_SECONDS = 600
+
+
 @register_access_strategy("wcs")
 class WcsStrategy:
     """National lidar terrain models served over OGC Web Coverage Service.
@@ -1383,8 +1447,35 @@ class WcsStrategy:
                 _warn_sign_in_needed_once(definition, error)
                 return None
         dataset_name = self.dataset_name(definition, api_key)
+        # Open with an explicit request timeout: the driver's own 30 s
+        # default (see WCS_REQUEST_TIMEOUT_SECONDS above) kills large
+        # windowed GetCoverage responses mid-stream.  The option also
+        # covers the GetCapabilities/DescribeCoverage handshake and is
+        # folded into the driver's cached service description.
+        try:
+            wcs_dataset = gdal.OpenEx(
+                dataset_name,
+                gdal.OF_RASTER,
+                open_options=[
+                    "TIMEOUT=%d" % WCS_REQUEST_TIMEOUT_SECONDS
+                ],
+            )
+        except Exception as error:
+            if error_message_indicates_transient_network_failure(error):
+                raise TransientFetchError(
+                    "WCS coverage open died on a network timeout or "
+                    "outage: " + str(error)
+                ) from error
+            UI.vprint(
+                1,
+                "   WARNING: could not open WCS coverage:",
+                str(error),
+            )
+            return None
+        if wcs_dataset is None:
+            return None
         if not warp_vsicurl_sources_to_geotiff(
-            [dataset_name],
+            [wcs_dataset],
             bounding_box_wgs84,
             target_resolution_m,
             destination_path,
@@ -4797,7 +4888,10 @@ def ensure_airport_insets(
     tried in order; the first with coverage wins and its GeoTIFF +
     provenance sidecar are written.  ``index.json`` records positives and
     NEGATIVE (``no-coverage``) results so a rebuild never re-queries the
-    discovery API; ``refresh`` forces a re-query and re-fetch.
+    discovery API; ``refresh`` forces a re-query and re-fetch.  A fetch
+    that RAISES (:class:`TransientFetchError` or any strategy crash) is
+    treated as transient: nothing is recorded for that provider and the
+    next run retries it.
 
     The caches are margin-aware: a cached GeoTIFF whose provenance sidecar
     records a smaller bounding box than requested (the user enlarged
@@ -4873,12 +4967,31 @@ def ensure_airport_insets(
                 # still-valid smaller inset must survive a failed
                 # enlargement, so fetch beside it and replace on success.
                 fetch_destination = destination + ".refetch"
-            provenance = fetch_inset(
-                definition,
-                bounding_box,
-                target_resolution_m,
-                fetch_destination,
-            )
+            fetch_raised = False
+            try:
+                provenance = fetch_inset(
+                    definition,
+                    bounding_box,
+                    target_resolution_m,
+                    fetch_destination,
+                )
+            except Exception as error:
+                # A raised failure (a network timeout, a server outage, a
+                # strategy crash) says nothing about coverage: skip the
+                # provider for THIS run without caching a no-coverage
+                # negative, so the next run retries the fetch.
+                provenance = None
+                fetch_raised = True
+                UI.vprint(
+                    1,
+                    "   WARNING: elevation inset fetch for",
+                    icao,
+                    "from",
+                    code,
+                    "failed without a durable answer:",
+                    str(error),
+                    "- it will be retried on the next run.",
+                )
             if provenance is None:
                 if cached_inset_is_stale:
                     if os.path.isfile(fetch_destination):
@@ -4900,6 +5013,11 @@ def ensure_airport_insets(
                     # from a broken warp; left in place it would pass the
                     # cache check and bake garbage on the next run.
                     os.remove(destination)
+                if fetch_raised:
+                    # Transient: no durable record for this provider; a
+                    # lower-ranked provider may still cover the airport
+                    # this run, and this one retries next run.
+                    continue
                 airport_record[code] = NO_COVERAGE
                 airport_record["checked"] = checked_stamp
                 continue
