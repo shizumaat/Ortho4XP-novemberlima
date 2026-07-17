@@ -13,6 +13,18 @@ Usage: run_tile_build.py <latitude> <longitude> [first_step] [build_dir]
 directory — pass it when the tile lives outside ``Tiles/`` (e.g. a
 GUI-built tile in X-Plane's Custom Scenery); the per-tile config is
 read from there.
+
+``build_dir`` convention: Tile.__init__ flags any custom build dir
+WITHOUT a trailing separator as ``grouped=True``, which makes the 3x3
+neighbor-mesh lookups (mask seams, record_water_tris) search the SAME
+directory instead of the sibling ``zOrtho4XP_...`` directories — so a
+naively passed per-tile path silently loses all cross-tile neighbor
+data.  ``FNAMES.normalize_custom_build_dir`` handles this: the tile's
+own ``.../zOrtho4XP_+XX+YYY`` directory is accepted and rewritten to
+its parent with a trailing separator (the per-tile-subdirectory mode
+the Qt GUI uses); a parent directory with a trailing separator passes
+through; any other bare path is treated as an intentional grouped
+build.
 """
 import os
 import sys
@@ -43,8 +55,15 @@ if __name__ == "__main__":
     latitude = int(sys.argv[1])
     longitude = int(sys.argv[2])
     first_step = int(sys.argv[3]) if len(sys.argv) > 3 else 1
-    custom_build_dir = sys.argv[4] if len(sys.argv) > 4 else ""
+    custom_build_dir = FNAMES.normalize_custom_build_dir(
+        latitude, longitude, sys.argv[4] if len(sys.argv) > 4 else ""
+    )
     tile = CFG.Tile(latitude, longitude, custom_build_dir)
+    if tile.grouped:
+        print(
+            "NOTE: build dir has no trailing separator -> grouped mode; "
+            "neighbor meshes are looked up in this same directory."
+        )
     tile.read_from_config()
     print("build directory:", tile.build_dir)
     print("default_website:", tile.default_website, "default_zl:", tile.default_zl)

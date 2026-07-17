@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import sys
 from math import floor
@@ -223,6 +224,52 @@ def build_dir(lat, lon, custom_build_dir):
         return os.path.join(custom_build_dir[:-1], tile_dir(lat, lon))
     else:
         return custom_build_dir
+
+
+def normalize_custom_build_dir(lat: int, lon: int,
+                               custom_build_dir: str) -> str:
+    """Return ``custom_build_dir`` in the form ``Tile.__init__`` expects.
+
+    ``Tile`` treats a non-empty ``custom_build_dir`` WITHOUT a trailing
+    separator as ``grouped=True``: the path is used verbatim as the build
+    directory and every 3x3-neighbor lookup (``select_neighbor_meshes``,
+    ``record_water_tris``) then searches that SAME directory for neighbor
+    meshes.  Headless callers naturally pass the tile's own build
+    directory (".../zOrtho4XP_+36-008"), which flips them into grouped
+    mode and silently loses all cross-tile neighbor data — mask seams at
+    every tile edge.  The intended per-tile-subdirectory mode is the
+    PARENT directory with a trailing separator (what the Qt GUI passes).
+
+    Normalization rules:
+
+    * empty stays empty (default ``Tiles/`` layout);
+    * a path whose last component is exactly ``tile_dir(lat, lon)``
+      (with or without a trailing separator) is rewritten to its parent
+      with a trailing ``os.sep``;
+    * a path whose last component names a DIFFERENT tile's
+      ``zOrtho4XP_+XX+YYY`` directory raises ``ValueError`` — that is
+      always a caller mix-up, never a grouped directory name;
+    * anything else is returned unchanged (intentional grouped mode, or
+      an already-correct parent directory with trailing separator).
+    """
+    if not custom_build_dir:
+        return custom_build_dir
+    stripped = custom_build_dir.rstrip("/\\")
+    basename = os.path.basename(stripped)
+    if basename == tile_dir(lat, lon):
+        parent = os.path.dirname(stripped)
+        return (parent if parent else ".") + os.sep
+    if re.fullmatch(r"zOrtho4XP_[+-]\d{2}[+-]\d{3}", basename):
+        raise ValueError(
+            "custom_build_dir %r is the build directory of tile %s, not "
+            "of the requested tile %s (%s); pass the parent directory "
+            "with a trailing separator, or the requested tile's own "
+            "directory" % (
+                custom_build_dir, basename[len("zOrtho4XP_"):],
+                short_latlon(lat, lon), tile_dir(lat, lon),
+            )
+        )
+    return custom_build_dir
 
 
 def osm_dir(lat, lon):

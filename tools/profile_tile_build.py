@@ -116,7 +116,9 @@ def main():
     parser.add_argument("lat", type=int)
     parser.add_argument("lon", type=int)
     parser.add_argument("--build-dir", default="",
-                        help="custom build directory (as in run_tile_build)")
+                        help="custom build directory (as in run_tile_build; "
+                             "the tile's own zOrtho4XP_... dir is normalized "
+                             "to its parent so neighbor lookups keep working)")
     parser.add_argument("--provider", default="",
                         help="override default_website (else tile config)")
     parser.add_argument("--zl", type=int, default=0,
@@ -151,7 +153,11 @@ def main():
     IMG.initialize_providers_dict()
     IMG.initialize_combined_providers_dict()
 
-    tile = CFG.Tile(args.lat, args.lon, args.build_dir)
+    tile = CFG.Tile(
+        args.lat, args.lon,
+        FNAMES.normalize_custom_build_dir(args.lat, args.lon,
+                                          args.build_dir),
+    )
     tile.read_from_config()
     if args.provider:
         tile.default_website = args.provider
