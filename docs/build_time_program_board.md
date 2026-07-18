@@ -15,12 +15,15 @@ transcript is needed to continue.
 
 ## 1. Measured state (2026-07-18, dev 0834fef)
 
-**Current baselines (measured at 6810da8, quiet): OTHH 363.3 s
-(solve 217.3, emit-incl-tail 107.2), CYXY 47.0 s** — −17.2 s at OTHH
-vs the 24d36f3 baselines, from the dead-recapture removal (321ad55) +
-T1c vectorization (6810da8). The store undercount (record_build ran
-before the late projection + densify) is FIXED in 06f83ab — the tail
-lands in the emit phase.
+**Current baselines (measured at f6475f1 + sibling 9598134, quiet):
+OTHH 339.5 s, CYXY 44.4 s** — day total −41 s at OTHH (−11 %) from
+dead-recapture removal (321ad55) + T1c vectorization (6810da8) +
+scoped-projection default OFF (f6475f1). Run-to-run variance observed
+~4 % at OTHH (325–344 s across today's quiet runs). Next single
+lever: the T1b mid-projection drop (OTHH 299 s measured, NEEDS OWNER
+RULING). The store undercount (record_build ran before the late
+projection + densify) is FIXED in 06f83ab — the tail lands in the
+emit phase.
 
 **✓ 2026-07-18 PM anomaly RESOLVED (forensic run under X-Plane load —
 counts valid, wall times not; quiet re-baseline still pending).**
@@ -174,8 +177,8 @@ QUEUED (specified, not started) / NEEDS RULING.
 | # | Track | Expected at OTHH | Gate | Status |
 |---|---|---|---|---|
 | T0 | Move `record_build` after late projection + re-baseline | measurement integrity | tests + check_build_time | DONE 06f83ab + 24d36f3 (OTHH 380.5 / CYXY 49.2) |
-| T1a | Late-projection deferral fix: recapture snapshot at projection exit (fairing-diff keys + `_capture_projection_snapshot` after `_writeback`, `solve.py` ~2520-2592; new `snapshot` stage in `O4_PROJ_TIMING`) | −12–20 s | counts-not-worse; `[scoped:]` deferral counts before/after (mid line unchanged, late ~26 → majority deferred) | COMMITTED 7617e2e; forensics 2026-07-18 PM (§1): deferral ENGAGES (late 26 → 124 deferred) but the recapture ≈ seed-stage cost ×2 calls explains most of the +19 s; dead LATE-call recapture removed; MID-recapture net value unproven — quiet A/B (revert 7617e2e vs HEAD) queued |
-| T1b | Drop the MID projection behind `O4_FINAL_PROJECTION_MID` gate (wrap `pipeline.py:6360`); reorder `relevel_pads`/ribbon/groundside fixups after late call only if the gate-off A/B shows promise but counts degrade | −~20 s if counts hold | one-env-var A/B; watch torn-weld class + frozen-feature bake values | GATE BUILT (default ON, behavior-identical); A/B queued for quiet window |
+| T1a | Late-projection deferral fix: recapture snapshot at projection exit (fairing-diff keys + `_capture_projection_snapshot` after `_writeback`, `solve.py` ~2520-2592; new `snapshot` stage in `O4_PROJ_TIMING`) | −12–20 s | counts-not-worse; `[scoped:]` deferral counts before/after (mid line unchanged, late ~26 → majority deferred) | DONE — VERDICT NET-NEGATIVE at target class: quiet A/B OTHH 363.3 (scoped) vs 325.2 s (unscoped), CYXY byte-identical, deltas = +1 by-design pair (SPJC) +1 noise-kink (OTHH). Deferral engages (124 at OTHH) but deferred shapes are cheap while captures rival the seed stage (HECA: 14.4 s for 1 deferral). Dead late recapture removed 321ad55; **scoped default OFF f6475f1** (opt-in retained) |
+| T1b | Drop the MID projection behind `O4_FINAL_PROJECTION_MID` gate (wrap `pipeline.py:6360`); reorder `relevel_pads`/ribbon/groundside fixups after late call only if the gate-off A/B shows promise but counts degrade | −~20 s if counts hold | one-env-var A/B; watch torn-weld class + frozen-feature bake values | GATE + REORDER BUILT b7b1deb (default ON = byte-identical). Measured quiet A/B with reorder: OTHH 299.2 s (−64 vs 363.3), CYXY 39.8 s (−22), SPJC 87.7 s (−13); all real law classes identical; break-region (by-design) 42→48 OTHH, 7→10 SPJC, **239→400 CYXY (inherent to the drop, not the ordering)**. **NEEDS OWNER RULING: flip default?** |
 | T1c | Vectorize late-only hard-set scans (strip freeze `solve.py:2025-2031`, runway-boundary `2056-2060`) with STRtree `dwithin` | EGLL-class win (late 46–56 s there) | byte-identical | QUEUED |
 | T2a | Chromatic: vectorized feasibility pre-check (skip coloring when already feasible) + exact-greedy hub coloring (per-node next-free counters, identical partition) + vectorized per-color array build (`one_solve.py`) | −25–30 s | byte-identical; oracle equality tests | COMMITTED 101d7b5 (oracle-equality + 60-instance exact A/B, 0 mismatches; hub coloring 876 ms -> 3.9 ms; quiet-machine A/B queued) |
 | T2b | Chromatic ON/OFF A/B at OTHH (never run at target class; legacy worklist's active-set may win on nearly-feasible calls) | verdict on keeping chromatic | wall + counts, after T2a | QUEUED |
