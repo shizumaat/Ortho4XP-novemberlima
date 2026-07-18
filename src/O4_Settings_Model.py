@@ -159,6 +159,7 @@ _LAYOUT: list = [
         ("mask_zl", "Water mask resolution", "tile", False),
         ("masks_width", "Mask width (m)", "tile", False),
         ("masking_mode", "Coastline mask style", "tile", False),
+        ("inland_shore_feather_m", "Inland shore feather (m)", "tile", False),
         ("coastal_foam_edge", "Wavy shoreline with foam band", "tile", False),
         ("use_masks_for_inland", "Mask inland water", "tile", True),
         ("imprint_masks_to_dds", "Imprint masks into DDS", "tile", True),

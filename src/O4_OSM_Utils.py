@@ -593,6 +593,7 @@ def _OSM_queries_to_OSM_layer_serialized(
         # background downloader and this build proceeds to Overpass —
         # the backend is an accelerator, never a dependency.
         response = None
+        extract_alternative_source = None
         try:
             import O4_OSM_Extracts as EXTRACTS
 
@@ -601,13 +602,28 @@ def _OSM_queries_to_OSM_layer_serialized(
                 bounding_box,
                 request_description=cached_suffix,
             )
+            # The covering extract may finish downloading while a plain
+            # Overpass request below is still waiting in server queues;
+            # hand get_overpass_data a way to notice and switch over
+            # rather than waiting out Overpass.  Same optional-backend
+            # discipline: an import/backend failure degrades to plain
+            # Overpass, never crashes.
+            extract_alternative_source = (
+                lambda: EXTRACTS.osm_xml_from_local_extracts(
+                    statements_to_download,
+                    bounding_box,
+                    request_description=cached_suffix,
+                )
+            )
         except Exception:
             response = None
+            extract_alternative_source = None
         if response is None:
             response = get_overpass_data(
                 statements_to_download,
                 bounding_box,
                 request_description=cached_suffix,
+                alternative_source=extract_alternative_source,
             )
         if UI.red_flag:
             return 0
@@ -910,9 +926,44 @@ def _describe_overpass_response_problem(response):
 # How often to reassure the user that a slow request is still alive.
 progress_update_interval_seconds = 10
 
+# The alternative source (a regional-extract lookup) does real work on
+# every call, so while an Overpass request is waiting it is polled no more
+# often than this.  Tests set it to 0 to poll at every boundary.
+alternative_source_poll_interval_seconds = 5.0
+
+
+def _alternative_source_bytes(alternative_source, poll_state):
+    """Poll the alternative source, throttled and failure-proof.
+
+    ``alternative_source`` is a zero-argument callable returning the OSM
+    XML bytes now available from another source, or None when it still
+    cannot serve.  ``poll_state`` is a one-element list holding the
+    monotonic timestamp of the previous poll; the source is not polled
+    again until ``alternative_source_poll_interval_seconds`` have passed,
+    so a busy wait loop never calls it hot.  Any exception raised by the
+    source is swallowed and treated as "nothing available yet" — a broken
+    alternative source must never break the Overpass fallback.  Returns
+    the non-empty bytes the source produced, or None.
+    """
+    now = time.monotonic()
+    last_polled_at = poll_state[0]
+    if (
+        last_polled_at is not None
+        and now - last_polled_at < alternative_source_poll_interval_seconds
+    ):
+        return None
+    poll_state[0] = now
+    try:
+        produced_bytes = alternative_source()
+    except Exception:
+        return None
+    return produced_bytes if produced_bytes else None
+
 
 def _post_overpass_query_reporting_progress(server_key, overpass_query,
-                                            request_label=""):
+                                            request_label="",
+                                            alternative_source=None,
+                                            poll_state=None):
     """Send one Overpass request, reporting progress while it runs.
 
     The HTTP POST itself happens in a helper thread so this thread can
@@ -924,6 +975,13 @@ def _post_overpass_query_reporting_progress(server_key, overpass_query,
     it ends on its own once the server answers or the timeout fires).
     Network failures raise requests.RequestException exactly as a
     direct requests call would.
+
+    When an ``alternative_source`` callable is supplied it is polled once
+    per progress tick (throttled by ``_alternative_source_bytes``): if it
+    yields bytes while this server is still holding us in its queue, those
+    bytes are returned directly and the still-pending request thread is
+    abandoned.  With no alternative source the behaviour is byte-for-byte
+    the original.
     """
     request_outcome = {}
 
@@ -953,6 +1011,12 @@ def _post_overpass_query_reporting_progress(server_key, overpass_query,
         seconds_waited += progress_update_interval_seconds
         if UI.red_flag:
             return None
+        if alternative_source is not None:
+            produced_bytes = _alternative_source_bytes(
+                alternative_source, poll_state
+            )
+            if produced_bytes is not None:
+                return produced_bytes
         UI.vprint(
             1,
             f"      OSM server {server_key}{request_label} is working on "
@@ -963,7 +1027,8 @@ def _post_overpass_query_reporting_progress(server_key, overpass_query,
     return request_outcome["response"]
 
 
-def get_overpass_data(query, bbox, request_description="") -> bytes:
+def get_overpass_data(query, bbox, request_description="",
+                      alternative_source=None) -> bytes:
     """Fetch data for one or more Overpass statements in one transaction.
 
     ``query`` is a single Overpass statement or an iterable of statements;
@@ -976,6 +1041,18 @@ def get_overpass_data(query, bbox, request_description="") -> bytes:
     into every console line about this request, so that when several
     downloads interleave in the log — the background prefetch runs while
     other work prints — each line is attributable to its request.
+
+    ``alternative_source`` is an optional zero-argument callable returning
+    the OSM XML bytes now available from a different source (the regional
+    extract that finished downloading after this request had already
+    committed to Overpass), or None while it still cannot serve.  It is
+    polled at the natural boundaries of the retry/wait machinery —
+    between tentatives, inside a server's own working-on-it wait, and
+    inside the back-off sleep — throttled to at most one call every
+    ``alternative_source_poll_interval_seconds``.  The first time it
+    yields bytes this function abandons the Overpass attempt and returns
+    them.  With ``alternative_source=None`` the code path is byte-for-byte
+    the original.
     """
     if not overpass_servers:
         UI.lvprint(1, "No overpass servers configured. Check overpass_servers.txt.")
@@ -992,8 +1069,28 @@ def get_overpass_data(query, bbox, request_description="") -> bytes:
         )
     overpass_query = build_overpass_query(query, bbox)
     request_label = f" ({request_description})" if request_description else ""
+    # Seed the throttle with the current time so the first poll only fires
+    # after one interval: the caller already tried the alternative source
+    # immediately before falling through to here, so re-polling it at t=0
+    # would be pure duplicate work.
+    alternative_source_poll_state = [time.monotonic()]
+
+    def _leave_overpass_queue_with(produced_bytes):
+        UI.vprint(
+            1,
+            "      Regional extract became available — leaving the "
+            "Overpass queue.",
+        )
+        return produced_bytes
+
     failed_server_keys = set()
     for tentative in range(1, max_osm_tentatives + 1):
+        if alternative_source is not None:
+            produced_bytes = _alternative_source_bytes(
+                alternative_source, alternative_source_poll_state
+            )
+            if produced_bytes is not None:
+                return _leave_overpass_queue_with(produced_bytes)
         if len(failed_server_keys) >= len(server_keys):
             # Every server failed once this round; start a fresh round
             # rather than keeping a dead exclusion list around.
@@ -1012,12 +1109,28 @@ def get_overpass_data(query, bbox, request_description="") -> bytes:
         UI.vprint(3, overpass_query)
         wait_seconds = 2**tentative
         try:
+            # Only widen the call when there is an alternative source: with
+            # none, the helper is invoked exactly as it always was, keeping
+            # this path byte-for-byte the original.
+            wait_loop_kwargs = (
+                {
+                    "alternative_source": alternative_source,
+                    "poll_state": alternative_source_poll_state,
+                }
+                if alternative_source is not None
+                else {}
+            )
             response = _post_overpass_query_reporting_progress(
-                current_server_key, overpass_query, request_label
+                current_server_key, overpass_query, request_label,
+                **wait_loop_kwargs,
             )
             if response is None:
                 # The user interrupted the build while we were waiting.
                 return 0
+            if isinstance(response, (bytes, bytearray)):
+                # The alternative source produced the data while this
+                # server still had us queued; leave the Overpass queue.
+                return _leave_overpass_queue_with(response)
             problem_description = _describe_overpass_response_problem(response)
             if problem_description is None:
                 get_overpass_data.last_successful_server_key = current_server_key
@@ -1057,6 +1170,12 @@ def get_overpass_data(query, bbox, request_description="") -> bytes:
         for _ in range(wait_seconds):
             if UI.red_flag:
                 return 0
+            if alternative_source is not None:
+                produced_bytes = _alternative_source_bytes(
+                    alternative_source, alternative_source_poll_state
+                )
+                if produced_bytes is not None:
+                    return _leave_overpass_queue_with(produced_bytes)
             time.sleep(1)
     return 0
 

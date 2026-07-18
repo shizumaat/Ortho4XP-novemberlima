@@ -297,6 +297,99 @@ def test_global_cancel_stops_everything(stub_worker, tmp_path):
     assert not any(isinstance(e, EV.StepProgress) for e in queued)
 
 
+def test_enqueue_build_joins_running_parallel_run(stub_worker, tmp_path):
+    """enqueue_build while a parallel run is live appends the batch to
+    it: one single RunDone arrives counting ALL tiles, and the enqueued
+    tile builds to completion."""
+    session = EngineSession()
+    collector = Collector(session)
+    # Two sleepers occupy both slots long enough to enqueue into the run.
+    tiles = [(60, 1), (60, 2)]
+    assert _start_parallel(session, tiles, slots=2) is True
+    assert _wait_for(
+        lambda: any(isinstance(e, EV.StepProgress)
+                    for e in collector.events))
+    assert session.enqueue_build(
+        [(10, 20)], "BI", 16, "",
+        do_vector=True, do_imagery=True, do_overlays=False) is True
+    run_done = collector.wait_run_done(30.0)
+
+    enqueued = [e for e in collector.tile_events(10, 20)
+                if isinstance(e, EV.BuildDone)]
+    assert len(enqueued) == 1 and enqueued[0].ok is True
+    assert (run_done.done_count, run_done.error_count,
+            run_done.cancelled) == (3, 0, False)
+    # Exactly one run: the batch joined, it did not start a second run.
+    assert len(collector.of_type(EV.RunDone)) == 1
+
+
+def test_enqueued_tiles_start_on_free_slots_beyond_initial_batch(
+        stub_worker, tmp_path):
+    """A run started with FEWER tiles than slots grows its worker pool
+    when tiles are enqueued (the live defect: the pool was created at
+    min(slots, initial batch), so a 2-tile run on a 4-slot machine
+    pinned every enqueued tile behind the original pair).  Two sleepers
+    at slots=4, two happy tiles enqueued: both must START while the
+    sleepers are still sleeping."""
+    stub_worker.setenv("STUB_WORKER_MARK_DIR", str(tmp_path))
+    session = EngineSession()
+    collector = Collector(session)
+    sleepers = [(60, 1), (60, 2)]
+    assert _start_parallel(session, sleepers, slots=4) is True
+    assert _wait_for(
+        lambda: sum(1 for e in collector.events
+                    if isinstance(e, EV.StepProgress)) >= 2)
+    added = [(10, 20), (11, 21)]
+    assert session.enqueue_build(
+        added, "BI", 16, "",
+        do_vector=True, do_imagery=True, do_overlays=False) is True
+    run_done = collector.wait_run_done(30.0)
+    assert (run_done.done_count, run_done.error_count) == (4, 0)
+
+    def _mark(kind, lat, lon):
+        with open(os.path.join(
+                tmp_path, "%s_%d_%d" % (kind, lat, lon))) as handle:
+            return float(handle.read())
+
+    added_starts = [_mark("start", *tile) for tile in added]
+    sleeper_ends = [_mark("end", *tile) for tile in sleepers]
+    assert max(added_starts) < min(sleeper_ends), (
+        "enqueued tiles must start on the free slots while the initial "
+        "batch is still building: starts=%s sleeper_ends=%s"
+        % (added_starts, sleeper_ends))
+
+
+def test_enqueue_build_rejects_tiles_already_in_the_run(stub_worker,
+                                                        tmp_path):
+    """A batch made ENTIRELY of tiles already part of the live run is
+    refused (False) without disturbing the run."""
+    session = EngineSession()
+    collector = Collector(session)
+    tiles = [(60, 1), (60, 2)]
+    assert _start_parallel(session, tiles, slots=2) is True
+    assert _wait_for(
+        lambda: any(isinstance(e, EV.StepProgress)
+                    for e in collector.events))
+    assert session.enqueue_build(
+        [(60, 1), (60, 2)], "BI", 16, "",
+        do_vector=True, do_imagery=True, do_overlays=False) is False
+    run_done = collector.wait_run_done(30.0)
+    assert (run_done.done_count, run_done.error_count) == (2, 0)
+    assert len(collector.of_type(EV.RunDone)) == 1
+
+
+def test_enqueue_build_starts_fresh_run_when_idle(stub_worker, tmp_path):
+    """With no run active, enqueue_build is exactly build()."""
+    session = EngineSession()
+    collector = Collector(session)
+    assert session.enqueue_build(
+        [(10, 20), (11, 21)], "BI", 16, "",
+        do_vector=True, do_imagery=True, do_overlays=False,
+        slots=2) is True
+    run_done = collector.wait_run_done(30.0)
+    assert run_done.done_count == 2
+
+
 def test_spawn_failure_falls_back_to_in_process(stub_worker, monkeypatch,
                                                  tmp_path, capsys):
     """A worker child that dies before the handshake makes the whole run
@@ -393,6 +486,56 @@ def test_in_process_cancel_active_tile_continues(monkeypatch, tmp_path):
               if isinstance(e, EV.BuildDone)]
     assert len(second) == 1 and second[0].ok is True
     assert run_done.cancelled is False
+    assert run_done.done_count == 1
+
+
+def test_in_process_enqueue_build_appends_to_running_queue(monkeypatch,
+                                                           tmp_path):
+    """enqueue_build during an in-process run appends the batch to the
+    live work queue: the run builds it after the original tiles, under
+    ONE RunDone."""
+    holder = {}
+    fired = {"done": False}
+
+    def enqueue_third(_tile):
+        if not fired["done"]:
+            fired["done"] = True
+            assert holder["session"].enqueue_build(
+                [(12, 22)], "BI", 16, "",
+                do_vector=True, do_imagery=True, do_overlays=False) is True
+
+    install_stub_pipeline(monkeypatch, hooks={"vector": enqueue_third})
+    session = EngineSession()
+    holder["session"] = session
+    collector = _run_in_process(session, [(10, 20), (11, 21)], tmp_path)
+    run_done = collector.wait_run_done(30.0)
+
+    for lat, lon in [(10, 20), (11, 21), (12, 22)]:
+        builds = [e for e in collector.tile_events(lat, lon)
+                  if isinstance(e, EV.BuildDone)]
+        assert len(builds) == 1 and builds[0].ok is True
+    assert run_done.done_count == 3
+    assert len(collector.of_type(EV.RunDone)) == 1
+
+
+def test_in_process_enqueue_build_rejects_active_duplicate(monkeypatch,
+                                                           tmp_path):
+    """A batch that is entirely the ACTIVE tile is refused."""
+    holder = {}
+    outcome = {}
+
+    def enqueue_self(_tile):
+        if "result" not in outcome:
+            outcome["result"] = holder["session"].enqueue_build(
+                [(10, 20)], "BI", 16, "",
+                do_vector=True, do_imagery=True, do_overlays=False)
+
+    install_stub_pipeline(monkeypatch, hooks={"vector": enqueue_self})
+    session = EngineSession()
+    holder["session"] = session
+    collector = _run_in_process(session, [(10, 20)], tmp_path)
+    run_done = collector.wait_run_done(30.0)
+    assert outcome["result"] is False
     assert run_done.done_count == 1
 
 

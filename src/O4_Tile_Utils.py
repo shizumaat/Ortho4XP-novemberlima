@@ -23,9 +23,6 @@ from O4_Parallel_Utils import (
 max_download_slots = 1
 max_convert_slots = 4
 
-# How often a running download queue re-resolves its Auto worker count
-# (a parallel sibling finishing frees download slots mid-step).
-DOWNLOAD_WORKER_RECHECK_SECONDS = 5.0
 skip_downloads = False
 skip_converts = False
 
@@ -46,7 +43,6 @@ def download_textures(
         1, workers or effective_download_slots(max_download_slots)
     )
     UI.vprint(1, f"-> Opening download queue with {worker_count} worker(s).")
-    worker_count_pinned = workers is not None
 
     progress_lock = threading.Lock()
     progress_state = {"done": 0, "pending": 0, "failed": 0}
@@ -120,35 +116,8 @@ def download_textures(
         producer_done_event.set()
 
     workers_list = parallel_launch(_download_task, download_queue, worker_count)
-    next_worker_recheck = time.time() + DOWNLOAD_WORKER_RECHECK_SECONDS
-
-    def _raise_worker_count_if_siblings_finished():
-        """Re-resolve the Auto download slots mid-step.
-
-        A parallel-run child spawns sharing the machine with its
-        siblings; when they finish, the parent broadcasts the shrunken
-        count and this step's remaining downloads deserve the freed
-        slots (a cold ZL18 tile otherwise spends a whole long step at
-        the shared rate, throttled for nobody).  Workers are only ever
-        added — the quit tokens below use the final count.
-        """
-        nonlocal worker_count, next_worker_recheck
-        if worker_count_pinned or time.time() < next_worker_recheck:
-            return
-        next_worker_recheck = time.time() + DOWNLOAD_WORKER_RECHECK_SECONDS
-        resolved = max(1, effective_download_slots(max_download_slots))
-        if resolved > worker_count:
-            UI.vprint(
-                1,
-                f"-> Raising download workers {worker_count} -> {resolved} "
-                "(parallel siblings finished).",
-            )
-            workers_list.extend(parallel_launch(
-                _download_task, download_queue, resolved - worker_count))
-            worker_count = resolved
 
     while not producer_done_event.is_set() and not UI.red_flag:
-        _raise_worker_count_if_siblings_finished()
         time.sleep(0.05)
 
     while not UI.red_flag:
@@ -156,7 +125,6 @@ def download_textures(
             pending = progress_state["pending"]
         if download_queue.empty() and pending == 0:
             break
-        _raise_worker_count_if_siblings_finished()
         time.sleep(0.05)
 
     for _ in range(worker_count):
@@ -269,10 +237,6 @@ def build_tile(tile):
 
     download_launched = False
     convert_launched = False
-    download_workers = effective_download_slots(max_download_slots)
-    # Resolved ONCE so the launch count and the quit-token count below can
-    # never disagree ("0 = Auto" scales to the machine).
-    convert_worker_count = effective_convert_slots(max_convert_slots)
 
     # Default X-Plane texture mode uses no orthophotos: build_dsf queues
     # nothing, so the imagery download/convert stage is a clean no-op for this
@@ -297,13 +261,15 @@ def build_tile(tile):
     producer_done_event = threading.Event()
 
     download_stats = {}
+    # workers=None: download_textures resolves the Auto count itself and
+    # keeps re-resolving it mid-step (an explicit workers value pins it).
     download_thread = threading.Thread(
         target=download_textures,
         args=[
             tile,
             download_queue,
             convert_queue,
-            download_workers,
+            None,
             producer_done_event,
             download_stats,
         ],
@@ -322,19 +288,23 @@ def build_tile(tile):
     if harmonization_active:
         IMG.initialize_color_harmonization(tile)
 
+    convert_workers = []
+
     def _launch_convert_workers():
+        worker_count = effective_convert_slots(max_convert_slots)
         UI.vprint(
             1,
             "-> Opening convert queue and",
-            convert_worker_count,
+            worker_count,
             "conversion workers.",
         )
-        return parallel_launch(
+        convert_workers.extend(parallel_launch(
             IMG.convert_texture,
             convert_queue,
-            convert_worker_count,
+            worker_count,
             progress=dico_conv_progress,
-        )
+        ))
+        return convert_workers
 
     dico_conv_progress = {"done": 0, "bar": 3}
     build_dsf_thread.start()
@@ -342,7 +312,7 @@ def build_tile(tile):
         download_thread.start()
         download_launched = True
         if not skip_converts and not harmonization_active:
-            convert_workers = _launch_convert_workers()
+            _launch_convert_workers()
             convert_launched = True
     build_dsf_thread.join()
     producer_done_event.set()
@@ -350,10 +320,10 @@ def build_tile(tile):
         download_thread.join()
         if harmonization_active and not UI.red_flag:
             IMG.compute_color_harmonization_targets(tile)
-            convert_workers = _launch_convert_workers()
+            _launch_convert_workers()
             convert_launched = True
         if convert_launched:
-            for _ in range(convert_worker_count):
+            for _ in range(len(convert_workers)):
                 convert_queue.put("quit")
             parallel_join(convert_workers)
             if UI.red_flag:

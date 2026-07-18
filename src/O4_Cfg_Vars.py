@@ -380,6 +380,11 @@ cfg_tile_vars = {
         "default": 100,
         "hint": "Maximum extent of the masks perpendicularly to the coastline (rough definition). NOTE: The value is now in meters, it used to be in ZL14 pixel size in earlier verions, the scale is roughly one to ten between both.",
     },
+    "inland_shore_feather_m": {
+        "type": float,
+        "default": 120.0,
+        "hint": "How far, in meters, inland water eases from opaque orthophoto at its shoreline down to the constant ratio_water blend. The feather never continues toward open-water transparency - mapped inland water (lagoons, lakes near the coast) keeps orthos visible under water everywhere. 0 restores the historic hard shoreline. Only squares the masks step covers are feathered (inland water near the sea); far-inland lakes keep the constant blend either way.",
+    },
     "masking_mode": {
         "type": str,
         "default": "sand",
@@ -675,6 +680,7 @@ list_mask_vars = [
     "mask_zl",
     "masks_width",
     "masking_mode",
+    "inland_shore_feather_m",
     "use_masks_for_inland",
     "imprint_masks_to_dds",
     "distance_masks_too",

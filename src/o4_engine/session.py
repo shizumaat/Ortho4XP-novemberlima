@@ -223,6 +223,12 @@ class _EtaTracker:
         self.tiles = list(tiles)
         self.plan = plan
         self.estimates = per_tile_estimates    # {(lat,lon): {step: seconds}}
+        # Per-tile planned step keys: batches enqueued into a live run
+        # may select different steps than the batch that started it.
+        self.planned_keys = {
+            tile: [key for (key, _base, _width) in plan]
+            for tile in self.tiles
+        }
         self.tile_index = 0
         self.step_key = None
         self.step_started_at = None
@@ -232,6 +238,20 @@ class _EtaTracker:
         self.bar_windows = {}
         self.autopatch = None                  # {"icao": (t_begin, eta_total)}
         self.finished_steps = {}               # (lat,lon) -> set(step)
+
+    def add_tiles(self, tiles, per_tile_estimates, planned_keys):
+        """Extend the run with tiles enqueued while it is running."""
+        for tile in tiles:
+            if tile not in self.tiles:
+                self.tiles.append(tile)
+            self.planned_keys[tile] = list(planned_keys)
+            self.estimates[tile] = per_tile_estimates.get(tile, {})
+            self.finished_steps.pop(tile, None)
+
+    def is_tile_finished(self, tile):
+        planned = self.planned_keys.get(tile, ())
+        return bool(planned) and (
+            len(self.finished_steps.get(tile, set())) >= len(planned))
 
     # -- feed ------------------------------------------------------------
     def step_started(self, tile, key):
@@ -339,12 +359,12 @@ class _EtaTracker:
             return None
         total = self._current_step_remaining()
         current_tile = self.tiles[min(self.tile_index, len(self.tiles) - 1)]
-        planned = [k for (k, _b, _w) in self.plan]
+        planned_default = [k for (k, _b, _w) in self.plan]
         for i, tile in enumerate(self.tiles):
             if i < self.tile_index:
                 continue
             done = self.finished_steps.get(tile, set())
-            for key in planned:
+            for key in self.planned_keys.get(tile, planned_default):
                 if key in done:
                     continue
                 if tile == current_tile and key == self.step_key:
@@ -380,11 +400,20 @@ class EngineSession:
         self._cancel_all = False
         # The live parallel run (subprocess scheduler), when one exists.
         self._parallel = None
+        # In-process work queue: per-tile items the worker consumes and
+        # enqueue_build appends to while a run is live.  One lock guards
+        # the queue AND the building flag transition, so a batch can
+        # never be appended into a run that just decided to finish.
+        self._work_queue: deque = deque()
+        self._work_queue_lock = threading.Lock()
+        # Serializes enqueue_build decisions (one view command at a time).
+        self._command_lock = threading.Lock()
         UI.engine_session = self
         self._emit(EngineHello(ortho4xp_version=version,
                                capabilities=("scan", "build", "cancel",
-                                             "cancel_tile", "tile_info",
-                                             "config", "links")))
+                                             "cancel_tile", "enqueue_build",
+                                             "tile_info", "config",
+                                             "links")))
 
     # ------------------------------------------------------------------
     # Event plumbing
@@ -506,12 +535,21 @@ class EngineSession:
         if slots is None:
             slots = _configured_build_slots()
         slots = max(1, int(slots))
-        if slots > 1 and len(tiles) > 1:
+        # The orchestrator runs whenever more than one slot is configured
+        # — even for a single-tile batch, so tiles enqueued later run
+        # CONCURRENTLY instead of joining a sequential in-process walk.
+        # It gets the FULL slot count, not min(slots, batch): a run
+        # started with two tiles on a four-slot machine must grow its
+        # worker pool when more tiles are enqueued, not pin them behind
+        # the original pair.  Step-wise commands (``steps`` set — the
+        # per-step protocol a worker CHILD receives) always stay
+        # in-process: a child must never orchestrate grandchildren.
+        if slots > 1 and steps is None:
             from . import parallel
             run = parallel.ParallelBuildRun(
                 self, list(tiles), provider, zoomlevel, custom_build_dir,
                 (do_vector, do_imagery, do_overlays),
-                min(slots, len(tiles)))
+                slots)
             # Registered BEFORE start so a cancel arriving during the
             # worker handshake window already routes to the run; start
             # runs off-thread because the handshake blocks for seconds.
@@ -527,20 +565,115 @@ class EngineSession:
                       "instead.")
                 self._prepare_in_process_eta(tiles, plan, provider,
                                              zoomlevel, custom_build_dir)
-                self._build_worker(list(tiles), provider, zoomlevel,
-                                   custom_build_dir, plan)
+                self._seed_work_queue(tiles, provider, zoomlevel,
+                                      custom_build_dir, plan)
+                self._build_worker()
 
             threading.Thread(target=_start_parallel_or_fall_back,
                              daemon=True).start()
             return True
         self._prepare_in_process_eta(tiles, plan, provider, zoomlevel,
                                      custom_build_dir)
-        threading.Thread(
-            target=self._build_worker,
-            args=(list(tiles), provider, zoomlevel, custom_build_dir, plan),
-            daemon=True,
-        ).start()
+        self._seed_work_queue(tiles, provider, zoomlevel, custom_build_dir,
+                              plan)
+        threading.Thread(target=self._build_worker, daemon=True).start()
         return True
+
+    def _seed_work_queue(self, tiles, provider, zoomlevel,
+                         custom_build_dir, plan):
+        with self._work_queue_lock:
+            self._work_queue.clear()
+            for tile in tiles:
+                self._work_queue.append(
+                    (tuple(tile), provider, zoomlevel, custom_build_dir,
+                     plan))
+
+    def enqueue_build(self, tiles, provider, zoomlevel, custom_build_dir,
+                      do_vector=True, do_imagery=True, do_overlays=False,
+                      slots=None):
+        """Build the given tiles, joining a run already in progress.
+
+        The single build entry point for interactive views: with no run
+        active this is exactly :meth:`build`; with one active the batch
+        is appended to it (both run modes) and starts as soon as
+        capacity frees.  Each batch keeps its own imagery source, zoom
+        level, output folder and step selection.  Returns True when the
+        batch was started or queued, False when nothing was accepted
+        (empty batch, no steps selected, or every tile already part of
+        the active run).
+        """
+        tiles = [tuple(tile) for tile in tiles]
+        with self._command_lock:
+            if self._building:
+                parallel_run = self._parallel
+                if parallel_run is not None:
+                    if parallel_run.enqueue(
+                            tiles, provider, zoomlevel, custom_build_dir,
+                            (do_vector, do_imagery, do_overlays)):
+                        return True
+                    if not (parallel_run._finished
+                            or parallel_run._cancel_all):
+                        # A live run refused the whole batch: every tile
+                        # is already part of it.
+                        return False
+                else:
+                    appended = self._enqueue_in_process(
+                        tiles, provider, zoomlevel, custom_build_dir,
+                        do_vector, do_imagery, do_overlays)
+                    if appended:
+                        return True
+                    if appended == 0:
+                        # A live run refused the whole batch: every tile
+                        # is already queued or actively building.
+                        return False
+                # The run is finishing this very moment: wait briefly
+                # for it to settle, then start a fresh run.  RunDone is
+                # emitted before worker reaping, so this is milliseconds.
+                deadline = time.time() + 2.0
+                while self._building and time.time() < deadline:
+                    time.sleep(0.02)
+                if self._building:
+                    return False
+            return self.build(
+                tiles, provider, zoomlevel, custom_build_dir,
+                do_vector=do_vector, do_imagery=do_imagery,
+                do_overlays=do_overlays, slots=slots)
+
+    def _enqueue_in_process(self, tiles, provider, zoomlevel,
+                            custom_build_dir, do_vector, do_imagery,
+                            do_overlays):
+        """Append a batch to the live in-process run.
+
+        Returns the number of tiles appended; 0 when every tile is
+        already queued or actively building; None when the run is no
+        longer accepting work at all (finishing, cancelled, or no steps
+        selected).
+        """
+        plan = plan_steps(do_vector, do_imagery, do_overlays)
+        if not plan:
+            return None
+        with self._work_queue_lock:
+            if not self._building or UI.red_flag:
+                return None
+            already_queued = {item[0] for item in self._work_queue}
+            fresh = [tile for tile in tiles
+                     if tile not in already_queued
+                     and tile != self._active_tile]
+            for tile in fresh:
+                self._work_queue.append(
+                    (tile, provider, zoomlevel, custom_build_dir, plan))
+            if fresh and self._eta is not None:
+                planned_keys = [key for (key, _b, _w) in plan]
+                estimates = {
+                    tile: _predict_step_seconds(
+                        tile[0], tile[1],
+                        prediction_features(tile[0], tile[1], provider,
+                                            zoomlevel, custom_build_dir),
+                        planned_keys)
+                    for tile in fresh
+                }
+                self._eta.add_tiles(fresh, estimates, planned_keys)
+        return len(fresh)
 
     def _prepare_in_process_eta(self, tiles, plan, provider, zoomlevel,
                                 custom_build_dir):
@@ -621,8 +754,15 @@ class EngineSession:
         self._eta = None
         self._parallel = None
 
-    def _build_worker(self, todo, provider, zoomlevel, custom_build_dir,
-                      plan):
+    def _build_worker(self):
+        """The in-process run loop: consume the work queue tile by tile.
+
+        Each work item carries its own build arguments and step plan
+        (batches may be enqueued into the live run with different
+        settings).  The queue-empty check and the end-of-run bookkeeping
+        share one lock with :meth:`_enqueue_in_process`, so a batch can
+        never be appended into a run that just decided to finish.
+        """
         # Heavy pipeline imports stay off the caller's startup path.
         import O4_Config_Utils as CFG
         import O4_Vector_Map as VMAP
@@ -639,9 +779,16 @@ class EngineSession:
             "overlays": lambda t: OVL.build_overlay(t.lat, t.lon),
         }
         done = errors = 0
-        for (lat, lon) in todo:
-            if UI.red_flag:
-                break
+        run_completed = False
+        while not UI.red_flag:
+            with self._work_queue_lock:
+                if not self._work_queue:
+                    self._run_finished()
+                    run_completed = True
+                    break
+                (tile_key, provider, zoomlevel, custom_build_dir,
+                 plan) = self._work_queue.popleft()
+            (lat, lon) = tile_key
             if (lat, lon) in self._cancelled_tiles:
                 # Cancelled while queued: never started, reported stopped.
                 self._emit(TileState(lat=lat, lon=lon, state="queued",
@@ -742,7 +889,10 @@ class EngineSession:
                 self._emit(BuildDone(lat=lat, lon=lon, ok=False,
                                      error="exception (see log)"))
         cancelled = bool(UI.red_flag)
-        self._run_finished()
+        if not run_completed:
+            with self._work_queue_lock:
+                self._work_queue.clear()
+                self._run_finished()
         self._emit(RunDone(done_count=done, error_count=errors,
                            cancelled=cancelled))
 
@@ -779,9 +929,7 @@ class EngineSession:
             return
         self._eta_last_emit = now
         finished = sum(
-            1 for t in self._eta.tiles
-            if len(self._eta.finished_steps.get(t, set()))
-            == len(self._eta.plan))
+            1 for t in self._eta.tiles if self._eta.is_tile_finished(t))
         self._emit(RunEta(
             elapsed_seconds=time.time() - self._eta.t0,
             remaining_seconds=self._eta.remaining(),

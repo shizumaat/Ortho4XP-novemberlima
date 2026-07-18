@@ -248,6 +248,72 @@ def covering_regions(bounding_box) -> Optional[list]:
 # ---------------------------------------------------------------------------
 # The build-time entry point
 # ---------------------------------------------------------------------------
+# A pbf file's first blob is its header blob: a four-byte length, then
+# a BlobHeader whose type string "OSMHeader" sits within the first few
+# dozen bytes.  An HTML "not found" page served with HTTP 200 — the
+# live enfield.osm.pbf case, 2026-07-17: the Geofabrik index lists
+# regions whose download address serves a web page — has neither.
+_PBF_MAGIC_PROBE_BYTES = 64
+
+
+def _file_looks_like_pbf(path: str) -> bool:
+    try:
+        with open(path, "rb") as pbf_file:
+            head = pbf_file.read(_PBF_MAGIC_PROBE_BYTES)
+        return b"OSMHeader" in head
+    except OSError:
+        return False
+
+
+def _stored_regions_missing(regions) -> list:
+    """Region ids not usable from the store.
+
+    Absent files are missing; a present file that is not actually pbf
+    data (a poisoned download from before content validation) is
+    DELETED on sight and reported missing, so the wanted/maintenance
+    path can retry and every consumer falls back to Overpass instead
+    of erroring on it forever.
+    """
+    missing = []
+    for (region_id, _url) in regions:
+        path = _region_file(region_id)
+        if not os.path.isfile(path):
+            missing.append(region_id)
+            continue
+        if not _file_looks_like_pbf(path):
+            UI.vprint(
+                1,
+                "      Stored OSM extract", region_id,
+                "is not valid pbf data; removing it.",
+            )
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            missing.append(region_id)
+    return missing
+
+
+def local_extracts_cover(bounding_box) -> bool:
+    """True when every region covering the box is stored locally.
+
+    An OSM request for such a box is served entirely from the local
+    extracts — no Overpass involvement — so callers whose only purpose
+    is sparing the Overpass servers (the parallel-run cache warmer)
+    have nothing to do for it.  Never raises; any failure reads as
+    "not covered".
+    """
+    try:
+        if not extracts_enabled():
+            return False
+        regions = covering_regions(bounding_box)
+        if regions is None:
+            return False
+        return not _stored_regions_missing(regions)
+    except Exception:
+        return False
+
+
 def osm_xml_from_local_extracts(statements, bounding_box,
                                 request_description="") -> Optional[bytes]:
     """OSM XML bytes for the statements, served from local extracts.
@@ -265,10 +331,7 @@ def osm_xml_from_local_extracts(statements, bounding_box,
         regions = covering_regions(bounding_box)
         if regions is None:
             return None
-        missing = [
-            region_id for (region_id, _url) in regions
-            if not os.path.isfile(_region_file(region_id))
-        ]
+        missing = _stored_regions_missing(regions)
         if missing:
             record_wanted_regions(missing)
             UI.vprint(
@@ -348,6 +411,20 @@ def _download_extract(region_id: str, pbf_url: str) -> bool:
                 0,
                 "   OSM regional extract download for", region_id,
                 "stopped with the build; it will retry later.",
+            )
+            return False
+        if not _file_looks_like_pbf(temporary_path):
+            # Some indexed regions answer with an HTML page under HTTP
+            # 200 (no extract published at that address).  Installing
+            # it would poison the store: every later request covering
+            # the region errors on it instead of using Overpass.
+            os.remove(temporary_path)
+            UI.vprint(
+                0,
+                "   The download for OSM regional extract", region_id,
+                "returned something other than pbf data (no extract is"
+                " published at its address); builds in this region use"
+                " Overpass instead.",
             )
             return False
         os.replace(temporary_path, target)

@@ -114,18 +114,17 @@ def test_download_textures_counts_successes(monkeypatch):
     assert convert_queue.qsize() == 2
 
 
-def test_download_textures_raises_workers_when_siblings_finish(monkeypatch):
-    """A parallel-run child spawns throttled by its sibling count; when
-    the parent broadcasts that siblings finished (environment update),
-    the running download queue re-resolves its Auto worker count and
-    adds workers mid-step instead of finishing the whole download at
-    the shared rate (live case: a 17-minute cold ZL18 download at half
-    throughput while its sibling had been done for 16 minutes)."""
+def test_download_textures_full_width_despite_siblings(monkeypatch):
+    """Sibling tiles no longer throttle the download pool (2026-07-17
+    lean-on-the-operating-system ruling): the queue opens at the full
+    Auto width immediately — no mid-step raise machinery — so a cold
+    download never runs at a shared rate (the historic live case: a
+    17-minute ZL18 download at half throughput while its sibling had
+    been done for 16 minutes)."""
     from O4_Parallel_Utils import PARALLEL_SIBLINGS_ENVIRONMENT_KEY
 
     monkeypatch.setenv(PARALLEL_SIBLINGS_ENVIRONMENT_KEY, "2")
     monkeypatch.setattr(TILE, "max_download_slots", 0)  # Auto
-    monkeypatch.setattr(TILE, "DOWNLOAD_WORKER_RECHECK_SECONDS", 0.0)
     monkeypatch.setattr(UI, "red_flag", False)
 
     launches = []
@@ -136,15 +135,8 @@ def test_download_textures_raises_workers_when_siblings_finish(monkeypatch):
         return real_launch(task, task_queue, count, progress)
 
     monkeypatch.setattr(TILE, "parallel_launch", recording_launch)
-
-    def slow_ortho(tile, *attrs):
-        # First texture: the parent's siblings broadcast lands.
-        os.environ[PARALLEL_SIBLINGS_ENVIRONMENT_KEY] = "1"
-        import time as time_module
-        time_module.sleep(0.05)
-        return 1
-
-    monkeypatch.setattr(TILE.IMG, "build_jpeg_ortho", slow_ortho)
+    monkeypatch.setattr(
+        TILE.IMG, "build_jpeg_ortho", lambda tile, *attrs: 1)
 
     download_queue = queue.Queue()
     convert_queue = queue.Queue()
@@ -156,6 +148,5 @@ def test_download_textures_raises_workers_when_siblings_finish(monkeypatch):
 
     assert result == 1
     assert stats == {"done": 6, "failed": 0}
-    # One worker at open (two siblings), a second added mid-step.
-    assert launches[0] == 1
-    assert sum(launches) == 2
+    assert launches == [2], (
+        "the pool must open at full Auto width in one launch")

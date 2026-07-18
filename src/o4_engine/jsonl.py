@@ -154,6 +154,7 @@ def _build_handlers(session: EngineSession) -> Dict[str, Callable]:
     return {
         "scan": session.scan,
         "build": session.build,
+        "enqueue_build": session.enqueue_build,
         "cancel": session.cancel,
         "cancel_tile": session.cancel_tile,
         "siblings": session.set_parallel_siblings,
@@ -373,8 +374,8 @@ def serve(stdin: TextIO, stdout: TextIO, owns_process: bool = False) -> None:
         # transport owns the handshake framing and writes it first.
         write_obj(serialize_event(EngineHello(
             ortho4xp_version=_ortho4xp_version(),
-            capabilities=("scan", "build", "cancel", "tile_info",
-                          "config", "links", "siblings"))))
+            capabilities=("scan", "build", "enqueue_build", "cancel",
+                          "tile_info", "config", "links", "siblings"))))
 
         handlers = _build_handlers(session)
         for raw_line in stdin:
@@ -414,7 +415,8 @@ def serve(stdin: TextIO, stdout: TextIO, owns_process: bool = False) -> None:
             }
             # build's tiles arrive as JSON arrays; the session keys estimate
             # dicts by tile, so they must be hashable tuples again.
-            if command == "build" and "tiles" in arguments:
+            if (command in ("build", "enqueue_build")
+                    and "tiles" in arguments):
                 arguments["tiles"] = [
                     tuple(tile) for tile in arguments["tiles"]
                 ]

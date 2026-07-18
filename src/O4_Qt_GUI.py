@@ -40,7 +40,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSplitter,
-    QStackedWidget,
     QStatusBar,
     QStyle,
     QToolBar,
@@ -421,7 +420,7 @@ class MainWindow(QMainWindow):
         pv = QVBoxLayout(panel)
         pv.setContentsMargins(10, 10, 10, 10)
 
-        self.info_group = QGroupBox("Tile")
+        self.info_group = QGroupBox("Selection")
         ig = QFormLayout(self.info_group)
         # macOS's native form style is FieldsStayAtSizeHint, which
         # gives the Ignored-policy elided labels ZERO width (their size
@@ -464,15 +463,11 @@ class MainWindow(QMainWindow):
         ig.addRow(self.install_check)
         pv.addWidget(self.info_group)
 
+        # The Build box always shows the options: builds no longer take
+        # the panel over (progress lives in the Activity box below), so
+        # more tiles can be selected and queued while a run is going.
         build_group = QGroupBox("Build")
-        bgl = QVBoxLayout(build_group)
-        self.build_stack = QStackedWidget()
-        bgl.addWidget(self.build_stack)
-
-        # Page 0 — build options
-        options_page = QWidget()
-        bg = QVBoxLayout(options_page)
-        bg.setContentsMargins(0, 0, 0, 0)
+        bg = QVBoxLayout(build_group)
         # Two-line elided: the dynamic summary ("N tiles selected ·
         # rough est. …") must never widen the fixed-width panel into
         # clipping, and plain word wrap here would tie its height to
@@ -529,12 +524,12 @@ class MainWindow(QMainWindow):
         self.build_btn = QPushButton("▶ Build")
         self.build_btn.clicked.connect(self.start_build)
         bg.addWidget(self.build_btn)
-        self.build_stack.addWidget(options_page)
 
-        # Page 1 — live per-tile progress (shown while building)
-        progress_page = QWidget()
-        pg = QVBoxLayout(progress_page)
-        pg.setContentsMargins(0, 0, 0, 0)
+        # Activity box — live per-tile progress of the run in progress.
+        # Hidden while idle; a running build shows it WITHOUT hiding the
+        # Build box, so further batches can be queued into the run.
+        self.activity_group = QGroupBox("Activity")
+        pg = QVBoxLayout(self.activity_group)
         self.progress_title = QLabel("")
         # Ignored: the title is rich text (no elision support), so it
         # clips rather than ever widening the fixed-width panel.
@@ -558,9 +553,18 @@ class MainWindow(QMainWindow):
         self.stop_btn = QPushButton("■ Stop")
         self.stop_btn.clicked.connect(self.request_stop)
         pg.addWidget(self.stop_btn)
-        self.build_stack.addWidget(progress_page)
+        self.activity_group.setVisible(False)
 
-        pv.addWidget(build_group, 1)
+        pv.addWidget(build_group)
+        # While visible, the Activity box absorbs ALL free panel height
+        # (its rows scroll internally).  The trailing spacer keeps the
+        # boxes top-aligned while it is hidden — and is zeroed while it
+        # shows (_set_activity_box_visible), otherwise the spacer keeps
+        # its share and the box stops growing with the window.
+        pv.addWidget(self.activity_group, 1)
+        pv.addStretch(1)
+        self._panel_layout = pv
+        self._panel_spacer_index = pv.count() - 1
         self._tile_rows = {}
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(1000)
@@ -982,8 +986,14 @@ class MainWindow(QMainWindow):
                 pass
             self.build_summary.setText(summary_text)
         self.selection_label.setText("%d selected" % n if n else "")
-        self.build_btn.setText("▶ Build %d tile%s" % (n, "s" if n > 1 else "")
-                               if n else "▶ Build")
+        if self._building and n:
+            # A run is in progress: the button appends to it instead.
+            self.build_btn.setText(
+                "＋ Queue %d tile%s" % (n, "s" if n > 1 else ""))
+        else:
+            self.build_btn.setText(
+                "▶ Build %d tile%s" % (n, "s" if n > 1 else "")
+                if n else "▶ Build")
 
     def _active_changed(self, tile):
         self._selection_changed()
@@ -1077,8 +1087,11 @@ class MainWindow(QMainWindow):
                 )
             except OSError:
                 pass
+        # Only a tile that is queued or building RIGHT NOW locks its
+        # install toggle — other tiles stay reviewable during a run.
         self.install_check.setEnabled(
-            can_link and not self._building and not physical
+            can_link and not physical
+            and not self._tile_in_active_run(tile)
         )
         if not can_link:
             self.install_check.setToolTip(
@@ -1335,9 +1348,31 @@ class MainWindow(QMainWindow):
         self.map.set_provider(code)
         self._update_zoom_label()
 
+    def _set_activity_box_visible(self, visible):
+        """Show or hide the Activity box.
+
+        While visible, the panel's idle bottom spacer is zeroed so the
+        box takes every pixel of free height as the window grows;
+        hiding it restores the spacer so the boxes sit top-aligned.
+        """
+        self.activity_group.setVisible(visible)
+        self._panel_layout.setStretch(
+            self._panel_spacer_index, 0 if visible else 1)
+
+    def _tile_in_active_run(self, tile):
+        """True while the tile is queued or building in the current run."""
+        if not self._building:
+            return False
+        state, label, _percent = self._progress_states.get(
+            tile, (None, None, 0))
+        if state is None:
+            return False
+        return (state in ("queued", "active", "indeterminate")
+                and label != "stopped")
+
     def start_build(self):
-        if self._building:
-            return
+        """Build the selected tiles — or queue them into the run in
+        progress (the map and the Build box stay live during builds)."""
         selection = sorted(self.map.selection())
         if not selection:
             self._status("Select at least one tile to build.")
@@ -1374,22 +1409,29 @@ class MainWindow(QMainWindow):
             self._status("Choose at least one build step.")
             return
 
+        if self._building:
+            self._queue_into_running_build(
+                todo, do_vector, do_imagery, do_overlays)
+            return
+
         self._building = True
         self._stop_requested = False
         self.stop_btn.setEnabled(True)
         self.stop_btn.setText("■ Stop")
-        self.install_check.setEnabled(False)
-        self.map.set_locked(True)
         self.map.zoom_to_tiles(todo)
         self._progress_states = {
             t: ("queued", "queued", 0) for t in todo
         }
         self.map.set_progress(self._progress_states)
         self._setup_progress_page(todo)
+        self._update_build_summary()
+        # Re-gate the info panel (install toggle) for the active tile
+        # now that it may be part of the run.
+        self._active_changed(self.map.active_tile())
         if not self.console.isVisible():
             self.toggle_console()
 
-        self._session.build(
+        started = self._session.enqueue_build(
             todo,
             provider=self.imagery_combo.currentText(),
             zoomlevel=int(self.zl_combo.currentText()),
@@ -1398,13 +1440,81 @@ class MainWindow(QMainWindow):
             do_imagery=do_imagery,
             do_overlays=do_overlays,
         )
+        if not started:
+            self._building = False
+            self._elapsed_timer.stop()
+            self._set_activity_box_visible(False)
+            self._update_build_summary()
+            self._status("The build could not be started.")
+
+    def _queue_into_running_build(self, todo, do_vector, do_imagery,
+                                  do_overlays):
+        """Append a batch to the run in progress; it starts as soon as
+        the orchestrator has capacity for it."""
+        fresh = [t for t in todo if not self._tile_in_active_run(t)]
+        if not fresh:
+            self._status(
+                "The selected tiles are already building or queued.")
+            return
+        accepted = self._session.enqueue_build(
+            fresh,
+            provider=self.imagery_combo.currentText(),
+            zoomlevel=int(self.zl_combo.currentText()),
+            custom_build_dir=self.output_dir(),
+            do_vector=do_vector,
+            do_imagery=do_imagery,
+            do_overlays=do_overlays,
+        )
+        if not accepted:
+            self._status(
+                "Could not queue the tiles — the previous run is still "
+                "winding down; try again in a moment."
+            )
+            return
+        for tile in fresh:
+            self._progress_states[tile] = ("queued", "queued", 0)
+        self.map.set_progress(self._progress_states)
+        self._add_progress_rows(fresh)
+        self._ntiles += len(fresh)
+        self.progress_title.setText(
+            "<b>Building %d tile%s</b>"
+            % (self._ntiles, "s" if self._ntiles > 1 else "")
+        )
+        self._status(
+            "Queued %d tile%s into the running build."
+            % (len(fresh), "s" if len(fresh) > 1 else "")
+        )
+        self._active_changed(self.map.active_tile())
 
     def _setup_progress_page(self, todo):
-        """Morph the Build box into the per-tile progress list."""
+        """Reset the Activity box to a fresh run's per-tile rows."""
         for bar, status, row, cancel in self._tile_rows.values():
             row.deleteLater()
         self._tile_rows = {}
-        for tile in todo:
+        self._add_progress_rows(todo)
+        self._done_count = 0
+        self._ntiles = len(todo)
+        self._build_t0 = __import__("time").time()
+        self.progress_title.setText(
+            "<b>Building %d tile%s</b>"
+            % (len(todo), "s" if len(todo) > 1 else "")
+        )
+        self.elapsed_label.setText("Elapsed 0 s")
+        self.eta_label.setText("Remaining —")
+        self._elapsed_timer.start()
+        self._set_activity_box_visible(True)
+
+    def _add_progress_rows(self, tiles):
+        """Create Activity rows for tiles that lack one; reset (to
+        "queued") the row of a finished tile being built again."""
+        for tile in tiles:
+            if tile in self._tile_rows:
+                bar, status, _row, cancel = self._tile_rows[tile]
+                bar.setValue(0)
+                status.setText("queued")
+                status.setStyleSheet("color: gray; font-size: 11px;")
+                cancel.setEnabled(True)
+                continue
             row = QWidget()
             rl = QVBoxLayout(row)
             rl.setContentsMargins(6, 4, 6, 4)
@@ -1439,17 +1549,6 @@ class MainWindow(QMainWindow):
                 self._rows_layout.count() - 1, row
             )
             self._tile_rows[tile] = (bar, status, row, cancel)
-        self._done_count = 0
-        self._ntiles = len(todo)
-        self._build_t0 = __import__("time").time()
-        self.progress_title.setText(
-            "<b>Building %d tile%s</b>"
-            % (len(todo), "s" if len(todo) > 1 else "")
-        )
-        self.elapsed_label.setText("Elapsed 0 s")
-        self.eta_label.setText("Remaining —")
-        self._elapsed_timer.start()
-        self.build_stack.setCurrentIndex(1)
 
     def _on_step_progress(self, event):
         tile = (event.lat, event.lon)
@@ -1526,7 +1625,6 @@ class MainWindow(QMainWindow):
         self._elapsed_timer.stop()
         self.stop_btn.setEnabled(False)
         self.stop_btn.setText("■ Stop")
-        self.map.set_locked(False)
         self.setWindowTitle("Ortho4XP " + O4_Version.version)
         summary = "Build finished: %d ok, %d failed." % (done, errors)
         if self._stop_requested:
@@ -1535,10 +1633,16 @@ class MainWindow(QMainWindow):
         self._status(summary)
         self.progress_title.setText("<b>%s</b>" % summary)
         UI.is_working = False
+        self._update_build_summary()
 
         def revert():
+            # A new run may have started inside the linger window; its
+            # Activity display must not be torn down under it.
+            if self._building:
+                return
             self.map.set_progress({})
-            self.build_stack.setCurrentIndex(0)
+            self._progress_states = {}
+            self._set_activity_box_visible(False)
             self._selection_changed()
 
         QTimer.singleShot(5000, revert)

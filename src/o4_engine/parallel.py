@@ -7,15 +7,17 @@ existing JSON-lines engine transport (``Ortho4XP.py --engine-jsonl``).
 
 The parent dispatches ONE STEP AT A TIME (spec §3.8): every ``build``
 command a child receives selects a single step key, so the parent knows
-and controls each tile's phase.  Steps belong to resource classes —
-"network" (vector, imagery) and "compute" (mesh, masks, overlays) —
-with per-class concurrency caps, so a forty-tile queue can never
-stampede the OpenStreetMap or imagery servers and never crunches more
-meshes at once than the machine should hold.  A child whose next step's
-class is full waits idle (a between-steps child holds almost nothing —
-the pipeline communicates through files).  When capacity frees, blocked
-children are dispatched finish-first (later steps before earlier ones,
-work in progress drains before new tiles enter).
+and controls each tile's phase.  Steps belong to resource classes; the
+two NETWORK classes ("osm" for vector, "imagery") carry concurrency
+caps so a forty-tile queue can never stampede the OpenStreetMap or
+imagery servers, and the memory admission gate keeps concurrent mesh
+steps within the machine's budget.  Compute concurrency is otherwise
+uncapped — processor arbitration is the operating system's job
+(2026-07-17 owner ruling).  A child whose next step's class is full
+waits idle (a between-steps child holds almost nothing — the pipeline
+communicates through files).  When capacity frees, blocked children
+are dispatched finish-first (later steps before earlier ones, work in
+progress drains before new tiles enter).
 
 Children are reused across steps and tiles (one interpreter start-up
 per slot), except after a mid-step cancel, where the child is retired
@@ -53,7 +55,7 @@ from .session import (
 )
 
 
-def estimate_remaining_wall_seconds(estimates, program, queued_tiles,
+def estimate_remaining_wall_seconds(estimates, programs, queued_tiles,
                                     next_step_index, in_flight_steps,
                                     now, slots):
     """Advisory wall-clock remaining estimate for a parallel run.
@@ -69,7 +71,9 @@ def estimate_remaining_wall_seconds(estimates, program, queued_tiles,
     there was previously an honest dash.  Returns ``None`` when no
     work remains.
 
-    ``estimates``: ``{tile: {step: seconds}}``; ``next_step_index``:
+    ``estimates``: ``{tile: {step: seconds}}``; ``programs``:
+    ``{tile: ordered step keys}`` (batches enqueued into a live run may
+    select different steps); ``next_step_index``:
     ``{tile: index of the running-or-next step}``; ``in_flight_steps``:
     ``{(tile, step): started_at}``.
     """
@@ -84,13 +88,13 @@ def estimate_remaining_wall_seconds(estimates, program, queued_tiles,
 
     for tile in queued_tiles:
         tiles_with_work += 1
-        for key in program:
+        for key in programs.get(tile, ()):
             estimate = step_estimate(tile, key)
             if estimate is not None:
                 total_work += estimate
     for tile, index in next_step_index.items():
         tiles_with_work += 1
-        for position, key in enumerate(program):
+        for position, key in enumerate(programs.get(tile, ())):
             if position < index:
                 continue
             estimate = step_estimate(tile, key)
@@ -116,8 +120,11 @@ HANDSHAKE_TIMEOUT_SECONDS = 30.0
 # classes are SEPARATE because they exhaust separate servers — a tile
 # downloading OpenStreetMap data must not steal budget from the imagery
 # phase, which dominates total build time (the goal is minimal makespan
-# for the whole queue).  The compute cap leaves one slot's worth of
-# headroom so a network phase is always feedable.
+# for the whole queue).  Compute steps are UNCAPPED (the class exists
+# only for bookkeeping): the 2026-07-17 owner ruling leaves processor
+# arbitration to the operating system — the caps that remain guard
+# REMOTE SERVERS, plus the mesh memory admission gate below for the
+# one machine cliff the operating system handles badly.
 STEP_CLASSES = {
     "vector": "osm",
     "imagery": "imagery",
@@ -134,7 +141,7 @@ def class_limits(slots):
     return {
         "osm": min(OSM_CLASS_LIMIT, slots),
         "imagery": min(IMAGERY_CLASS_LIMIT, slots),
-        "compute": max(1, slots - 1),
+        "compute": slots,
     }
 
 
@@ -318,13 +325,19 @@ class _WorkerChild:
             return False
 
     def start_step(self, step_key, build_arguments):
-        """Send one single-step build command for this child's tile."""
+        """Send one single-step build command for this child's tile.
+
+        ``slots=1`` is explicit: a worker child must run its step
+        in-process, never orchestrate worker grandchildren of its own,
+        whatever its own configuration would resolve to.
+        """
         self.running_step = step_key
         return self.send(dict(
             build_arguments,
             cmd="build",
             tiles=[[self.tile[0], self.tile[1]]],
             steps=[step_key],
+            slots=1,
         ))
 
     def retire(self):
@@ -380,23 +393,17 @@ class ParallelBuildRun:
 
     def __init__(self, session, tiles, provider, zoomlevel,
                  custom_build_dir, step_flags, slots):
-        do_vector, do_imagery, do_overlays = step_flags
         self._session = session
-        self._queue = deque(tiles)
-        self._total = len(tiles)
+        self._queue = deque()
+        self._total = 0
         self._slots = slots
-        self._build_arguments = {
-            "provider": provider,
-            "zoomlevel": zoomlevel,
-            "custom_build_dir": custom_build_dir,
-        }
-        # The step program every tile walks, and each step's window in
-        # the whole-tile percent scale (for StepProgress remapping).
-        full_plan = plan_steps(do_vector, do_imagery, do_overlays)
-        self._program = [key for (key, _base, _width) in full_plan]
-        self._step_windows = {
-            key: (base, width) for (key, base, width) in full_plan
-        }
+        # Per-tile build state: a batch enqueued into a LIVE run may
+        # carry different build arguments (imagery source, zoom level,
+        # output folder, step selection) than the batch that started it,
+        # so everything the dispatcher needs is keyed by tile.
+        self._tile_arguments: dict = {}   # tile -> child build kwargs
+        self._programs: dict = {}         # tile -> ordered step keys
+        self._static_windows: dict = {}   # tile -> {step: (base, width)}
         # Learned per-tile step estimates (tile_time_model): drive the
         # run clock (spec §3.3 upgraded from the honest dash) and
         # re-scale each tile's percent windows to predicted seconds.
@@ -405,22 +412,6 @@ class ParallelBuildRun:
         self._estimates: dict = {}
         self._tile_step_windows: dict = {}
         self._step_started_at: dict = {}      # (tile, step) -> monotonic t
-        try:
-            for tile in tiles:
-                features = prediction_features(
-                    tile[0], tile[1], provider, zoomlevel,
-                    custom_build_dir)
-                estimates = _predict_step_seconds(
-                    tile[0], tile[1], features, self._program)
-                self._estimates[tile] = estimates
-                self._tile_step_windows[tile] = {
-                    key: (base, width)
-                    for (key, base, width) in reweight_plan_by_seconds(
-                        full_plan, estimates)
-                }
-        except Exception:
-            self._estimates = {}
-            self._tile_step_windows = {}
         self._class_limits = class_limits(slots)
         self._class_active = {name: 0 for name in self._class_limits}
         self._next_step_index: dict = {}
@@ -431,8 +422,7 @@ class ParallelBuildRun:
         # Memory-aware mesh admission (spec §3.8): per-tile estimates
         # from each tile's configured elevation detail level, admitted
         # against the machine's budget (at least one mesh always runs).
-        self._mesh_memory_estimates = self._estimate_mesh_memory(
-            tiles, custom_build_dir)
+        self._mesh_memory_estimates: dict = {}
         self._mesh_memory_budget = mesh_memory_budget_gigabytes()
         self._mesh_memory_in_use = 0.0
         self._meshing_tiles: set = set()
@@ -446,15 +436,72 @@ class ParallelBuildRun:
         self._t0 = time.time()
         # OpenStreetMap cache warmer state (spec §3.7): the tile whose
         # caches are being downloaded right now (assignment waits for
-        # it), and the tiles already warmed.
+        # it), the tiles already warmed, and whether the warmer thread
+        # is alive (an enqueue may need to revive it).
         self._warming_tile = None
         self._warmed_tiles: set = set()
+        self._warmer_running = False
         # Per-tile progress high-water marks: the legacy in-step bars
         # oscillate within a step (they refill per OpenStreetMap layer,
         # per download phase, ...), which the historic single-bar view
         # hid but a per-tile bar shows as jumping.  The forwarder
         # ratchets: a tile's displayed percent only ever advances.
         self._percent_high_water: dict = {}
+        with self._lock:
+            self._admit_batch_locked(tiles, provider, zoomlevel,
+                                     custom_build_dir, step_flags)
+
+    def _admit_batch_locked(self, tiles, provider, zoomlevel,
+                            custom_build_dir, step_flags):
+        """Register a batch of tiles with the run (caller holds the lock).
+
+        Tiles already part of the run (queued or on a child) are skipped
+        — re-queueing a tile that already FINISHED is allowed and treats
+        it as new work.  Returns the tiles actually admitted, already
+        appended to the queue.
+        """
+        do_vector, do_imagery, do_overlays = step_flags
+        full_plan = plan_steps(do_vector, do_imagery, do_overlays)
+        program = [key for (key, _base, _width) in full_plan]
+        if not program:
+            return []
+        admitted = []
+        for tile in tiles:
+            if (tile in self._queue or tile in self._next_step_index
+                    or any(child.tile == tile
+                           for child in self._children)):
+                continue
+            admitted.append(tile)
+            self._tile_arguments[tile] = {
+                "provider": provider,
+                "zoomlevel": zoomlevel,
+                "custom_build_dir": custom_build_dir,
+            }
+            self._programs[tile] = list(program)
+            self._static_windows[tile] = {
+                key: (base, width) for (key, base, width) in full_plan
+            }
+            try:
+                features = prediction_features(
+                    tile[0], tile[1], provider, zoomlevel,
+                    custom_build_dir)
+                estimates = _predict_step_seconds(
+                    tile[0], tile[1], features, program)
+                self._estimates[tile] = estimates
+                self._tile_step_windows[tile] = {
+                    key: (base, width)
+                    for (key, base, width) in reweight_plan_by_seconds(
+                        full_plan, estimates)
+                }
+            except Exception:
+                self._estimates.pop(tile, None)
+                self._tile_step_windows.pop(tile, None)
+            self._mesh_memory_estimates[tile] = (
+                self._estimate_mesh_memory(tile, custom_build_dir))
+            self._percent_high_water.pop(tile, None)
+            self._queue.append(tile)
+        self._total += len(admitted)
+        return admitted
 
     # -- lifecycle -----------------------------------------------------
     def start(self):
@@ -465,13 +512,19 @@ class ParallelBuildRun:
         to the in-process worker (spec §3.2).  Later spawn failures just
         shrink the pool.
         """
-        if not self._program:
+        # Spawn one child per tile up to the slot cap — never more
+        # children than there is work (the cap itself may exceed the
+        # starting batch: enqueue grows the pool later).
+        with self._lock:
+            wanted_children = min(self._slots, len(self._queue))
+        if not wanted_children:
             return False
         first = self._spawn_child()
         if first is None:
             return False
-        for _ in range(self._slots - 1):
+        for _ in range(wanted_children - 1):
             if not self._queue:
+                # A cancel during the handshake window drained the queue.
                 break
             if self._spawn_child() is None:
                 print("Fewer build workers than requested could be "
@@ -479,12 +532,64 @@ class ParallelBuildRun:
                 break
         with self._lock:
             self._dispatch_locked()
+            self._warmer_running = True
         threading.Thread(target=self._osm_cache_warmer, daemon=True).start()
         threading.Thread(target=self._ticker, daemon=True).start()
+        # Children spawned believing `slots` siblings share the machine;
+        # tell them the real count right away (a two-tile run on four
+        # slots must not throttle itself for two ghosts).
+        self._broadcast_sibling_count()
         # A cancel that landed during the handshake window may have
         # drained the queue already; settle immediately in that case.
         self._maybe_finish()
         return True
+
+    def enqueue(self, tiles, provider, zoomlevel, custom_build_dir,
+                step_flags):
+        """Append a batch of tiles to the LIVE run.
+
+        The batch keeps its own build arguments and step selection —
+        per-tile state throughout the dispatcher makes mixed batches
+        first-class.  Idle children pick the new tiles up immediately;
+        if the pool has shrunk (crashed or retired-after-cancel
+        children), replacements are spawned off-thread up to the slot
+        count.  Returns the number of tiles actually admitted: 0 when
+        the run is finishing or cancelled (the caller should start a
+        fresh run instead) or when every tile is already part of it.
+        """
+        with self._lock:
+            if self._finished or self._cancel_all:
+                return 0
+            admitted = self._admit_batch_locked(
+                tiles, provider, zoomlevel, custom_build_dir, step_flags)
+            if not admitted:
+                return 0
+            self._dispatch_locked()
+            alive = [child for child in self._children
+                     if not child.retired]
+            missing = max(0, min(self._slots - len(alive),
+                                 len(self._queue)))
+            revive_warmer = not self._warmer_running
+            if revive_warmer:
+                self._warmer_running = True
+
+        def _grow_pool_and_dispatch():
+            for _ in range(missing):
+                if self._spawn_child() is None:
+                    break
+            with self._lock:
+                self._dispatch_locked()
+            self._broadcast_sibling_count()
+
+        # Spawning blocks on the worker handshake — never on the
+        # caller's (GUI) thread.
+        threading.Thread(target=_grow_pool_and_dispatch,
+                         daemon=True).start()
+        if revive_warmer:
+            threading.Thread(target=self._osm_cache_warmer,
+                             daemon=True).start()
+        self._broadcast_sibling_count()
+        return len(admitted)
 
     def _spawn_child(self):
         """Spawn one worker (blocks on the handshake; never called while
@@ -522,31 +627,28 @@ class ParallelBuildRun:
                 self._start_new_tile_locked(child)
 
     @staticmethod
-    def _estimate_mesh_memory(tiles, custom_build_dir):
-        """Per-tile mesh memory estimates from the tiles' configurations.
+    def _estimate_mesh_memory(tile, custom_build_dir):
+        """One tile's mesh memory estimate from its configuration.
 
-        Reads each tile's ``elevation_level`` (per-tile config file, or
+        Reads the tile's ``elevation_level`` (per-tile config file, or
         the default when absent); any failure degrades to the default
         estimate — scheduling must never fail on a config hiccup.
         """
-        estimates = {}
-        for tile in tiles:
-            level_value = None
-            try:
-                import O4_Settings_Model as SETTINGS_MODEL
+        level_value = None
+        try:
+            import O4_Settings_Model as SETTINGS_MODEL
 
-                raw = SETTINGS_MODEL.read_tile_raw(
-                    tile[0], tile[1], custom_build_dir)
-                level_value = (raw or {}).get("elevation_level")
-                if level_value is None:
-                    # Sparse tile configs (blended model) omit inherited
-                    # settings: the tile builds with the GLOBAL value.
-                    level_value = SETTINGS_MODEL.global_effective_value(
-                        "elevation_level")
-            except Exception:
-                level_value = None
-            estimates[tile] = mesh_memory_estimate_gigabytes(level_value)
-        return estimates
+            raw = SETTINGS_MODEL.read_tile_raw(
+                tile[0], tile[1], custom_build_dir)
+            level_value = (raw or {}).get("elevation_level")
+            if level_value is None:
+                # Sparse tile configs (blended model) omit inherited
+                # settings: the tile builds with the GLOBAL value.
+                level_value = SETTINGS_MODEL.global_effective_value(
+                    "elevation_level")
+        except Exception:
+            level_value = None
+        return mesh_memory_estimate_gigabytes(level_value)
 
     def _mesh_memory_admits_locked(self, tile):
         """True when the tile's mesh step fits the memory budget now.
@@ -566,14 +668,14 @@ class ParallelBuildRun:
         """Dispatch the child's tile's next step if its class has room
         (and, for mesh steps, the memory budget admits it)."""
         step_index = self._next_step_index.get(child.tile, 0)
-        step_key = self._program[step_index]
+        step_key = self._programs[child.tile][step_index]
         step_class = STEP_CLASSES.get(step_key, "compute")
         if self._class_active[step_class] >= self._class_limits[step_class]:
             return False
         if step_key == "mesh" and not self._mesh_memory_admits_locked(
                 child.tile):
             return False
-        if child.start_step(step_key, self._build_arguments):
+        if child.start_step(step_key, self._tile_arguments[child.tile]):
             self._step_started_at[(child.tile, step_key)] = time.time()
             self._class_active[step_class] += 1
             if step_key == "mesh":
@@ -606,15 +708,22 @@ class ParallelBuildRun:
         A tile whose OpenStreetMap caches are being warmed RIGHT NOW is
         skipped (never assigned mid-warm — the no-race guarantee of spec
         §3.7); the warmer re-dispatches the moment it finishes a tile.
+        A tile whose FIRST step's class is full is also skipped in favour
+        of a later queued tile whose first step has room (mixed-batch
+        programs may lead with different classes).
         """
-        tile = next(
-            (t for t in self._queue if t != self._warming_tile), None
-        )
+        tile = None
+        for candidate in self._queue:
+            if candidate == self._warming_tile:
+                continue
+            first_class = STEP_CLASSES.get(
+                self._programs[candidate][0], "compute")
+            if (self._class_active[first_class]
+                    >= self._class_limits[first_class]):
+                continue
+            tile = candidate
+            break
         if tile is None:
-            return False
-        first_class = STEP_CLASSES.get(self._program[0], "compute")
-        if self._class_active[first_class] >= self._class_limits[
-                first_class]:
             return False
         self._queue.remove(tile)
         child.tile = tile
@@ -719,7 +828,8 @@ class ParallelBuildRun:
             return
         tile = child.tile
         step_index = self._next_step_index.get(tile, 0)
-        last_step = step_index >= len(self._program) - 1
+        program = self._programs.get(tile, ())
+        last_step = step_index >= len(program) - 1
         if event_name == "BuildDone":
             if event.ok and not last_step:
                 # Intermediate step completion: a scheduling signal, not
@@ -741,9 +851,9 @@ class ParallelBuildRun:
             # legacy bars oscillate within a step, and a per-tile bar
             # must fill smoothly, never slide back (each tile has one
             # child, so the per-key update is single-writer).
-            base, width = self._tile_step_windows.get(
-                tile, self._step_windows).get(
-                event.step_key, (0.0, 1.0))
+            windows = (self._tile_step_windows.get(tile)
+                       or self._static_windows.get(tile) or {})
+            base, width = windows.get(event.step_key, (0.0, 1.0))
             remapped = min(
                 100.0, (base + width * event.percent / 100.0) * 100.0)
             remapped = max(
@@ -777,7 +887,8 @@ class ParallelBuildRun:
             elif child.tile is not None:
                 self._next_step_index[child.tile] = (
                     self._next_step_index.get(child.tile, 0) + 1)
-                if self._next_step_index[child.tile] >= len(self._program):
+                if (self._next_step_index[child.tile]
+                        >= len(self._programs.get(child.tile, ()))):
                     # Tile complete (its final BuildDone was forwarded).
                     self._next_step_index.pop(child.tile, None)
                     self._percent_high_water.pop(child.tile, None)
@@ -794,19 +905,23 @@ class ParallelBuildRun:
     def _broadcast_sibling_count(self):
         """Tell surviving children how many siblings still hold work.
 
-        Children spawn with the slot count in their environment and
-        use it to share the machine (download slots above all).  That
-        static count over-throttles survivors once siblings finish:
-        live case — a two-tile run where one tile's imagery was fully
-        cached and done in seconds while the other spent a 17-minute
-        cold download at HALF throughput, sharing with a ghost.  The
-        child updates its environment (set_parallel_siblings) and the
-        download engine re-reads it mid-step to raise its workers.
+        Since the 2026-07-17 lean-on-the-operating-system ruling,
+        processor-bound pools no longer divide by this count — its one
+        remaining consumer is the network fetchers that hit small
+        remote hosts (the bathymetry cell fetch), which re-read it from
+        the environment (set_parallel_siblings) at their next step.
+
+        The count is the children actively HOLDING tiles (measured
+        after dispatch, so a freed slot the queue instantly refills
+        never reads as spare capacity).  Queued tiles do not count —
+        they consume nothing until a child picks them up; counting them
+        (the pre-2026-07-17 formula) told every child in a deep-queue
+        run that the whole queue was concurrent.
         """
         with self._lock:
             holders = [child for child in self._children
                        if child.tile is not None and not child.retired]
-            count = max(1, len(holders) + len(self._queue))
+            count = max(1, len(holders))
             if count == self._sibling_broadcast:
                 return
             self._sibling_broadcast = count
@@ -848,6 +963,16 @@ class ParallelBuildRun:
 
     # -- OpenStreetMap cache warmer (spec §3.7) ---------------------------
     def _osm_cache_warmer(self):
+        """Warmer thread body: run the warm loop, then mark the thread
+        dead so a later enqueue knows to revive it (the loop returns
+        the moment no unwarmed queued tiles remain)."""
+        try:
+            self._warm_queued_tiles()
+        finally:
+            with self._lock:
+                self._warmer_running = False
+
+    def _warm_queued_tiles(self):
         """Pre-download queued tiles' OpenStreetMap layer caches.
 
         One tile at a time, one Overpass request at a time — combined
@@ -872,6 +997,10 @@ class ParallelBuildRun:
         except Exception as error:
             print("OpenStreetMap cache warmer unavailable:", error)
             return
+        try:
+            import O4_OSM_Extracts as EXTRACTS
+        except Exception:
+            EXTRACTS = None
         while True:
             with self._lock:
                 if self._finished or self._cancel_all:
@@ -883,10 +1012,38 @@ class ParallelBuildRun:
                 if tile is None:
                     return
                 self._warming_tile = tile
+            # The warmer exists to spare the OVERPASS servers.  A tile
+            # fully covered by locally stored regional extracts never
+            # touches Overpass — and warming it would run country-sized
+            # pbf scans INSIDE the front-end process, starving the
+            # interface through the interpreter lock (the 2026-07-17
+            # live "build appears hung": the interface sat at 100 %
+            # processor parsing great-britain.osm.pbf while the worker
+            # children built fine).  Its worker child filters the same
+            # extracts in its OWN process instead.
+            locally_covered = False
+            if EXTRACTS is not None:
+                try:
+                    locally_covered = EXTRACTS.local_extracts_cover(
+                        (tile[0], tile[1], tile[0] + 1, tile[1] + 1))
+                except Exception:
+                    locally_covered = False
+            if locally_covered:
+                print("[warm]", _short_latlon(tile),
+                      "is covered by local OpenStreetMap extracts;"
+                      " its build filters them directly.")
+                with self._lock:
+                    self._warming_tile = None
+                    self._warmed_tiles.add(tile)
+                    self._dispatch_locked()
+                self._maybe_finish()
+                continue
             try:
+                with self._lock:
+                    tile_build_dir = self._tile_arguments.get(
+                        tile, {}).get("custom_build_dir", "")
                 tile_configuration = CFG.Tile(
-                    tile[0], tile[1],
-                    self._build_arguments["custom_build_dir"])
+                    tile[0], tile[1], tile_build_dir)
                 tile_configuration.read_from_config()
                 specifications = VMAP.osm_layer_warm_specifications(
                     tile_configuration)
@@ -940,6 +1097,13 @@ class ParallelBuildRun:
             children = list(self._children)
             done, errors = self._done, self._errors
             cancelled = self._cancel_all
+        # The session leaves its "building" state BEFORE the bounded
+        # child reaping below: a Build click landing the moment the last
+        # tile finishes must start a fresh run immediately, not wait out
+        # slow-exiting workers.
+        self._session._run_finished()
+        self._session._emit(RunDone(done_count=done, error_count=errors,
+                                    cancelled=cancelled))
         for child in children:
             child.retire()
         deadline = time.time() + 5.0
@@ -948,9 +1112,6 @@ class ParallelBuildRun:
                 child.process.wait(timeout=max(0.1, deadline - time.time()))
             except Exception:
                 child.terminate()
-        self._session._run_finished()
-        self._session._emit(RunDone(done_count=done, error_count=errors,
-                                    cancelled=cancelled))
 
     def _ticker(self):
         """Run-level clock: elapsed + the learned remaining estimate
@@ -963,10 +1124,12 @@ class ParallelBuildRun:
                 queued_tiles = list(self._queue)
                 next_step_index = dict(self._next_step_index)
                 in_flight_steps = dict(self._step_started_at)
+                programs = dict(self._programs)
+                total = self._total
             remaining = None
             try:
                 remaining = estimate_remaining_wall_seconds(
-                    self._estimates, self._program, queued_tiles,
+                    self._estimates, programs, queued_tiles,
                     next_step_index, in_flight_steps, time.time(),
                     self._slots)
             except Exception:
@@ -975,5 +1138,5 @@ class ParallelBuildRun:
                 elapsed_seconds=time.time() - self._t0,
                 remaining_seconds=remaining,
                 done_tiles=completed,
-                total_tiles=self._total))
+                total_tiles=total))
             time.sleep(1.0)

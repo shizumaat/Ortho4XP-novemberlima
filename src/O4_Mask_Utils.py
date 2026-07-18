@@ -62,7 +62,9 @@ SHALLOW_WATER_CACHE_SCHEMA = "margin-0.5"
 BATHYMETRY_COVERAGE_FADE_M = 150.0
 # Mask workers spend nearly all their time in GIL-releasing numpy/scipy/PIL
 # calls (profiled 2026-07-15), so threads scale with cores; capped to keep
-# the per-worker image working set (a few hundred MB) in check.
+# the per-worker image working set (a few hundred MB) in check.  Full width
+# even under concurrent tile builds (2026-07-17 ruling: the operating
+# system arbitrates processor contention).
 masks_build_slots = max(2, min(12, (os.cpu_count() or 4) - 2))
 
 ################################################################################
@@ -297,12 +299,15 @@ def build_masks(tile, for_imagery=False):
         
         blured_mask = blur_mask(pre_mask, tile, sea_level)
 
-        # Ensure land is kept to 255 on the mask to avoid unecessary ones, crop 
-        # to final size, and take the max with the possible custom extent mask
-        blured_mask = numpy.maximum(
-            (pre_mask > 0).astype(numpy.uint8) * 255, 
-            blured_mask
-        )[1024 : 4096 + 1024, 1024 : 4096 + 1024]
+        # Land back to full 255, inland water feathered from the shore
+        # down to its constant grey, sea keeping the blur fade; cropped
+        # to final size (custom extent mask maxed in below).
+        feather_pixels = int(
+            float(getattr(tile, "inland_shore_feather_m", 120.0))
+            / GEO.webmercator_pixel_size(tile.lat + 0.5, tile.mask_zl)
+        )
+        blured_mask = compose_water_mask(
+            pre_mask, blured_mask, sea_level, feather_pixels)
         
         if custom_extent_code:
             blured_mask = numpy.maximum(blured_mask, custom_array)
@@ -880,6 +885,55 @@ def build_custom_pre_mask(til_x, til_y, sea_level, tile, extent_code):
 
     return custom_mask_array
 ################################################################################
+
+################################################################################
+def compose_water_mask(pre_mask, blured_full, sea_level, feather_pixels,
+                       crop_margin=1024):
+    """Final mask from the pre-mask classes and the blurred fade.
+
+    * LAND pixels (255 in the pre-mask) return to full opacity — the
+      blur must never thin them.
+    * SEA pixels (0) keep the blurred distance fade untouched.
+    * INLAND-water pixels (the ``sea_level`` grey) get the SHORE
+      FEATHER (2026-07-17): opaque at the land shoreline, easing down
+      to the constant inland grey over ``feather_pixels``, and FLOORED
+      at that grey — the fade can approach the water look but never
+      continue toward deep-water transparency inside mapped water.
+      The feather profile mirrors sand mode (triangular blur of the
+      land indicator, doubled and clipped), so an inland shore reads
+      like a narrow beach fade that settles at the ``ratio_water``
+      blend instead of at open water.  ``feather_pixels <= 0`` keeps
+      the historic hard clamp.
+
+    ``pre_mask`` and ``blured_full`` are full pre-mask geometry
+    (``crop_margin`` on each side); the returned array is cropped.
+    """
+    crop = slice(crop_margin, pre_mask.shape[0] - crop_margin)
+    land_full = pre_mask == 255
+    composed = numpy.maximum(
+        land_full[crop, crop].astype(numpy.uint8) * 255,
+        blured_full[crop, crop],
+    )
+    inland = ((pre_mask > 0) & ~land_full)[crop, crop]
+    if not inland.any():
+        return composed
+    grey = int(sea_level)
+    if feather_pixels <= 0 or grey >= 255:
+        composed[inland] = 255
+        return composed
+    shore_ramp = triangular_blur_along_axis(
+        land_full.astype(numpy.uint8) * 255, feather_pixels, axis=1)
+    shore_ramp = triangular_blur_along_axis(
+        shore_ramp, feather_pixels, axis=0)
+    shore_ramp = (
+        2 * numpy.minimum(shore_ramp[crop, crop], 127)
+    ).astype(numpy.uint16)
+    feathered = (
+        grey + ((255 - grey) * shore_ramp[inland]) // 255
+    ).astype(numpy.uint8)
+    composed[inland] = numpy.maximum(feathered, grey)
+    return composed
+
 
 ################################################################################
 def water_type_is_inland(water_bits):

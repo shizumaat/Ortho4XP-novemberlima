@@ -273,7 +273,12 @@ def create_terrain_file(
     tri_type,
     is_overlay,
     fade_mask_name=None,
+    mask_border=False,
 ):
+    """``mask_border`` (inland water only): reference the tile mask as
+    the BORDER_TEX instead of the constant ``water_transition`` blend —
+    the inland shore feather (mask floored at the ``ratio_water`` grey)
+    then softens shorelines exactly like the masked sea overlay."""
 
     if not os.path.exists(os.path.join(tile.build_dir, "terrain")):
         os.makedirs(os.path.join(tile.build_dir, "terrain"))
@@ -326,7 +331,7 @@ def create_terrain_file(
         elif tri_type in (1, 2) and (not is_overlay):  # XP12 water
             #pass
             f.write("WATER_COLOR_MASK\n")
-        elif (tri_type == 1) or (
+        elif (tri_type == 1 and not mask_border) or (
             (tri_type == 2) and (is_overlay == "ratio_water")
         ):  # constant transparency level
             f.write("BORDER_TEX ../textures/water_transition.png\n")
@@ -337,8 +342,8 @@ def create_terrain_file(
                     os.path.join(FNAMES.Utils_dir, "water_transition.png"),
                     os.path.join(tile.build_dir, "textures"),
                 )
-        elif (tri_type == 2) and (not tile.imprint_masks_to_dds):  
-            # border_tex mask
+        elif (tri_type in (1, 2)) and (not tile.imprint_masks_to_dds):
+            # border_tex mask (sea overlay, or feathered inland shore)
             f.write(
                 "LOAD_CENTER_BORDER "
                 + "{:.5f}".format(lat_med)
@@ -898,6 +903,10 @@ def build_dsf(tile, download_queue):
     ##########################
     dico_terrains = {}
     overlay_terrains = set()
+    # Inland-water terrains whose .ter references the tile mask (the
+    # inland shore feather) instead of the constant water_transition:
+    # their vertices carry the 9-plane sea-overlay layout below.
+    masked_inland_terrains = set()
     treated_textures = set()
     # Cold/warm telemetry for the tile time model: how many of the
     # distinct textures this DSF references were actually queued for
@@ -1524,6 +1533,26 @@ def build_dsf(tile, download_queue):
             is_overlay = tri_type == 1
             if is_overlay:
                 overlay_terrains.add(terrain_idx)
+            # Inland shore feather: when the masks step built a mask for
+            # this texture (inland water near the sea), the inland
+            # overlay blends through it — soft shorelines, floored at
+            # the ratio_water grey by the mask itself.  Far-inland
+            # squares have no mask and keep the constant blend.
+            inland_mask_border = False
+            if (
+                tri_type == 1
+                and not tile.imprint_masks_to_dds
+            ):
+                inland_mask_image = MASK.needs_mask(
+                    tile, *texture_attributes)
+                if inland_mask_image:
+                    inland_mask_image.save(os.path.join(
+                        tile.build_dir,
+                        "textures",
+                        FNAMES.mask_file(*texture_attributes),
+                    ))
+                    inland_mask_border = True
+                    masked_inland_terrains.add(terrain_idx)
             texture_file_name = FNAMES.dds_file_name_from_attributes(
                 *texture_attributes
             )
@@ -1551,7 +1580,8 @@ def build_dsf(tile, download_queue):
                 texture_file_name,
                 *texture_attributes,
                 tri_type,
-                is_overlay
+                is_overlay,
+                mask_border=inland_mask_border,
             )
             bTERT += bytes("terrain/" + terrain_file_name + "\0", "ascii")
         # We put the tri in the right terrain
@@ -1582,7 +1612,23 @@ def build_dsf(tile, download_queue):
                     dsf_pools[idx_dsfpool].extend(
                         (int(round(s * 65535)), int(round(t * 65535)))
                     )
-                else:  # inland water
+                elif terrain_idx in masked_inland_terrains:
+                    # Feathered inland shore: the mask is the border
+                    # texture, sampled at the ortho coordinates — the
+                    # same 9-plane layout as the masked sea overlay.
+                    idx_dsfpool = idx_pool + pool_nbr
+                    dsf_pools[idx_dsfpool].extend(
+                        node_icoords[5 * n : 5 * n + 5]
+                    )
+                    dsf_pools[idx_dsfpool].extend(
+                        (
+                            int(round(s * 65535)),
+                            int(round(t * 65535)),
+                            int(round(s * 65535)),
+                            int(round(t * 65535)),
+                        )
+                    )
+                else:  # inland water, constant blend
                     idx_dsfpool = idx_pool + pool_nbr
                     # constant alpha overlay with flat shading
                     dsf_pools[idx_dsfpool].extend(

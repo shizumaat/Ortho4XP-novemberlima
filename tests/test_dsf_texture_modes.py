@@ -164,6 +164,17 @@ def stub_elevation(monkeypatch):
     monkeypatch.setattr(
         DSF, "extract_elevation_and_bathymetry_data",
         lambda lat, lon: (b"", b""))
+    # ``build_dsf`` goes through the DISPATCHER, not the stub above —
+    # and with ``dsf_bathymetry`` defaulting to "auto" and no global-
+    # scenery donor in the headless environment, the coastal-bathymetry
+    # synthesize branch (commit 7e45fef) reaches a LIVE Overpass
+    # coastline download inside these "no network" tests (observed:
+    # identical code passing in 13.8 s or hanging > 90 s purely on
+    # Overpass server timing).  Stub the dispatcher so the whole
+    # elevation/bathymetry step is hermetic.
+    monkeypatch.setattr(
+        DSF, "elevation_and_bathymetry_data",
+        lambda tile: (b"", b""))
 
 
 # ── test 1: default_xplane emission ─────────────────────────────────────

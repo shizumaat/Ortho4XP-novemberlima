@@ -8,7 +8,16 @@ import O4_UI_Utils as UI
 # docs/specs/parallel-tile-builds.md §2).  Each knob gets the formula its
 # bottleneck warrants: tile builds bind on MEMORY as much as cores, DDS
 # conversion is CPU-bound, downloads are network-bound (cores irrelevant).
-# The mask stage already auto-scales the same way (O4_Mask_Utils).
+#
+# Owner ruling 2026-07-17: MACHINE resources (processor, memory pressure
+# short of the mesh cliff) are the operating system's to arbitrate — six
+# hand-launched Ortho4XP copies plus X-Plane always time-sliced fine.
+# Per-tile pools therefore run at FULL machine width regardless of how
+# many tiles build concurrently.  Deliberate throttles remain only where
+# the operating system cannot help: REMOTE SERVER goodwill (the
+# orchestrator's OpenStreetMap/imagery request caps, the bathymetry cell
+# fetch below) and the multi-gigabyte mesh working-set cliff (the
+# orchestrator's memory admission gate).
 # ---------------------------------------------------------------------------
 def machine_core_count() -> int:
     """Logical processor count (4 when the platform will not say)."""
@@ -54,9 +63,11 @@ def machine_memory_gigabytes() -> float:
 
 
 # Set by the parallel-build scheduler in every worker child's
-# environment: how many sibling tiles are building at once, so per-child
-# Auto resolutions (DDS conversion above all) share the machine instead
-# of each claiming all of it.
+# environment (and refreshed by the "siblings" broadcast as tiles
+# finish): how many sibling tiles are building at once.  Since the
+# 2026-07-17 lean-on-the-operating-system ruling, only NETWORK fetchers
+# that hit small remote hosts consult it (the bathymetry cell fetch) —
+# processor-bound pools run at full width regardless.
 PARALLEL_SIBLINGS_ENVIRONMENT_KEY = "O4_PARALLEL_BUILD_SIBLINGS"
 
 
@@ -95,32 +106,34 @@ def effective_convert_slots(configured) -> int:
     """Parallel DDS conversions for a ``max_convert_slots`` value (0 = Auto).
 
     Conversion is CPU-bound: Auto uses every core but two (floor two,
-    cap sixteen) — DIVIDED among concurrent tile builds when several run
-    at once (each worker child learns its sibling count from the
-    environment), so six tiles never each claim the whole machine.
+    cap sixteen) — at FULL width even when several tiles build
+    concurrently (2026-07-17 ruling: the operating system time-slices
+    competing pools fine, and the last running tile inherits the whole
+    machine with no hand-off machinery).
     """
     configured = int(configured or 0)
     if configured > 0:
         return configured
-    shared = (machine_core_count() - 2) // parallel_sibling_count()
-    return max(2, min(16, shared))
+    return max(2, min(16, machine_core_count() - 2))
 
 
 def effective_download_slots(configured) -> int:
     """Parallel orthophoto constructions for ``max_download_slots``
     (0 = Auto).
 
-    Downloads are network-bound, so the core count is irrelevant: Auto is
-    two (each orthophoto already runs sixteen request threads) — dropping
-    to one per tile when several tiles build concurrently, so a six-tile
-    run opens six orthophoto streams, not twelve.  Users on external
-    drives may prefer an explicit one — the historic default — per the
-    long-standing warning in the setting's hint.
+    Downloads are network-bound, so the core count is irrelevant: Auto
+    is two (each orthophoto already runs sixteen request threads),
+    whether or not sibling tiles build concurrently — commercial
+    imagery hosts handle a handful of parallel streams comfortably, and
+    the orchestrator's imagery class cap already bounds how many tiles
+    download at once.  Users on external drives may prefer an explicit
+    one — the historic default — per the long-standing warning in the
+    setting's hint.
     """
     configured = int(configured or 0)
     if configured > 0:
         return configured
-    return 1 if parallel_sibling_count() > 1 else 2
+    return 2
 
 ################################################################################
 class parallel_worker(threading.Thread):
