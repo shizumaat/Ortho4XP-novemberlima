@@ -2222,14 +2222,17 @@ class TestTunnelPortalPairs:
         mouths = [shape for shape in layout.shapes
                   if shape.role == ROLE_BRIDGE_TRENCH
                   and shape.ref == "object_tunnel_portal_mouth"]
-        # Crown split (user rulings 2026-07-14/b/c): each portal is
-        # THREE plates — the open-mouth half at road grade, the buried
-        # half as a CROWN, and a COLLAR band around the buried half's
-        # back.  Crown and collar hold the TERRAIN's height behind the
-        # portal (the digital elevation model sampled beyond the buried
-        # edge — the object top includes a parapet and overshoots), so
-        # on this flat 180 m terrain they sit at 180.0, not
-        # 180 + deck_top.
+        # Crown split (user rulings 2026-07-14/b/c, REVISED 2026-07-17):
+        # each portal is THREE plates — the open-mouth half at road
+        # grade, the buried half as a CROWN, and a COLLAR band around
+        # the buried half's back.  The OBJECT is the terrain authority
+        # (user 2026-07-17): the crown seats no lower than the object's
+        # roof plane (mouth + deck_top; the classifier's dominant plane
+        # already excludes parapet caps), with the DEM acting only as an
+        # upward override.  On this flat 180 m terrain the crowns sit at
+        # 180 + 7.5 = 187.5; the collar is a TRANSITION ring feathering
+        # from the crown at the object-hidden face (187.5) down to the
+        # surrounding ground / mouth floor (180.0) at the exposed rim.
         crowns = [shape for shape in layout.shapes
                   if shape.role == ROLE_BRIDGE_TRENCH
                   and shape.ref == "object_tunnel_portal_crown"]
@@ -2240,8 +2243,13 @@ class TestTunnelPortalPairs:
         assert n_trench == 6
         for mouth in mouths:
             assert set(mouth.node_altitudes) == {180.0}
-        for plate in crowns + collars:
-            assert set(plate.node_altitudes) == {180.0}
+        for plate in crowns:
+            assert set(plate.node_altitudes) == {187.5}
+        for plate in collars:
+            values = set(plate.node_altitudes)
+            assert min(values) == pytest.approx(180.0, abs=0.1)
+            assert max(values) == pytest.approx(187.5, abs=0.1)
+            assert all(179.9 <= v <= 187.6 for v in values)
         assert not [shape for shape in layout.shapes
                     if shape.role == ROLE_BRIDGE_CAUSEWAY]
 
@@ -2430,61 +2438,98 @@ class TestTunnelPortalPairs:
         assert dem.alt((low_lon - (-87.0), low_lat - 36.0)) \
             < crown_elevation - 1.5
 
-    def test_crowns_are_terrain_true_from_the_inset_dem(self):
-        # Round-8 fact 2: each crown is the runway embankment riding over
-        # the tunnel roof, so it must equal the SAME inset DEM sampled
-        # over its OWN buried body — measured at the crown centroid — and
-        # the two portals must therefore diverge exactly as the terrain
-        # does, never seat at one shared clamp value.  The prior
-        # single-point-beyond-the-buried-edge sample read the mid-hill
-        # downslope on each inner face and diverged the crowns off the
-        # terrain (measured KBNA 02C: east 180.34 vs west 181.32 with
-        # neither matching the ground over its body).
-
-        # ``_paired_layout`` separates the two portals EAST-WEST (the
-        # pair axis), so the gradient runs east: each portal's body sits
-        # over demonstrably different terrain.
+    def test_crowns_floor_at_object_roof_and_follow_higher_terrain(self):
+        # REVISED 2026-07-17 (user ruling: the OBJECT is the terrain
+        # authority).  The crown seats at max(DEM over the buried body,
+        # mouth_floor + deck_top): the object's flat roof plane is the
+        # FLOOR — where the DEM sits below it (KBNA Murfreesboro: DEM
+        # 171 vs roof 176.8, the collar-at-road-level defect), the crown
+        # takes the roof plane; where the DEM stands ABOVE the roof
+        # plane (a hillside portal buried deeper), the crown stays
+        # terrain-true to the DEM (round-8 fact 2 semantics preserved as
+        # the upward override).
         meters_per_degree_longitude = 111320.0 * math.cos(
             math.radians(ANCHOR_LATITUDE))
 
-        class _EastGradientDem:
-            """A gentle east-running gradient (no cross-axis falloff): the
-            terrain over the two portals' bodies differs by a known,
-            terrain-true amount, and each mouth ray reads close enough
-            that the crown's clamp band never bites."""
+        class _GradientDem:
+            """East-running gradient with a configurable base."""
 
             nodata = -32768
+
+            def __init__(self, base_m):
+                self.base_m = base_m
 
             def alt(self, xy):
                 longitude = xy[0] + (-87.0)
                 east_m = ((longitude - ANCHOR_LONGITUDE)
                           * meters_per_degree_longitude)
-                return 175.0 + 0.01 * east_m
+                return self.base_m + 0.01 * east_m
 
+        # Case 1 — DEM below the roof plane everywhere: each crown =
+        # its own mouth floor + deck_top (7.5).  The mouth floors track
+        # the terrain gradient, so the two crowns still diverge — they
+        # are never clamped to one shared value.
         layout = self._paired_layout()
-        dem = _EastGradientDem()
+        dem = _GradientDem(175.0)
         bridges.build_bridge_layout_shapes(layout, dem, 36, -87)
+        mouths = [shape for shape in layout.shapes
+                  if shape.ref == "object_tunnel_portal_mouth"]
         crowns = [shape for shape in layout.shapes
                   if shape.ref == "object_tunnel_portal_crown"]
-        assert len(crowns) == 2
+        assert len(mouths) == 2 and len(crowns) == 2
         crown_values = []
-        for crown in crowns:
-            # Each crown is a single flat plate value.
+        for mouth, crown in zip(mouths, crowns):
             values = set(round(v, 2) for v in crown.node_altitudes)
             assert len(values) == 1
             crown_value = next(iter(values))
             crown_values.append(crown_value)
-            # Terrain-true: within the acceptance tolerance of the inset
-            # DEM sampled at the crown centroid.
-            centroid = crown.polygon.centroid
-            target_lat, target_lon = layout.m_to_ll(centroid.x, centroid.y)
-            target = dem.alt((target_lon - (-87.0), target_lat - 36.0))
-            assert crown_value == pytest.approx(target, abs=0.3), (
-                f"crown {crown_value} not terrain-true to DEM {target}")
-        # Consistency across the same DEM: the two crowns diverge because
-        # the terrain over their bodies does — they are NOT clamped to a
-        # single shared value.
+            mouth_value = next(iter(set(mouth.node_altitudes)))
+            assert crown_value == pytest.approx(
+                mouth_value + 7.5, abs=0.05), (
+                f"crown {crown_value} not floored at the object roof "
+                f"plane (mouth {mouth_value} + 7.5)")
         assert abs(crown_values[0] - crown_values[1]) > 1.5
+
+        # Case 2 — DEM ABOVE the roof plane over the buried body only
+        # (a hillside portal buried deeper): terrain-true upward
+        # override — the crown takes the hill's DEM, not the roof
+        # plane.  The hill covers the footprints; the outward mouth
+        # rays read the surrounding 180 m plain, so the roof plane is
+        # 180 + 7.5 = 187.5, well under the 200 m hill.
+        meters_per_degree_latitude = 111132.0
+
+        class _HillOverBodiesDem:
+            nodata = -32768
+
+            def alt(self, xy):
+                longitude = xy[0] + (-87.0)
+                latitude = xy[1] + 36.0
+                east_m = ((longitude - ANCHOR_LONGITUDE)
+                          * meters_per_degree_longitude)
+                north_m = ((latitude - ANCHOR_LATITUDE)
+                           * meters_per_degree_latitude)
+                near_a = (abs(east_m - 0.0) <= 12.0
+                          and abs(north_m) <= 12.0)
+                near_b = (abs(east_m - 300.0) <= 12.0
+                          and abs(north_m) <= 12.0)
+                return 200.0 if (near_a or near_b) else 180.0
+
+        layout = self._paired_layout()
+        hill_dem = _HillOverBodiesDem()
+        bridges.build_bridge_layout_shapes(layout, hill_dem, 36, -87)
+        crowns = [shape for shape in layout.shapes
+                  if shape.ref == "object_tunnel_portal_crown"]
+        mouths = [shape for shape in layout.shapes
+                  if shape.ref == "object_tunnel_portal_mouth"]
+        assert len(crowns) == 2
+        for mouth, crown in zip(mouths, crowns):
+            crown_value = next(iter(set(round(v, 2)
+                                        for v in crown.node_altitudes)))
+            mouth_value = next(iter(set(mouth.node_altitudes)))
+            assert mouth_value == pytest.approx(180.0, abs=0.1)
+            assert crown_value == pytest.approx(200.0, abs=0.3), (
+                f"crown {crown_value} not terrain-true to the 200 m "
+                "hill over its buried body")
 
     def test_clip_collar_to_mouth_front_removes_the_road_side_lobe(self):
         # Round-8 fact 3: the forward-face clip removes any collar region

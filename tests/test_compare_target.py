@@ -143,20 +143,36 @@ pytestmark = [
 # ring emission is deterministic and the ring COUNT is the de-seg
 # invariant itself (0.95 of 1-2 ways floors at 0-1 and guards nothing),
 # so runway floors are EXACT.
+# RE-CUT 2026-07-17 (drive-to-zero wave 3, user sign-off; floors =
+# int(0.95 × new counts)): fixtures regenerated after the wave-2
+# landing set — adjacent-ground donor gate + tear-heal re-deconflict,
+# lockstep pair-caps sidecar, LATE final grade projection (pipeline
+# end), crossing-terrain Phase 1 and the KBNA round-9 set (all in the
+# working tree since the previous 2026-07-08b cut).  SPJC now carries
+# its graded_strip corridor bands (244 — the 07-08b SPLP note's law,
+# now in the SPJC fixture too) and NO taxiway_clearance (the crossing-
+# terrain / clearance reshapes retired the role here; rows removed,
+# not floored at 0).  Floors = int(0.95 * current), runway +
+# retaining_wall EXACT (deterministic), same convention as every cut.
+# RE-CUT 2026-07-17b (same day, after the OBJ8 mega-pad backstop —
+# DSF_OBJECT_MAX_FOOTPRINT_AREA_M2 default 100k: SPJC's own 371k m²
+# LIMANUEVA mega-pad is dropped and the ~10 real buildings it had
+# cannibalized are revealed — building 57 → 60 emitted, small
+# apron/strip/groundside repartition follows).
 SPJC_BASELINE: Dict[str, int] = {
-    "apron":              41,   # of  44 current
-    "building":           29,   # of  31 current
-    "groundside_pavement": 10,  # of  11 current
-    "junction":          304,   # of 321 current
-    "retaining_wall":      6,   # of   6 current (deterministic, exact)
+    "apron":              49,   # of  52 current
+    "building":           57,   # of  60 current
+    "graded_strip":      236,   # of 249 current
+    "groundside_pavement": 8,   # of   9 current
+    "junction":          306,   # of 323 current
+    "retaining_wall":      9,   # of   9 current (deterministic, exact)
     "runway":              2,   # of   2 current (deterministic, exact)
-    "runway_clearance":   10,   # of  11 current
-    "service_junction":   14,   # of  15 current
-    "service_road":        9,   # of  10 current
-    "taxiway_clearance":  22,   # of  24 current
+    "runway_clearance":    3,   # of   4 current
+    "service_junction":   13,   # of  14 current
+    "service_road":       11,   # of  12 current
     "tunnel_ramp":        38,   # of  41 current
 }
-SPJC_BASELINE_TOTAL = 490  # int(0.95 * 516) of 516 current (emitted)
+SPJC_BASELINE_TOTAL = 736  # int(0.95 * 775) of 775 current (emitted)
 
 # SPLP is cross-tile (spans -13/-77 and -13/-78).  Each tile-half has
 # its own baseline; a regression in either half trips the gate.
@@ -195,32 +211,37 @@ SPJC_BASELINE_TOTAL = 490  # int(0.95 * 516) of 516 current (emitted)
 # re-shapes the cut pieces.  Every other role's count is IDENTICAL to
 # the previous fixture.  Floors = int(0.95 * current), runway EXACT,
 # same convention.
+# RE-CUT 2026-07-17 (wave 3; see the SPJC note): graded_strip 64 → 75
+# (donor gate + heal re-deconflict reshaped the band pieces),
+# taxiway_clearance role GONE (rows removed, not floored at 0).
 SPLP_BASELINE_TILE_M77: Dict[str, int] = {
     "apron":               9,   # of  10 current
     "building":            2,   # of   3 current
-    "graded_strip":       60,   # of  64 current
+    "graded_strip":       71,   # of  75 current
     "junction":           25,   # of  27 current
     "runway":              1,   # of   1 current (deterministic, exact)
-    "runway_clearance":    5,   # of   6 current
-    "taxiway_clearance":   8,   # of   9 current
+    "runway_clearance":    4,   # of   5 current
 }
-SPLP_BASELINE_TILE_M77_TOTAL = 114  # int(0.95 * 120) of 120 current (emitted)
+SPLP_BASELINE_TILE_M77_TOTAL = 114  # int(0.95 * 121) of 121 current (emitted)
 
 # RE-CUT 2026-07-05 (curve-native global slice default; see the SPJC
 # re-cut note above) — floors = int(0.95 * current fixture count).
 # RE-CUT 2026-07-08 (de-seg default ON; see above).
 # RE-CUT 2026-07-08b (adjacent-ground law default ON; see above).
+# RE-CUT 2026-07-17 (wave 3; see the SPJC note): building 8 → 10,
+# taxiway_clearance role GONE (rows removed, not floored at 0),
+# runway_clearance 2 → 1 (int(0.95×1) floors at 0 and guards nothing —
+# row kept at 0 for the summary line only).
 SPLP_BASELINE_TILE_M78: Dict[str, int] = {
     "apron":              30,   # of  32 current
-    "building":            7,   # of   8 current
+    "building":            9,   # of  10 current
     "graded_strip":       85,   # of  90 current
     "groundside_pavement": 2,   # of   3 current
     "junction":           35,   # of  37 current
     "runway":              1,   # of   1 current (deterministic, exact)
-    "runway_clearance":    1,   # of   2 current
-    "taxiway_clearance":  12,   # of  13 current
+    "runway_clearance":    0,   # of   1 current
 }
-SPLP_BASELINE_TILE_M78_TOTAL = 176  # int(0.95 * 186) of 186 current (emitted)
+SPLP_BASELINE_TILE_M78_TOTAL = 165  # int(0.95 * 174) of 174 current (emitted)
 
 
 def _build_layout(icao: str, tile_lat=None, tile_lon=None):

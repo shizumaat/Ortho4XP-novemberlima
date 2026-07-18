@@ -303,6 +303,16 @@ def test_emit_admission_footprints_equal_gate_off(monkeypatch):
     # 3D-collinear decimation is value-dependent and the values differ
     # by design — solved store vs analytic clamp — so the comparison is
     # geometric, not WKT.)
+    #
+    # The emit-time TEAR/WALL heal keys on VALUE jumps and drops the
+    # pinched vertex, so its footprint effect is value-dependent by
+    # design — and this test's synthetic flat 123.4 zone surface mints
+    # artificial >1 m walls gate-ON only.  Neutralize the heal here:
+    # the invariant under test is the CONSTRUCT move's footprint
+    # equivalence, not the heal (which has its own unit coverage).
+    monkeypatch.setattr(AG, "_heal_band_tears",
+                        lambda ring, alts, weld, tear_max, min_jump,
+                        wall_max=None: (ring, alts))
     layout_off = _mk_layout()
     AG.emit_adjacent_ground_bands(
         layout_off, dem=object(), tile_lat=0, tile_lon=0,

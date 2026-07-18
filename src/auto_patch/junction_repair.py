@@ -38,6 +38,7 @@ import O4_UI_Utils as UI
 _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
 from .canonical_points import snap_polygon_through_registry
+from .geom_safe import min_rotated_rect
 from .elevation import (
     NEIGHBOUR_CLAMP_RADIUS_M,
     TAXI_MAX_GRADE,
@@ -3881,7 +3882,7 @@ def _reclassify_road_only_lots_to_groundside(
         try:
             if s.polygon.area <= 0.0:
                 return False
-            mc = list(s.polygon.minimum_rotated_rectangle.exterior.coords)
+            mc = list(min_rotated_rect(s.polygon).exterior.coords)
             sides = [math.hypot(mc[j][0] - mc[j + 1][0],
                                 mc[j][1] - mc[j + 1][1]) for j in range(4)]
             longest, shortest = max(sides), min(sides)

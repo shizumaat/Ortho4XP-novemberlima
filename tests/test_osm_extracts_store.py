@@ -18,6 +18,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import O4_OSM_Extracts as EXTRACTS  # noqa: E402
 
+# A minimal byte string that passes the store's pbf content probe
+# (the real format opens with a header blob naming "OSMHeader").
+_PBF_HEADER = b"\x00\x00\x00\x0e\x0a\x09OSMHeader\x18\xb0\x01"
+
 
 def _region_feature(region_id, parent, lon_min, lat_min, lon_max, lat_max):
     return {
@@ -111,6 +115,108 @@ class TestWantedList:
         assert EXTRACTS._consume_wanted_regions() == []
 
 
+class TestLocalCoverPredicate:
+    BBOX = (38, -9.5, 39, -8.5)
+
+    def test_covered_when_extract_stored(self, store):
+        with open(EXTRACTS._region_file("portugal"), "wb") as pbf:
+            pbf.write(_PBF_HEADER)
+        assert EXTRACTS.local_extracts_cover(self.BBOX) is True
+
+    def test_not_covered_when_extract_missing(self, store):
+        assert EXTRACTS.local_extracts_cover(self.BBOX) is False
+
+    def test_not_covered_outside_index(self, store):
+        assert EXTRACTS.local_extracts_cover((20, -40, 21, -39)) is False
+
+    def test_not_covered_when_disabled(self, store, monkeypatch):
+        with open(EXTRACTS._region_file("portugal"), "wb") as pbf:
+            pbf.write(_PBF_HEADER)
+        monkeypatch.setattr(EXTRACTS, "extracts_enabled", lambda: False)
+        assert EXTRACTS.local_extracts_cover(self.BBOX) is False
+
+    def test_border_tile_needs_both_extracts(self, store):
+        border_box = (37, -8, 38, -7)
+        with open(EXTRACTS._region_file("portugal"), "wb") as pbf:
+            pbf.write(_PBF_HEADER)
+        assert EXTRACTS.local_extracts_cover(border_box) is False
+        with open(EXTRACTS._region_file("spain"), "wb") as pbf:
+            pbf.write(_PBF_HEADER)
+        assert EXTRACTS.local_extracts_cover(border_box) is True
+
+
+class TestPbfContentValidation:
+    """A poisoned store entry (an HTML page served with HTTP 200 and
+    saved as a .pbf — the live enfield.osm.pbf, 2026-07-17) must be
+    detected, deleted, and treated as missing so every consumer falls
+    back to Overpass instead of erroring on it forever."""
+
+    BBOX = (38, -9.5, 39, -8.5)
+    HTML = b"<!DOCTYPE html>\n<html><body>not found</body></html>"
+
+    def test_poisoned_file_reads_as_missing_and_is_deleted(self, store):
+        path = EXTRACTS._region_file("portugal")
+        with open(path, "wb") as fake_pbf:
+            fake_pbf.write(self.HTML)
+        assert EXTRACTS.local_extracts_cover(self.BBOX) is False
+        assert not os.path.isfile(path), "the poisoned file is removed"
+
+    def test_poisoned_file_requeues_and_falls_back(self, store):
+        with open(EXTRACTS._region_file("portugal"), "wb") as fake_pbf:
+            fake_pbf.write(self.HTML)
+        result = EXTRACTS.osm_xml_from_local_extracts(
+            ['way["natural"="water"]'], self.BBOX)
+        assert result is None
+        wanted = EXTRACTS._read_json(os.path.join(store, "wanted.json"))
+        assert wanted == ["portugal"]
+
+    def test_download_rejects_non_pbf_payload(self, store, monkeypatch):
+        class _FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def raise_for_status(self):
+                return None
+
+            def iter_content(self, _chunk_bytes):
+                yield TestPbfContentValidation.HTML
+
+        import types
+        monkeypatch.setattr(
+            EXTRACTS, "requests",
+            types.SimpleNamespace(get=lambda *a, **k: _FakeResponse()))
+        assert EXTRACTS._download_extract(
+            "portugal", "https://example.invalid/portugal.pbf") is False
+        assert not os.path.isfile(EXTRACTS._region_file("portugal"))
+        state = EXTRACTS._read_json(os.path.join(store, "state.json"))
+        assert not state or "portugal" not in state
+
+    def test_download_accepts_real_pbf_payload(self, store, monkeypatch):
+        class _FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def raise_for_status(self):
+                return None
+
+            def iter_content(self, _chunk_bytes):
+                yield _PBF_HEADER
+
+        import types
+        monkeypatch.setattr(
+            EXTRACTS, "requests",
+            types.SimpleNamespace(get=lambda *a, **k: _FakeResponse()))
+        assert EXTRACTS._download_extract(
+            "portugal", "https://example.invalid/portugal.pbf") is True
+        assert os.path.isfile(EXTRACTS._region_file("portugal"))
+
+
 class TestEntryPoint:
     BBOX = (38, -9.5, 39, -8.5)
 
@@ -123,7 +229,7 @@ class TestEntryPoint:
 
     def test_present_extract_serves_locally(self, store, monkeypatch):
         with open(EXTRACTS._region_file("portugal"), "wb") as pbf:
-            pbf.write(b"pbf")
+            pbf.write(_PBF_HEADER)
         sentinel = b"<osm/>"
         import types
         fake_filter = types.SimpleNamespace(
@@ -162,7 +268,7 @@ class TestRefreshPolicy:
             os.path.join(store, "state.json"), state)
         for region_id in ("fresh", "stale"):
             with open(EXTRACTS._region_file(region_id), "wb") as pbf:
-                pbf.write(b"pbf")
+                pbf.write(_PBF_HEADER)
         stale = dict(EXTRACTS._regions_to_refresh())
         assert set(stale) == {"stale", "gone"}
 
@@ -238,6 +344,9 @@ class TestDownloadCancellation:
         def iter_content(self, _chunk_bytes):
             import O4_UI_Utils as UI
 
+            # A pbf-shaped first chunk: the completed-download path now
+            # content-validates before installing.
+            yield _PBF_HEADER
             for index in range(100):
                 if index == self._red_flag_after:
                     UI.red_flag = True

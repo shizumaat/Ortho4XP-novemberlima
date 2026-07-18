@@ -92,6 +92,7 @@ from .clearance import (
     _open_coords,
 )
 from .emit_decimate import _key
+from .geom_safe import min_rotated_rect
 
 __all__ = ["emit_gap_fill_spines", "construct_gap_fill_presolve"]
 
@@ -339,7 +340,7 @@ def _grade_face(layout, airside, face_poly, step, registry,
     if face_poly.area < GAP_FILL_MIN_AREA_M2:
         return 0
     try:
-        axes = _mrr_axes(face_poly.minimum_rotated_rectangle)
+        axes = _mrr_axes(min_rotated_rect(face_poly))
     except _GEOM_EXC:
         return 0
     if axes is None or axes[1] is None:
@@ -1280,7 +1281,7 @@ def _emit_open_corridor(layout, airside, face_poly, ring, alts,
     build the drainage spine, solve its values, append the face + spine.
     Returns 1 on emit, 0 on a lawful skip (logged)."""
     try:
-        axes = _mrr_axes(face_poly.minimum_rotated_rectangle)
+        axes = _mrr_axes(min_rotated_rect(face_poly))
     except _GEOM_EXC:
         return 0
     if axes is None or axes[1] is None:
@@ -1659,7 +1660,7 @@ def construct_gap_fill_presolve(layout) -> int:
                 if face_poly.area < GAP_FILL_MIN_AREA_M2:
                     continue
                 try:
-                    axes = _mrr_axes(face_poly.minimum_rotated_rectangle)
+                    axes = _mrr_axes(min_rotated_rect(face_poly))
                 except _GEOM_EXC:
                     continue
                 if axes is None or axes[1] is None:
@@ -2118,13 +2119,38 @@ def _emit_one_gap(layout, airside, gap_poly, long_dir, long_len, step,
         e = _nearest_pav_alt(airside, vx, vy, max_distance_m=5.0)
         new_ring.append((vx, vy))
         alts.append(float(e) if e is not None else values[0])
+    # PARENT-HOLE PRESERVATION (test_no_self_overlap fix).  When a gap
+    # parent (runway-end skirt / building pad) sits WHOLLY inside the
+    # gap, ``_parent_residual_faces`` already carved it out — the
+    # ``gap_poly`` handed here is an ANNULUS whose interior ring is the
+    # parent footprint (residual = gap − parent_union).  ``_open_coords``
+    # keeps only the EXTERIOR ring, though, so without re-adding the
+    # holes the emitted face refills the parent footprint and BURIES it
+    # (CYXY: a graded_strip covered runway_end_skirt #242 by 1,925 m²).
+    # Re-attach the residual's interior rings so the emitted polygon is
+    # clipped against its bounding parents exactly as the residual was.
+    # The exterior ``new_ring`` (and its ``alts``) is untouched, so the
+    # per-vertex ``node_altitudes`` contract (exterior-ring aligned, the
+    # only ring ``to_osm`` reads) still holds.  A parent that only
+    # partially straddles the gap leaves no interior ring here — its bite
+    # already lives in the exterior — so nothing changes for that case.
+    parent_holes = [list(r.coords) for r in gap_poly.interiors]
     try:
-        face_poly = Polygon(new_ring)
+        face_poly = Polygon(new_ring, parent_holes)
         if not face_poly.is_valid or face_poly.is_empty:
             face_poly = gap_poly
             new_ring = list(_open_coords(gap_poly))
     except _GEOM_EXC:
         face_poly = gap_poly
+    if face_poly.area < GAP_FILL_MIN_AREA_M2:
+        # The residual passed the min-area gate, but carving the parent
+        # hole(s) can drop a thin annulus below it — a sliver graded_strip
+        # is not worth an emitted shape.  Skip (no spine ways emit either).
+        _c = gap_poly.centroid
+        UI.vprint(1, f"  [gap-fill] parent-clipped face below min area "
+                     f"({face_poly.area:.0f} < {GAP_FILL_MIN_AREA_M2:.0f} "
+                     f"m2) centroid=({_c.x:.0f},{_c.y:.0f}) — skipped.")
+        return 0
     layout.shapes.append(BuiltShape(
         polygon=face_poly, role=ROLE_GRADED_STRIP, ref=_GAP_FILL_REF,
         node_altitudes=alts + [alts[0]]))

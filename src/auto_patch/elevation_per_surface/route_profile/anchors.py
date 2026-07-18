@@ -327,6 +327,57 @@ def build_building_seats(layout, bucket_to_idx, band, dem_fn, runway_pts):
     return seats
 
 
+def build_detached_pad_dem_pins(layout, bucket_to_idx, dem_fn,
+                                building_seats):
+    """``{node_idx: flat_dem_level}`` for every ROLE_BUILDING pad that
+    is NOT airside-served (no ring node in ``building_seats``).
+
+    User ruling 2026-07-17 (KBNA SE lot): a detached pad follows LOCAL
+    GROUND.  Without a pin its ring nodes are free field nodes and the
+    route-profile blend paints them with the surrounding airside level
+    (KBNA: pads emitted flat at 170-172 over 158-167 ground — plateaus
+    6-11 m above the DEM and the abutting groundside pavement).  The
+    flat level is the MEDIAN of the DEM sampled at the ring vertices
+    plus the centroid — a flat building pad on sloping ground cuts at
+    the high end and fills at the low end.
+
+    The caller applies these as HARD solver pins and keeps them out of
+    every movable-pad relaxation (``layout._detached_pad_node_idx``).
+    Gate: ``config.DETACHED_PAD_DEM_PIN``.
+    """
+    from auto_patch.config import DETACHED_PAD_DEM_PIN
+    from auto_patch.layout import ROLE_BUILDING
+    if not DETACHED_PAD_DEM_PIN:
+        return {}
+    cps = layout.canonical_points
+    pins: dict = {}
+    for s in layout.shapes:
+        if (s.role != ROLE_BUILDING or s.polygon is None
+                or s.polygon.is_empty):
+            continue
+        ring = _open_ring(list(s.polygon.exterior.coords))
+        node_indices = [
+            bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+            for (x, y) in ring]
+        node_indices = [i for i in node_indices if i is not None]
+        if not node_indices:
+            continue
+        if any(i in building_seats for i in node_indices):
+            continue                        # airside-served → seated
+        centroid = s.polygon.centroid
+        samples = [dem_fn(x, y) for (x, y) in ring]
+        samples.append(dem_fn(centroid.x, centroid.y))
+        samples = sorted(float(v) for v in samples if v is not None)
+        if not samples:
+            continue
+        mid = len(samples) // 2
+        level = (samples[mid] if len(samples) % 2
+                 else 0.5 * (samples[mid - 1] + samples[mid]))
+        for i in node_indices:
+            pins[i] = float(level)
+    return pins
+
+
 def _pocs_project_levels(targets, boxes, pairs, max_iter=300, tol=1e-4):
     """Project per-item target levels onto (box ∩ pairwise-coupling polytope).
 

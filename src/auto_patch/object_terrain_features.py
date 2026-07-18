@@ -83,6 +83,7 @@ from shapely.geometry import Point, Polygon
 from shapely.ops import unary_union
 
 from . import obj8_reader
+from .geom_safe import min_rotated_rect
 from .object_anchor import discover_object_pools
 from .obj8_reader import ObjectGeometry, ObjectPlacement
 
@@ -607,6 +608,56 @@ class RefusedStructure:
 
 
 @dataclass(frozen=True)
+class PortalFaceStructure:
+    """A bare tunnel-portal FACE (user 2026-07-17, EGGW class).
+
+    Some packs author a road tunnel's portals as nothing but a textured
+    face quad HANGING BELOW grade — a handful of SOFT triangles from
+    ``y ≈ 0`` down to the road deck (EGGW: one 2-triangle quad per
+    mouth, ``y −8.33..+0.06``, plain ``OBJECT``, anchor exactly on the
+    face line).  Such a face matches neither the tunnel signature
+    (nothing drivable, no ``ATTR_hard``, no negative ``OBJECT_AGL``)
+    nor any bridge signature (no deck), so the A6 discriminator is
+    silent — yet a matched PAIR of these faces is decisive tunnel
+    evidence where OpenStreetMap has no mapped bore.
+
+    Field names deliberately mirror the :class:`BridgeStructure`
+    attributes the portal-pair machinery reads (``heading_degrees``,
+    ``deck_top_y_m``, ``object_resources``,
+    ``anchor_longitude_latitude``), so a face record can ride the same
+    pairing code:
+
+    * ``heading_degrees`` — bearing of the implied TUNNEL AXIS: the
+      face's long horizontal axis + 90° (the placement's own heading is
+      routinely 0 and carries no information).
+    * ``deck_top_y_m`` — the face HEIGHT (``face_max_y − face_min_y``):
+      standing at the mouth road grade, the face top — and the deck the
+      terrain must hold behind it — is this far up.
+    * ``face_hangs_below`` — always True for this record type; the
+      portal seat contract inverts against the KBNA class (the object
+      drapes at ``terrain(anchor)`` and the geometry hangs DOWN, so the
+      anchor must sit on the DECK-grade crown, never on the road-grade
+      mouth plate)."""
+
+    object_resources: list[str]
+    anchor_longitude_latitude: tuple[float, float]
+    heading_degrees: float
+    face_polygon_longitude_latitude: Polygon
+    face_min_y_m: float
+    face_max_y_m: float
+    face_width_m: float
+    deck_top_y_m: float
+    # Bearing of the face LINE itself (mod 180).  ★A portal face is NOT
+    # necessarily perpendicular to the tunnel axis — it parallels the
+    # structure it passes under (EGGW: the taxiway edge crosses the road
+    # obliquely; face line 115°, axis 57°).  Pairing therefore tests
+    # face-vs-face parallelism and segment-crosses-face, never
+    # face-perpendicular-equals-axis.
+    face_line_bearing_degrees: float = 0.0
+    face_hangs_below: bool = True
+
+
+@dataclass(frozen=True)
 class StructureGroundInterface:
     """Feature C: what a BUILDING structure's construction says the ground
     must do (spec section 3.4; extraction filters normative per A5, bowl
@@ -695,6 +746,7 @@ class ClassificationResult:
     ground_interfaces: list[StructureGroundInterface] = field(
         default_factory=list
     )
+    portal_faces: list[PortalFaceStructure] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -1829,14 +1881,6 @@ def _classify_tunnel(
 # Bridge recognition (feature B)
 # ---------------------------------------------------------------------------
 
-def _minimum_rotated_rectangle(polygon):
-    """``polygon.minimum_rotated_rectangle`` with GEOS's harmless
-    ``oriented_envelope`` divide-by-zero warning (axis-aligned inputs)
-    silenced, matching the project's numpy-warning discipline."""
-    with numpy.errstate(invalid="ignore", divide="ignore"):
-        return polygon.minimum_rotated_rectangle
-
-
 @dataclass(frozen=True)
 class _DeckAxis:
     """The deck's minimum-rotated-rectangle long axis and its two ends.
@@ -1861,7 +1905,7 @@ def _deck_axis(polygon: Polygon) -> _DeckAxis | None:
     """Long axis + short-edge deck ends of the polygon's minimum rotated
     rectangle.  ``None`` on degenerate geometry."""
     try:
-        rectangle = _minimum_rotated_rectangle(polygon)
+        rectangle = min_rotated_rect(polygon)
     except (ValueError, _GEOS_EXCEPTION):
         return None
     if rectangle.geom_type != "Polygon":
@@ -3261,6 +3305,130 @@ def _pool_has_classification_evidence(
     )
 
 
+# Portal-face signature calibrations (user 2026-07-17, EGGW: each face
+# is a single soft quad, 2 triangles, y −8.33..+0.06, 21-45 m wide).
+# The triangle cap keeps real structures (KBNA portal towers, buried
+# basements — dozens to thousands of triangles) out; the depth/height
+# floors keep signage and fence panels out; the width band keeps both
+# tiny decals and field-spanning texture pages out.
+PORTAL_FACE_MAX_SOLID_TRIANGLES = 8
+PORTAL_FACE_MIN_DEPTH_M = 2.0
+PORTAL_FACE_MAX_TOP_M = 1.0
+PORTAL_FACE_MIN_HEIGHT_M = 2.0
+PORTAL_FACE_MIN_WIDTH_M = 4.0
+PORTAL_FACE_MAX_WIDTH_M = 60.0
+
+
+def _detect_portal_faces(
+    placements: Sequence[ObjectPlacement],
+    geometry_by_resource: dict[str, ObjectGeometry],
+) -> list[PortalFaceStructure]:
+    """Recognize bare below-grade portal-face objects (EGGW class).
+
+    Resource-level (pool-independent): the signature is entirely a
+    property of one object's own geometry plus its being placed exactly
+    once — a face shared by N placements cannot mark N distinct mouths
+    any more than the Phase 2 bake can correct N of them."""
+    placements_by_resource: dict[str, list[ObjectPlacement]] = {}
+    for placement in placements:
+        placements_by_resource.setdefault(
+            placement.resource_path, []).append(placement)
+    faces: list[PortalFaceStructure] = []
+    for resource, resource_placements in placements_by_resource.items():
+        if len(resource_placements) != 1:
+            continue
+        placement = resource_placements[0]
+        if placement.placement_kind != "OBJECT":
+            # Negative-AGL placements already carry the A6 tunnel
+            # signature; MSL rows are absolute fixtures.
+            continue
+        geometry = geometry_by_resource.get(resource)
+        if geometry is None:
+            continue
+        triangles = geometry.solid_triangles
+        if not triangles or len(triangles) > PORTAL_FACE_MAX_SOLID_TRIANGLES:
+            continue
+        hardness = getattr(geometry, "solid_triangle_hardness", None)
+        if hardness and any(kind for kind in hardness):
+            continue  # anything drivable is the A6 signature's business
+        used_indices = sorted({i for tri in triangles for i in tri})
+        vertices = geometry.vertices
+        face_ys = [vertices[i][1] for i in used_indices]
+        face_min_y = min(face_ys)
+        face_max_y = max(face_ys)
+        if face_min_y > -PORTAL_FACE_MIN_DEPTH_M:
+            continue
+        if face_max_y > PORTAL_FACE_MAX_TOP_M:
+            continue
+        if (face_max_y - face_min_y) < PORTAL_FACE_MIN_HEIGHT_M:
+            continue
+        projected = []
+        for index in used_indices:
+            x, _y, z = vertices[index]
+            latitude, longitude = obj8_reader.local_offset_to_lonlat(
+                placement.latitude, placement.longitude,
+                placement.heading_degrees, x, z)
+            projected.append((longitude, latitude))
+        try:
+            hull = shapely.geometry.MultiPoint(projected).convex_hull
+            if hull.geom_type != "Polygon":
+                # A perfectly vertical face projects to a line — pad it
+                # to a thin footprint (~2 m) so downstream centroid /
+                # split geometry works.
+                hull = hull.buffer(2.0 / 111320.0)
+            if hull.geom_type != "Polygon" or hull.is_empty:
+                continue
+        except (ValueError, _GEOS_EXCEPTION):
+            continue
+        # The FACE LINE is the long side of the footprint's minimum
+        # rotated rectangle (the most-distant vertex pair would give a
+        # DIAGONAL on a sloped face); the implied tunnel axis is its
+        # perpendicular.  Work in local-metre offsets to keep the
+        # anisotropic degrees out of the angle.
+        cos_latitude = math.cos(math.radians(placement.latitude))
+        try:
+            metre_ring = [
+                ((lon - placement.longitude) * 111320.0 * cos_latitude,
+                 (lat - placement.latitude) * 111320.0)
+                for lon, lat in hull.exterior.coords]
+            rect = min_rotated_rect(Polygon(metre_ring))
+            corners = list(rect.exterior.coords)[:4]
+        except (ValueError, _GEOS_EXCEPTION):
+            continue
+        side_a = math.hypot(corners[1][0] - corners[0][0],
+                            corners[1][1] - corners[0][1])
+        side_b = math.hypot(corners[2][0] - corners[1][0],
+                            corners[2][1] - corners[1][1])
+        if side_a >= side_b:
+            long_east = corners[1][0] - corners[0][0]
+            long_north = corners[1][1] - corners[0][1]
+        else:
+            long_east = corners[2][0] - corners[1][0]
+            long_north = corners[2][1] - corners[1][1]
+        if abs(long_east) < 1e-9 and abs(long_north) < 1e-9:
+            continue
+        face_width = max(side_a, side_b)
+        if not (PORTAL_FACE_MIN_WIDTH_M
+                <= face_width <= PORTAL_FACE_MAX_WIDTH_M):
+            continue
+        face_line_bearing = math.degrees(
+            math.atan2(long_east, long_north)) % 180.0
+        tunnel_axis_bearing = (face_line_bearing + 90.0) % 180.0
+        faces.append(PortalFaceStructure(
+            object_resources=[resource],
+            anchor_longitude_latitude=(
+                placement.longitude, placement.latitude),
+            heading_degrees=tunnel_axis_bearing,
+            face_polygon_longitude_latitude=hull,
+            face_min_y_m=face_min_y,
+            face_max_y_m=face_max_y,
+            face_width_m=face_width,
+            deck_top_y_m=face_max_y - face_min_y,
+            face_line_bearing_degrees=face_line_bearing,
+        ))
+    return faces
+
+
 def classify_object_terrain_features(
     placements: Sequence[ObjectPlacement],
     geometry_by_resource: dict[str, ObjectGeometry],
@@ -3552,10 +3720,25 @@ def classify_object_terrain_features(
                 "classifiable geometry",
             )
 
+    # Portal faces (EGGW class) — resource-level, pool-independent.
+    # A recognized face joins the R4 exclusion feed unconditionally:
+    # the Phase 2 y-bake would fit the face's BASE (its deepest below-
+    # grade vertex) to the ground and shove the whole quad up by the
+    # face height; whether or not a pair is later matched, seating a
+    # terrain-feature face is the terrain's job, never the bake's.
+    portal_faces = _detect_portal_faces(placements, geometry_by_resource)
+    excluded_resources = {resource for _root, resource in exclusions}
+    for face in portal_faces:
+        for resource in face.object_resources:
+            if resource not in excluded_resources:
+                exclusions.append((pack_root, resource))
+                excluded_resources.add(resource)
+
     return ClassificationResult(
         tunnels=tunnels,
         bridges=bridges,
         exclusions=exclusions,
         refusals=refusals,
         ground_interfaces=ground_interfaces,
+        portal_faces=portal_faces,
     )

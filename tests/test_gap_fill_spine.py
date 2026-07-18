@@ -368,6 +368,40 @@ def test_skirt_wholly_inside_emits_annular_face_and_spine_avoids_it():
                 f"(overlap {inside_len:.3f} m)")
 
 
+def test_skirt_wholly_inside_face_does_not_bury_the_skirt():
+    """Regression (CYXY test_no_self_overlap): a skirt WHOLLY inside the
+    hole makes an ANNULAR residual, but ``_open_coords`` keeps only the
+    exterior ring.  Without re-attaching the parent hole the emitted
+    graded_strip refills the skirt footprint and overlaps it (1,925 m² at
+    CYXY).  The emitted face must carry the skirt as an interior ring so
+    it never covers the skirt, while its EXTERIOR ring (and the
+    ``node_altitudes`` aligned to it) is unchanged."""
+    layout, pav = _frame_layout(gap_half_width_m=30.0)
+    skirt = _skirt_rect(600.0, 45.0, 700.0, 55.0,
+                        [101.0, 101.0, 102.0, 102.0])
+    layout.shapes.append(skirt)
+    n = emit_gap_fill_spines(layout, None, 0, 0)
+    assert n == 1
+    faces = _faces(layout)
+    assert len(faces) == 1
+    face = faces[0]
+    # The face must NOT cover the skirt footprint (the whole point).
+    overlap = face.polygon.intersection(skirt.polygon).area
+    assert overlap < 1e-6, (
+        f"emitted graded_strip buries the skirt footprint "
+        f"(overlap {overlap:.3f} m2)")
+    # It carries the skirt as a verbatim interior ring (a true annulus).
+    assert len(face.polygon.interiors) == 1, (
+        "annular face lost its parent hole")
+    skirt_keys = {_key(x, y) for x, y in skirt.polygon.exterior.coords}
+    for x, y in face.polygon.interiors[0].coords:
+        assert _key(x, y) in skirt_keys, (
+            "interior ring vertex is not a verbatim skirt vertex")
+    # node_altitudes stay aligned to the (unchanged) EXTERIOR ring — the
+    # only ring to_osm reads — one value per closed exterior vertex.
+    assert len(face.node_altitudes) == len(face.polygon.exterior.coords)
+
+
 def test_parent_minting_crossings_lawfully_skips():
     """A parent straddling the gap ring MID-EDGE (its ring crossing a
     pavement edge away from any shared vertex) would make the residual

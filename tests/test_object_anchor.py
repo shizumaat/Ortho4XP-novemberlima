@@ -870,12 +870,19 @@ class TestOutsideMeshSkips:
 
 
 class TestAmendmentA3:
-    def test_large_ground_span_is_baked_and_flagged(self, plane_sampler):
+    def test_large_ground_span_is_left_at_authored_elevations(
+        self, plane_sampler
+    ):
         # One structure of three parts chained by sub-epsilon gaps: two
         # ground slabs 50 m apart (centroids at east 5 and 55) and an
         # elevated beam bridging them.  On the plane's slope the ground
-        # span far exceeds DSF_OBJECT_PAD_FLAG_SPAN_M (2 m) — the
-        # structure is STILL baked, and flagged needs_pad.
+        # span far exceeds DSF_OBJECT_BAKE_MAX_GROUND_SPAN_M (3 m).
+        # SUPERSEDED BEHAVIOR (lead ruling 2026-07-17, EGGW mega
+        # components): amendment A3's bake-and-flag is replaced by the
+        # rigid-seat limit — one rigid offset cannot seat such a span
+        # (one end floats past the tolerance wherever the offset lands),
+        # so the structure stays at its AUTHORED elevations, still
+        # flagged needs_pad (Phase-1 pads carry its buildings).
         geometry = compound_geometry(
             (0.0, 10.0, 0.0, 1.0, 0.0, 10.0),        # west ground slab
             (10.1, 49.9, 0.6, 1.0, 0.0, 10.0),       # elevated beam
@@ -899,7 +906,8 @@ class TestAmendmentA3:
             pool, geometry_by_resource, structures, plane_sampler
         )
         updated = decision.structures[0]
-        assert updated.skip_reason is None          # baked, not refused
+        assert updated.skip_reason is not None
+        assert "rigid-seat limit" in updated.skip_reason
         assert updated.needs_pad
         # Slab centroids sit 50 m apart east; expected span is the
         # plane's elevation change over those 50 metres.
@@ -913,10 +921,12 @@ class TestAmendmentA3:
             expected_span, rel=0.05
         )
         assert updated.ground_span_metres > 2.0
-        # Every vertex still got a delta (24 vertices: three boxes).
-        assert set(
-            decision.delta_by_resource_and_vertex["span.obj"]
-        ) == set(range(24))
+        # A span-skipped structure emits NO deltas — its file stays at
+        # the authored geometry (and the reversion pass un-bakes any
+        # stale earlier bake).
+        assert not decision.delta_by_resource_and_vertex.get(
+            "span.obj"
+        )
 
     def test_pit_centroid_no_longer_tricks_the_seating(self, pit_sampler):
         # Before amendment A19 this was the do-not-bake case: a
@@ -1404,15 +1414,31 @@ def test_kclt_eight_bake_pool_end_to_end():
         pools[0], geometry_by_resource, structures, sampler
     )
     assert decision.skipped == []
+    # Rigid-seat limit (lead ruling 2026-07-17): a handful of KCLT's
+    # chained terminal structures span 3.5-4.2 m of terrain and are now
+    # left at authored elevations rather than baked to a median offset
+    # with metre-class residuals; every skip must carry exactly that
+    # reason, and everything else still bakes.
+    span_skipped_structures = [
+        structure for structure in decision.structures
+        if structure.skip_reason is not None
+    ]
     assert all(
-        structure.skip_reason is None for structure in decision.structures
+        "rigid-seat limit" in structure.skip_reason
+        for structure in span_skipped_structures
     )
+    assert 0 < len(span_skipped_structures) <= 5
+    baked_structures = [
+        structure for structure in decision.structures
+        if structure.skip_reason is None
+    ]
+    assert baked_structures
     # All eight bakes share one bit-identical anchor, so the anchor
     # grounds are identical...
     assert len(set(decision.anchor_ground_by_resource.values())) == 1
     # ...and therefore each structure's deltas are EQUAL across its
     # resources (the shared-anchor special case of invariant I-3).
-    for structure in decision.structures:
+    for structure in baked_structures:
         per_resource_deltas = []
         for resource, triangles in structure.triangles_by_resource.items():
             first_vertex_index = triangles[0][0]
@@ -1445,3 +1471,107 @@ def test_kclt_eight_bake_pool_end_to_end():
         f"{needing_pad} needing a pad, {inherited} inherited, "
         f"{len(decision.skipped)} skipped"
     )
+
+
+# ── CONNECTOR pre-filter metrics (defect 2026-07-17) ──────────────────
+# A per-object span + hull-fill test that recognises a bridging connector
+# (fence / road / slab that would chain real buildings into one
+# field-spanning structure).  Both conditions must hold to flag.
+
+from auto_patch.object_anchor import (  # noqa: E402
+    _convex_hull_area_square_metres,
+    is_connector_resource,
+    resource_connector_metrics,
+)
+
+
+def _make_geometry(vertices, solid_triangles):
+    return obj8_reader.ObjectGeometry(
+        vertices=list(vertices),
+        solid_triangles=list(solid_triangles),
+        draped_triangles=[],
+        positional_commands=[],
+        animation_block_count=0,
+        level_of_detail_count=0,
+        vertex_line_indices=list(range(len(vertices))),
+    )
+
+
+class TestConvexHullArea:
+    def test_square(self):
+        # A 10 x 10 square (with an interior point) — hull area 100.
+        points = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0),
+                  (0.0, 10.0), (5.0, 5.0)]
+        assert _convex_hull_area_square_metres(points) == pytest.approx(100.0)
+
+    def test_collinear_is_zero(self):
+        points = [(0.0, 0.0), (5.0, 0.0), (10.0, 0.0)]
+        assert _convex_hull_area_square_metres(points) == 0.0
+
+    def test_fewer_than_three_is_zero(self):
+        assert _convex_hull_area_square_metres([(0.0, 0.0), (1.0, 1.0)]) == 0.0
+
+
+class TestConnectorMetrics:
+    def test_filled_slab_is_not_a_connector(self):
+        # A 400 x 400 flat slab: span 400 (> 300) but fill ~1.0 — a large
+        # FILLED footprint (a real mega-terminal) is never a connector.
+        vertices = [(0.0, 0.0, 0.0), (400.0, 0.0, 0.0),
+                    (400.0, 0.0, 400.0), (0.0, 0.0, 400.0)]
+        triangles = [(0, 1, 2), (0, 2, 3)]
+        geometry = _make_geometry(vertices, triangles)
+        metrics = resource_connector_metrics(geometry)
+        assert metrics.span_metres == pytest.approx(400.0)
+        assert metrics.hull_fill_ratio == pytest.approx(1.0, abs=1e-6)
+        is_connector, _ = is_connector_resource(
+            geometry, connector_span_metres=300.0, connector_maximum_fill=0.20)
+        assert is_connector is False
+
+    def test_long_sparse_fence_is_a_connector(self):
+        # A vertical fence tracing a right angle over a 400 x 400 field:
+        # its posts span the field but the walls are vertical, so the
+        # horizontal footprint area is ~0 while the hull is large — span
+        # large AND fill low → connector.
+        base = [(0.0, 0.0), (200.0, 0.0), (400.0, 0.0),
+                (400.0, 200.0), (400.0, 400.0)]
+        vertices = []
+        for x, z in base:
+            vertices.append((x, 0.0, z))   # base post
+            vertices.append((x, 3.0, z))   # top post
+        triangles = []
+        for post in range(len(base) - 1):
+            lower_a = 2 * post
+            upper_a = 2 * post + 1
+            lower_b = 2 * (post + 1)
+            upper_b = 2 * (post + 1) + 1
+            triangles.append((lower_a, lower_b, upper_b))
+            triangles.append((lower_a, upper_b, upper_a))
+        geometry = _make_geometry(vertices, triangles)
+        metrics = resource_connector_metrics(geometry)
+        assert metrics.span_metres == pytest.approx(400.0)
+        assert metrics.hull_fill_ratio < 0.01
+        assert metrics.hull_area_square_metres > 50000.0
+        is_connector, returned = is_connector_resource(
+            geometry, connector_span_metres=300.0, connector_maximum_fill=0.20)
+        assert is_connector is True
+        assert returned is metrics or returned == metrics
+
+    def test_small_object_is_never_a_connector(self):
+        # A 50 x 50 sparse cross: low fill but span 50 < 300 — the span
+        # floor protects compact objects (e.g. the ~50 m KBNA gantry).
+        vertices = [(0.0, 0.0, 25.0), (50.0, 3.0, 25.0),
+                    (25.0, 0.0, 0.0), (25.0, 3.0, 50.0)]
+        triangles = [(0, 1, 2), (0, 1, 3)]
+        geometry = _make_geometry(vertices, triangles)
+        metrics = resource_connector_metrics(geometry)
+        assert metrics.span_metres == pytest.approx(50.0)
+        is_connector, _ = is_connector_resource(
+            geometry, connector_span_metres=300.0, connector_maximum_fill=0.20)
+        assert is_connector is False
+
+    def test_no_solid_geometry_is_not_a_connector(self):
+        geometry = _make_geometry([(0.0, 0.0, 0.0)], [])
+        is_connector, metrics = is_connector_resource(
+            geometry, connector_span_metres=300.0, connector_maximum_fill=0.20)
+        assert is_connector is False
+        assert metrics.span_metres == 0.0

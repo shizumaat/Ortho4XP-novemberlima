@@ -339,7 +339,7 @@ def _discover_sibling_road_networks(
 # pre-screen, composed placement transform, bulk footprint unions) —
 # results are equivalent within float tolerance but must be rebuilt on
 # the new code path.
-_CLASSIFICATION_CACHE_VERSION = 3
+_CLASSIFICATION_CACHE_VERSION = 4  # 4: portal-face records (EGGW class)
 
 # Sidecar file name prefix; the full name carries the DSF stem
 # (``o4_object_terrain_classification_<dsf-stem>.cache``).  Lives under
@@ -462,19 +462,21 @@ def attach_bridge_classification(layout, xplane_root: str):
     """Classify the airport pack's bridge/tunnel objects and cache the
     result (plus sibling road networks) on ``layout``.
 
-    Gated by ``config.OBJECT_BRIDGE_TERRAIN``: with the gate OFF this is a
-    complete no-op — nothing is read, nothing is attached, and the bridge
-    emitters take their unchanged legacy paths (flag-off byte identity).
+    Gated by ``config.OBJECT_BRIDGE_TERRAIN`` OR
+    ``config.OBJECT_TUNNEL_TERRAIN`` (feature A shares this one classifier
+    pass — spec section 3.1): with BOTH gates OFF this is a complete no-op —
+    nothing is read, nothing is attached, and every emitter takes its
+    unchanged legacy path (flag-off byte identity).
 
     Returns the :class:`object_terrain_features.ClassificationResult` (also
-    cached on ``layout``) or ``None`` when the gate is off or no overlay
+    cached on ``layout``) or ``None`` when both gates are off or no overlay
     DSF could be located.
 
     Idempotent: stage 2 attaches PRE-solve (the pin writers need the
     records before the seam hook), and the post-solve emitter hook calls
     this again as a fallback — a result already cached on the layout is
     returned as-is, never recomputed."""
-    if not config.OBJECT_BRIDGE_TERRAIN:
+    if not (config.OBJECT_BRIDGE_TERRAIN or config.OBJECT_TUNNEL_TERRAIN):
         return None
     cached = getattr(layout, CLASSIFICATION_ATTRIBUTE, None)
     if cached is not None:
@@ -791,9 +793,10 @@ def exclusion_set_for_dsf(
     Phase 2 y-bake — terrain-to-object and object-to-terrain corrections
     must never stack.
 
-    Gate-checked: with ``O4_OBJECT_BRIDGE_TERRAIN`` off this returns an
-    empty set having read NOTHING (Phase 2 behaviour unchanged).  Gate on,
-    it reruns the same cached read→load→classify chain as
+    Gate-checked: with BOTH ``O4_OBJECT_BRIDGE_TERRAIN`` and
+    ``O4_OBJECT_TUNNEL_TERRAIN`` off this returns an empty set having read
+    NOTHING (Phase 2 behaviour unchanged).  With either gate on, it reruns
+    the same cached read→load→classify chain as
     :func:`attach_bridge_classification` — deterministic over the same
     DSF, and the pipeline-time layout is gone by post-mesh time, so
     recomputing beats threading state.  Classification here passes
@@ -807,12 +810,11 @@ def exclusion_set_for_dsf(
     ``discover_and_rebake_airport`` so the pair keys match exactly;
     defaults to ``dsf_reader._pack_root_for_dsf``.
 
-    Workstream W-T extends this with the ``O4_OBJECT_TUNNEL_TERRAIN``
-    gate: tunnel structures land on the same exclusion list (spec
-    section 3.3 step 5) — the bridge gate check below becomes an
-    either-gate check when the tunnel feature lands.
+    Feature A (W-T) shares this list: tunnel structures the classifier
+    consumes land on the same exclusion list (spec section 3.3 step 5), so
+    the gate below is an either-gate check.
     """
-    if not config.OBJECT_BRIDGE_TERRAIN:
+    if not (config.OBJECT_BRIDGE_TERRAIN or config.OBJECT_TUNNEL_TERRAIN):
         return set()
     if not dsf_path or not os.path.isfile(dsf_path):
         return set()
@@ -892,3 +894,285 @@ def _log_classification_summary(icao, result, road_networks) -> None:
             "   [object-bridge] refused "
             f"{refusal.object_resources}: {refusal.reason}",
         )
+
+
+# ---------------------------------------------------------------------------
+# Feature A — object-derived tunnel terrain (spec section 3.3 + amendment A1,
+# ruling R12).  Born pre-solve as first-class layout shapes, mirroring
+# bridges.build_bridge_layout_shapes.
+# ---------------------------------------------------------------------------
+
+
+def _tunnel_footprint_meters_parts(tunnel, to_meters) -> list:
+    """Project a tunnel's WHOLE-BODY deck footprint (amendment A1: the
+    author cuts the entire body, not the mouths alone) to layout-meter
+    shapely ``Polygon`` parts.  Empty list on absent/degenerate geometry."""
+    from shapely.geometry import Polygon
+    from .object_terrain_features import frame_polygon_to_longitude_latitude
+
+    if tunnel.deck_footprint is None or tunnel.deck_footprint.is_empty:
+        return []
+    footprint_longitude_latitude = frame_polygon_to_longitude_latitude(
+        tunnel.deck_footprint, tunnel.frame_origin_longitude_latitude
+    )
+    parts = (
+        list(footprint_longitude_latitude.geoms)
+        if footprint_longitude_latitude.geom_type == "MultiPolygon"
+        else [footprint_longitude_latitude]
+    )
+    meter_polygons: list = []
+    for part in parts:
+        ring = [to_meters(lon, lat) for lon, lat in part.exterior.coords]
+        if len(ring) < 3:
+            continue
+        try:
+            polygon = Polygon(ring)
+            if not polygon.is_valid:
+                polygon = polygon.buffer(0)
+        except Exception:
+            continue
+        if polygon.geom_type == "Polygon" and not polygon.is_empty:
+            meter_polygons.append(polygon)
+        elif polygon.geom_type == "MultiPolygon":
+            meter_polygons.extend(
+                geometry for geometry in polygon.geoms
+                if geometry.geom_type == "Polygon" and not geometry.is_empty
+            )
+    return meter_polygons
+
+
+def _split_annulus_to_simple_parts(geometry) -> list:
+    """Split a rim-collar annulus (a polygon with a hole over the floor
+    pan) into simply-connected ``Polygon`` parts so the flat-plate birth
+    primitive — which triangulates from the exterior ring only — cannot
+    fill the hole and bury the floor.  A polygon WITHOUT a hole passes
+    through unchanged; an annulus is cut by a thin centroid cross into
+    simply-connected arc pieces (the idiom
+    ``bridges._emit_deck_lip_weld_strips`` uses for its box-wrapping
+    strips)."""
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+
+    parts = (
+        list(geometry.geoms)
+        if geometry.geom_type == "MultiPolygon" else [geometry]
+    )
+    simple_parts: list = []
+    for part in parts:
+        if part.geom_type != "Polygon" or part.is_empty:
+            continue
+        if not part.interiors:
+            simple_parts.append(part)
+            continue
+        centroid = part.centroid
+        minimum_x, minimum_y, maximum_x, maximum_y = part.bounds
+        reach = max(maximum_x - minimum_x, maximum_y - minimum_y) + 10.0
+        try:
+            cross = unary_union([
+                LineString([(centroid.x - reach, centroid.y),
+                            (centroid.x + reach, centroid.y)]).buffer(0.05),
+                LineString([(centroid.x, centroid.y - reach),
+                            (centroid.x, centroid.y + reach)]).buffer(0.05),
+            ])
+            opened = part.difference(cross)
+        except Exception:
+            continue
+        for piece in (
+                opened.geoms if hasattr(opened, "geoms") else [opened]):
+            if (piece.geom_type == "Polygon" and not piece.is_empty
+                    and not piece.interiors):
+                simple_parts.append(piece)
+    return simple_parts
+
+
+def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
+    """Feature A (``O4_OBJECT_TUNNEL_TERRAIN``, spec section 3.3 + amendment
+    A1, ruling R12): born pre-solve tunnel-trench terrain as FIRST-CLASS
+    layout shapes — the one-solve doctrine, mirroring
+    ``bridges.build_bridge_layout_shapes``.
+
+    Per classified tunnel (``classification.tunnels``, cached by
+    :func:`attach_bridge_classification`):
+
+    * **Datum** (the circular-datum rule): the object drapes at
+      ``terrain(anchor)``, so the anchor's terrain is PINNED at layout as a
+      solver INPUT — the DEM value at the placement anchor.
+    * **Whole-body trench** (amendment A1): the WHOLE deck footprint (body +
+      mouths) is cut, not the mouths alone — the roof OBJECT is the visible
+      ground over the body, and terrain left at grade there would z-fight
+      the roof slab.  A flat floor pan is born at the law floor
+      (``grade_law.tunnel_trench_floor_elevation_m`` = datum − body depth −
+      ``TUNNEL_FLOOR_BELOW_OBJECT_DECK_M``) inset ``_TRENCH_INSET_M``, and a
+      rim collar is born at the datum
+      (``grade_law.tunnel_trench_rim_elevation_m``) — the two coincident
+      rows a node-split (``_CAUSEWAY_INWARD_OVERLAP_M``) apart form the
+      near-vertical R2 wall.
+    * **PAVEMENT WINS** (rulings R2/R8): the airside pavement union is
+      subtracted from the body before birth and the yielded area is logged.
+
+    Both plates carry ``layout.ROLE_TUNNEL_TRENCH`` — a flat-by-law terrain
+    role wired (decimation exemption, weld LAW tier, per-node ``alt_abs`` at
+    ``to_osm``, no within-shape grade rule) exactly like the bridge plates
+    with ONE deliberate difference: it is OFF-PAVEMENT terrain (R2 subtracts
+    the airside pavement from the body before birth), so it is NOT a
+    pavement solver member (absent from ``PAVEMENT_ROLES``) and is born with
+    ``record_pins=False``.  That keeps the deep floor from dragging adjacent
+    airside pavement through the one-solve while the flat-by-law per-node
+    ``alt_abs`` still cuts the trench and wins the LAW-tier weld at any
+    shared vertex.  Returns ``(floor_plate_count, rim_plate_count)``; all
+    zeros when the gate is off or no tunnel classified."""
+    if not config.OBJECT_TUNNEL_TERRAIN:
+        return 0, 0
+    classification = getattr(layout, CLASSIFICATION_ATTRIBUTE, None)
+    if classification is None or not getattr(classification, "tunnels", None):
+        return 0, 0
+
+    from shapely.geometry import Point
+    from shapely.ops import unary_union
+
+    from .bridges import (
+        _local_meter_projections,
+        _BRIDGE_PIN_ROLES,
+        _TRENCH_INSET_M,
+        _CAUSEWAY_INWARD_OVERLAP_M,
+        born_flat_solver_plate,
+    )
+    from .elevation import _sample_dem
+    from .grade_law import (
+        tunnel_trench_floor_elevation_m,
+        tunnel_trench_rim_elevation_m,
+    )
+    from .layout import ROLE_TUNNEL_TRENCH
+
+    to_meters, _meters_to_lat_lon = _local_meter_projections(layout.anchor)
+
+    # Airside pavement union (rulings R2/R8: pavement always wins over the
+    # trench — the roof-slab-versus-pavement coplanarity is open question 5).
+    pavement_polygons = [
+        shape.polygon for shape in layout.shapes
+        if shape.role in _BRIDGE_PIN_ROLES
+        and shape.polygon is not None and not shape.polygon.is_empty
+    ]
+    try:
+        pavement_union = (
+            unary_union(pavement_polygons) if pavement_polygons else None
+        )
+    except Exception:
+        pavement_union = None
+
+    floor_plate_count = 0
+    rim_plate_count = 0
+    for tunnel in classification.tunnels:
+        resources = tunnel.object_resources
+        if tunnel.body_depth_m is None or tunnel.body_depth_m <= 0.0:
+            UI.vprint(
+                1,
+                f"   [object-tunnel] {resources}: no below-grade body depth "
+                "— skipped",
+            )
+            continue
+        anchor_longitude, anchor_latitude = tunnel.anchor_longitude_latitude
+        datum = _sample_dem(
+            dem, tile_lat, tile_lon, anchor_latitude, anchor_longitude
+        )
+        if datum is None or datum != datum:
+            # Silent-zero rule (this project's classic failure mode): a
+            # missing datum is announced at verbosity 1, never swallowed.
+            UI.vprint(
+                1,
+                f"   [object-tunnel] {resources}: no DEM datum at the "
+                "anchor — skipped",
+            )
+            continue
+        # The deck's effective level is negative below grade; the AGL offset
+        # is already folded into ``body_depth_m`` (classifier effective
+        # height), so ``-body_depth_m`` is passed straight to the law.
+        floor_elevation = tunnel_trench_floor_elevation_m(
+            float(datum), -float(tunnel.body_depth_m)
+        )
+        rim_elevation = tunnel_trench_rim_elevation_m(float(datum))
+
+        body_parts = _tunnel_footprint_meters_parts(tunnel, to_meters)
+        if not body_parts:
+            UI.vprint(
+                1,
+                f"   [object-tunnel] {resources}: no deck footprint to cut "
+                "— skipped",
+            )
+            continue
+
+        yielded_area = 0.0
+        for body in body_parts:
+            trench_region = body
+            if pavement_union is not None:
+                try:
+                    kept = body.intersection(pavement_union)
+                    if not kept.is_empty:
+                        yielded_area += kept.area
+                    trench_region = body.difference(pavement_union)
+                except Exception:
+                    trench_region = body
+            region_parts = (
+                list(trench_region.geoms)
+                if trench_region.geom_type == "MultiPolygon"
+                else [trench_region]
+            )
+            for region in region_parts:
+                if (region.geom_type != "Polygon" or region.is_empty
+                        or region.area < 4.0):
+                    continue
+                # Floor pan inset _TRENCH_INSET_M; rim collar band
+                # _CAUSEWAY_INWARD_OVERLAP_M wide at the datum — the same
+                # geometry the bridge trench/causeway pair uses, so the
+                # node-split wall gap is the identical
+                # (_TRENCH_INSET_M - _CAUSEWAY_INWARD_OVERLAP_M) metres,
+                # above the 0.5 m node-interning tolerance (ruling R2).
+                try:
+                    floor_geometry = region.buffer(-_TRENCH_INSET_M)
+                    collar_geometry = region.difference(
+                        region.buffer(-_CAUSEWAY_INWARD_OVERLAP_M)
+                    )
+                except Exception:
+                    continue
+                floor_parts = (
+                    list(floor_geometry.geoms)
+                    if floor_geometry.geom_type == "MultiPolygon"
+                    else [floor_geometry]
+                )
+                region_floor_born = 0
+                for floor_part in floor_parts:
+                    if born_flat_solver_plate(
+                            layout, floor_part, ROLE_TUNNEL_TRENCH,
+                            "object_tunnel_trench", floor_elevation,
+                            record_pins=False):
+                        region_floor_born += 1
+                if not region_floor_born:
+                    # A body too thin to seat a floor pan at the trench
+                    # inset (the tiny negative-AGL shells) is left at grade
+                    # rather than emitting a floorless rim ring — the rim is
+                    # meaningless without a floor to wall down to.
+                    continue
+                floor_plate_count += region_floor_born
+                for collar_part in _split_annulus_to_simple_parts(
+                        collar_geometry):
+                    if collar_part.area < 1.0:
+                        continue
+                    if born_flat_solver_plate(
+                            layout, collar_part, ROLE_TUNNEL_TRENCH,
+                            "object_tunnel_rim", rim_elevation,
+                            record_pins=False):
+                        rim_plate_count += 1
+
+        if yielded_area > 1.0:
+            UI.vprint(
+                1,
+                f"   [object-tunnel] {resources}: {yielded_area:.0f} m2 of "
+                "body under airside pavement kept at pavement grade",
+            )
+        UI.vprint(
+            1,
+            f"   [object-tunnel] {resources}: trench floor {floor_elevation:.2f} "
+            f"m, rim {rim_elevation:.2f} m (datum {float(datum):.2f}, body "
+            f"depth {float(tunnel.body_depth_m):.2f} m)",
+        )
+    return floor_plate_count, rim_plate_count

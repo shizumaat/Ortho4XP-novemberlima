@@ -70,6 +70,7 @@ from .config import (
     taxiway_clearance_half_width_m,
 )
 from .grade_law import (
+    RUNWAY_END_SKIRT_MAX_DOWN_GRADE,
     runway_end_constrained_length_m,
     runway_end_governed_length_beyond_pavement_m,
     runway_end_governed_length_m,
@@ -98,6 +99,7 @@ from .layout import (
     vertex_bucket,
 )
 from .elevation import _sample_dem, _resample_node_altitudes_nn
+from .geom_safe import min_rotated_rect
 from .pavement.junctions import _decompose_polygon_with_holes
 from .pavement.runways import _sample_runway_segment_elev
 
@@ -126,6 +128,12 @@ _GROUNDSIDE_TRIM_MIN_M2 = 50.0
 # inner edge never lands on or merges with pavement, but the visible
 # crack band between pavement and cut halves.
 _PAVEMENT_GAP_M = 1.0
+# Flank pavement-edge reference-step tolerance (SPLP runway-20 flank,
+# 2026-07-17): the noise floor above the law down-grade before a jump in
+# the tracked pavement-edge altitude between adjacent flank stations is
+# treated as a pavement-LEVEL discontinuity the fill must not bridge.
+# Matches the emitted-patch reader's ``skirt_edge_noise_m``.
+_SKIRT_REF_STEP_NOISE_M = 0.15
 # Enclosed-pocket wingtip clearance (Pass A2, user 2026-06-30): ring the full
 # perimeter of a small NON-pavement pocket fully enclosed by taxi pavement, so
 # sharp terrain a wingtip overhangs is cut even where no centerline reaches it.
@@ -694,7 +702,7 @@ def _min_rect_aspect(poly) -> float | None:
     the aspect cannot be measured (degenerate ring) — the blob filter reads
     ``None`` as "unmeasurable, keep it" (never drop on a bad measurement)."""
     try:
-        mrr = poly.minimum_rotated_rectangle
+        mrr = min_rotated_rect(poly)
         xs, ys = mrr.exterior.coords.xy
     except Exception:
         return None
@@ -3002,58 +3010,100 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
             if len(edge_stations) < 2:
                 continue
 
-            def _flank_alt_at(vx, vy, seed=seed, nx=nx, ny=ny,
-                              sxn=sxn, syn=syn,
-                              axis_kept=axis_kept,
-                              edge_offsets=edge_offsets,
-                              edge_alts=edge_alts,
-                              floor_depth=flank_floor_depth,
-                              half=half, sample_dem=sample_dem):
-                # Along-axis position → interpolate the pavement edge
-                # offset and altitude between the two nearest stations.
-                s = (vx - seed[0]) * nx + (vy - seed[1]) * ny
-                s = max(axis_kept[0], min(axis_kept[-1], s))
-                j = 1
-                while j < len(axis_kept) - 1 and axis_kept[j] < s:
-                    j += 1
-                span = axis_kept[j] - axis_kept[j - 1]
-                w = 0.0 if span <= 0.0 else (s - axis_kept[j - 1]) / span
-                offset = (edge_offsets[j - 1]
-                          + (edge_offsets[j] - edge_offsets[j - 1]) * w)
-                edge_alt = (edge_alts[j - 1]
-                            + (edge_alts[j] - edge_alts[j - 1]) * w)
-                lateral = (vx - seed[0]) * sxn + (vy - seed[1]) * syn
-                d = max(0.0, min(half - offset, lateral - offset))
-                if d <= 0.02:
-                    # WELD ROW: a vertex on the flank pavement edge
-                    # carries the interpolated edge value verbatim
-                    # (weld ruling 2026-07-09).
-                    return float(edge_alt)
-                # Lift-only (see _skirt_lift_alt): a flank vertex on a
-                # bump above the local floor rides the DEM, not a cut.
-                return round(_skirt_lift_alt(
-                    edge_alt - floor_depth(d), sample_dem(vx, vy)), 1)
+            # PAVEMENT-EDGE DISCONTINUITY SPLIT (SPLP runway-20 flank,
+            # 2026-07-17): the flank references the pavement side-edge
+            # altitude sampled per axial station.  Where the runway edge
+            # abuts a HIGHER adjacent pavement (SPLP: the runway at
+            # ~48.7 m runs beside an apron/pad at ~53.3 m) the tracked
+            # reference STEPS ~4.6 m over one 5 m station — a longitudinal
+            # jump far above the skirt down-grade cap.  A single band
+            # interpolates its fill reference (``_flank_alt_at``)
+            # CONTINUOUSLY across that step, so the emitted surface
+            # descends 63 %/23 % between adjacent vertices — a signature
+            # ``max(floor, DEM)`` can never produce, which the emitted-
+            # patch reader reads as post-emission corruption.  A fill must
+            # never BRIDGE a pavement-level step: split the flank into
+            # contiguous axial runs wherever the reference altitude changes
+            # faster than the law down-grade allows over the inter-station
+            # distance, and build each run off its OWN continuous reference
+            # closure.  The gap left at the step is the real pavement-to-
+            # pavement transition (a wall between two levels), not a
+            # graded skirt.  End bands (constant reference) never split.
+            seg_bounds = [0]
+            for _i in range(len(edge_stations) - 1):
+                (_px, _py) = edge_stations[_i]
+                (_qx, _qy) = edge_stations[_i + 1]
+                _seg_len = math.hypot(_qx - _px, _qy - _py)
+                if abs(edge_alts[_i + 1] - edge_alts[_i]) > (
+                        RUNWAY_END_SKIRT_MAX_DOWN_GRADE * _seg_len
+                        + _SKIRT_REF_STEP_NOISE_M):
+                    seg_bounds.append(_i + 1)
+            seg_bounds.append(len(edge_stations))
 
-            flank_rings = _build_filled_skirts(
-                edge_stations, edge_alts, [side] * len(edge_stations),
-                caps, flank_floor_depth, flank_band_edges,
-                trigger, step, sample_dem, weld_predicate=_pav_weld_at,
-                pav_vertex_at=_pav_vertex_at)
-            if os.environ.get("O4_SKIRT_DEBUG") == "1":
-                print(f"  [skirt-debug]   flank side ({sxn:.3f},{syn:.3f})"
-                      f" stations={len(edge_stations)} "
-                      f"caps={min(caps):.1f}..{max(caps):.1f} "
-                      f"rings={len(flank_rings)}")
+            for _sb in range(len(seg_bounds) - 1):
+                _a, _b = seg_bounds[_sb], seg_bounds[_sb + 1]
+                if _b - _a < 2:
+                    continue
+                seg_stations = edge_stations[_a:_b]
+                seg_alts = edge_alts[_a:_b]
+                seg_offsets = edge_offsets[_a:_b]
+                seg_caps = caps[_a:_b]
+                seg_axis = axis_kept[_a:_b]
+
+                def _flank_alt_at(vx, vy, seed=seed, nx=nx, ny=ny,
+                                  sxn=sxn, syn=syn,
+                                  axis_kept=seg_axis,
+                                  edge_offsets=seg_offsets,
+                                  edge_alts=seg_alts,
+                                  floor_depth=flank_floor_depth,
+                                  half=half, sample_dem=sample_dem):
+                    # Along-axis position → interpolate the pavement edge
+                    # offset and altitude between the two nearest stations
+                    # of THIS run (its reference is continuous).
+                    s = (vx - seed[0]) * nx + (vy - seed[1]) * ny
+                    s = max(axis_kept[0], min(axis_kept[-1], s))
+                    j = 1
+                    while j < len(axis_kept) - 1 and axis_kept[j] < s:
+                        j += 1
+                    span = axis_kept[j] - axis_kept[j - 1]
+                    w = 0.0 if span <= 0.0 else (s - axis_kept[j - 1]) / span
+                    offset = (edge_offsets[j - 1]
+                              + (edge_offsets[j] - edge_offsets[j - 1]) * w)
+                    edge_alt = (edge_alts[j - 1]
+                                + (edge_alts[j] - edge_alts[j - 1]) * w)
+                    lateral = (vx - seed[0]) * sxn + (vy - seed[1]) * syn
+                    d = max(0.0, min(half - offset, lateral - offset))
+                    if d <= 0.02:
+                        # WELD ROW: a vertex on the flank pavement edge
+                        # carries the interpolated edge value verbatim
+                        # (weld ruling 2026-07-09).
+                        return float(edge_alt)
+                    # Lift-only (see _skirt_lift_alt): a flank vertex on a
+                    # bump above the local floor rides the DEM, not a cut.
+                    return round(_skirt_lift_alt(
+                        edge_alt - floor_depth(d), sample_dem(vx, vy)), 1)
+
+                flank_rings = _build_filled_skirts(
+                    seg_stations, seg_alts, [side] * len(seg_stations),
+                    seg_caps, flank_floor_depth, flank_band_edges,
+                    trigger, step, sample_dem, weld_predicate=_pav_weld_at,
+                    pav_vertex_at=_pav_vertex_at)
+                if os.environ.get("O4_SKIRT_DEBUG") == "1":
+                    print(f"  [skirt-debug]   flank side "
+                          f"({sxn:.3f},{syn:.3f}) run {_sb} "
+                          f"stations={len(seg_stations)} "
+                          f"caps={min(seg_caps):.1f}..{max(seg_caps):.1f} "
+                          f"rings={len(flank_rings)}")
+                    for ring, _ralts in flank_rings:
+                        ts = [(vx - seed[0]) * nx + (vy - seed[1]) * ny
+                              for vx, vy in ring]
+                        ls = [(vx - seed[0]) * sxn + (vy - seed[1]) * syn
+                              for vx, vy in ring]
+                        print(f"  [skirt-debug]     ring t "
+                              f"{min(ts):.1f}..{max(ts):.1f} lateral "
+                              f"{min(ls):.1f}..{max(ls):.1f}")
                 for ring, _ralts in flank_rings:
-                    ts = [(vx - seed[0]) * nx + (vy - seed[1]) * ny
-                          for vx, vy in ring]
-                    ls = [(vx - seed[0]) * sxn + (vy - seed[1]) * syn
-                          for vx, vy in ring]
-                    print(f"  [skirt-debug]     ring t "
-                          f"{min(ts):.1f}..{max(ts):.1f} lateral "
-                          f"{min(ls):.1f}..{max(ls):.1f}")
-            for ring, _ralts in flank_rings:
-                skirt_strips.append((ring, _flank_alt_at))
+                    skirt_strips.append((ring, _flank_alt_at))
 
     if source_runways:
         # AUTHORITATIVE: anchor each end at the apt.dat row-100

@@ -143,6 +143,9 @@ class _FakeChild:
         self.started.append((self.tile, step_key))
         return True
 
+    def send(self, payload):
+        return True
+
 
 def _bare_run(tiles, slots):
     return parallel.ParallelBuildRun(
@@ -264,26 +267,26 @@ def test_mesh_memory_estimates_follow_elevation_level():
 # ---------------------------------------------------------------------
 # Class limits end to end (wall-clock proof via per-step markers)
 # ---------------------------------------------------------------------
-def test_compute_steps_serialize_at_two_slots(
+def test_compute_steps_run_concurrently(
     monkeypatch, tmp_path, stub_worker_command, collector
 ):
+    """Compute steps are uncapped (2026-07-17 ruling: the operating
+    system arbitrates processor contention) — two sleeper tiles' mesh
+    steps overlap in wall-clock time; only the memory admission gate
+    and the network classes ever hold a step back."""
     monkeypatch.setenv("STUB_WORKER_MARK_DIR", str(tmp_path))
     session = EngineSession()
-    tiles = [(40, -100), (41, -100)]
+    # Sleeper tiles (lat 60) sleep ~0.6 s inside EVERY step, so their
+    # mesh intervals overlap solidly when dispatched concurrently.
+    tiles = [(60, -100), (60, -101)]
     result = _run_build(session, collector, tiles, slots=2)
     assert (result.done_count, result.error_count) == (2, 0)
-    # slots=2 -> compute limit 1: the two tiles' mesh steps never overlap.
     mesh_intervals = [
         _step_interval(tmp_path, tile, "mesh") for tile in tiles
     ]
-    assert _max_concurrency(mesh_intervals) == 1
-    # ... while the run as a whole still overlapped (vector is class
-    # network with cap 2, so the tiles pipelined rather than serialized).
-    starts = [float((tmp_path / ("start_%d_%d" % t)).read_text())
-              for t in tiles]
-    ends = [float((tmp_path / ("end_%d_%d" % t)).read_text())
-            for t in tiles]
-    assert max(starts) < min(ends), "tiles should pipeline, not serialize"
+    assert _max_concurrency(mesh_intervals) == 2, (
+        "uncapped compute steps must run concurrently"
+    )
 
 
 def test_network_class_capped_at_two_with_three_slots(
@@ -356,6 +359,31 @@ def test_warmer_warms_queued_tiles_before_their_builds(
         assert last_warm <= build_start + 1e-3
 
 
+def test_warmer_skips_tiles_covered_by_local_extracts(
+    monkeypatch, tmp_path, stub_worker_command, collector
+):
+    """The warmer exists to spare OVERPASS; a tile fully covered by
+    local regional extracts never touches Overpass, and warming it
+    would run country-sized pbf scans inside the front-end process,
+    starving the interface through the interpreter lock (live
+    "build appears hung", 2026-07-17)."""
+    monkeypatch.delenv("O4_DISABLE_OSM_WARMER", raising=False)
+    monkeypatch.setenv("STUB_WORKER_MARK_DIR", str(tmp_path))
+    warm_log = []
+    _install_warm_stubs(monkeypatch, warm_log)
+    fake_extracts = types.ModuleType("O4_OSM_Extracts")
+    fake_extracts.local_extracts_cover = lambda bounding_box: True
+    monkeypatch.setitem(sys.modules, "O4_OSM_Extracts", fake_extracts)
+
+    session = EngineSession()
+    tiles = [(40, -100), (41, -100), (42, -100), (43, -100)]
+    result = _run_build(session, collector, tiles, slots=2)
+    assert (result.done_count, result.error_count) == (4, 0)
+    assert warm_log == [], (
+        "locally covered tiles must not be warmed in the front-end "
+        "process")
+
+
 def test_warmer_disabled_by_environment(
     monkeypatch, stub_worker_command, collector
 ):
@@ -417,9 +445,10 @@ def test_sibling_count_broadcast_when_a_tile_finishes():
     run._children = [finished, survivor]
     run._queue.clear()
     # The finished child's tile is on its last step.
-    run._next_step_index[(10, 10)] = len(run._program) - 1
+    program = run._programs[(10, 10)]
+    run._next_step_index[(10, 10)] = len(program) - 1
     run._next_step_index[(11, 11)] = 0
-    finished.running_step = run._program[-1]
+    finished.running_step = program[-1]
     run._child_step_done(finished)
     assert finished.tile is None
     assert {"cmd": "siblings", "count": 1} in survivor.sent
@@ -428,3 +457,68 @@ def test_sibling_count_broadcast_when_a_tile_finishes():
     survivor.sent.clear()
     run._broadcast_sibling_count()
     assert survivor.sent == []
+
+
+def test_sibling_count_ignores_queued_tiles():
+    """Queued tiles consume nothing until a child picks them up, so
+    they must NOT count as siblings: the pre-2026-07-17 formula told
+    every child in a 2-slot 6-tile run that six siblings shared the
+    machine, throttling each to a sixth of it for the whole run."""
+    run = _bare_run([(10, 10), (11, 11), (12, 12), (13, 13),
+                     (14, 14), (15, 15)], 2)
+
+    class _SendingChild(_FakeChild):
+        def __init__(self):
+            super().__init__()
+            self.sent = []
+
+        def send(self, payload):
+            self.sent.append(payload)
+            return True
+
+    first, second = _SendingChild(), _SendingChild()
+    first.tile, second.tile = (10, 10), (11, 11)
+    run._children = [first, second]
+    for tile in [(10, 10), (11, 11)]:
+        run._queue.remove(tile)
+        run._next_step_index[tile] = 0
+    # Four tiles still queued; two children hold tiles.  The broadcast
+    # baseline is the slot count (2) — holders match it, so nothing is
+    # sent, and above all nothing says "6".
+    run._broadcast_sibling_count()
+    assert first.sent == [] and second.sent == []
+    assert run._sibling_broadcast == 2
+
+
+def test_enqueue_admits_new_tiles_and_skips_running_ones():
+    """enqueue() on a live run admits fresh tiles (per-batch build
+    arguments) and refuses duplicates of queued or active tiles."""
+    run = _bare_run([(10, 10), (11, 11)], 2)
+    # No real worker processes in this unit test.
+    run._spawn_child = lambda: None
+    child = _FakeChild()
+    child.tile = (10, 10)
+    run._children = [child]
+    run._queue.remove((10, 10))
+    run._next_step_index[(10, 10)] = 1
+
+    admitted = run.enqueue([(10, 10), (11, 11), (12, 12)],
+                           "OTHERPROVIDER", 17, "/elsewhere/",
+                           (True, True, True))
+    assert admitted == 1
+    assert (12, 12) in run._queue
+    assert run._total == 3
+    # The new batch keeps its own build arguments and step program.
+    assert run._tile_arguments[(12, 12)]["provider"] == "OTHERPROVIDER"
+    assert run._tile_arguments[(12, 12)]["zoomlevel"] == 17
+    assert run._programs[(12, 12)] == [
+        "vector", "mesh", "masks", "imagery", "overlays"]
+    # The original batch is untouched.
+    assert run._tile_arguments[(11, 11)]["provider"] == "P"
+    assert run._programs[(11, 11)] == ["vector", "mesh", "masks"]
+
+
+def test_enqueue_refused_once_run_finished():
+    run = _bare_run([(10, 10)], 2)
+    run._finished = True
+    assert run.enqueue([(11, 11)], "P", 16, "", (True, False, False)) == 0

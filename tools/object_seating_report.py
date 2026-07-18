@@ -84,6 +84,26 @@ def main() -> int:
         print(f"  {os.path.basename(resource):44} {summary[:90]}")
     print()
 
+    # Per-STRUCTURE skips (skip_reason set on the structure, not the
+    # resource): the rigid-seat span limit leaves a whole chained contact
+    # component at its authored elevations.  These never appear in the
+    # resource-level "skipped" list above, so surface them here with their
+    # centroid and span so a span-limited mega component is visible.
+    structure_skips = [
+        structure
+        for _pool, decision in result["decisions"]
+        for structure in decision.structures
+        if structure.skip_reason
+    ]
+    print(f"structures left at authored elevations ({len(structure_skips)}) — "
+          "per-structure skip_reason:")
+    for structure in structure_skips:
+        span = structure.ground_span_metres or 0.0
+        print(f"  {structure.centroid_latitude:.6f}, "
+              f"{structure.centroid_longitude:.6f}  span {span:6.2f}  "
+              f"{(structure.skip_reason or '')[:80]}")
+    print()
+
     rows = []
     for pool, decision in result["decisions"]:
         # Re-load geometry the same way discovery did (backup preferred).

@@ -62,7 +62,12 @@ def _layout_with_skirt():
 
 
 # ── node-list admission ──────────────────────────────────────────────
-def test_skirt_excluded_from_node_list_gate_off():
+def test_skirt_excluded_from_node_list_gate_off(monkeypatch):
+    # The one-solve-terrain gates default ON since fad621da (round-7
+    # slice-B bundle) — force them OFF explicitly: this test asserts
+    # the gate-OFF contract, not the shipping default.
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN", False)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", False)
     nodes, b2i = SP._build_node_list(_layout_with_skirt())
     # Only the apron's 4 corners; the skirt terrain-side vertices absent.
     assert (12.0, 12.0) not in nodes
@@ -112,7 +117,11 @@ def test_skirt_vertices_hard_pinned_at_birth_values(monkeypatch):
     assert _idx(12.0, 12.0) in layout._seam_pin_idx
 
 
-def test_gate_off_no_skirt_pins():
+def test_gate_off_no_skirt_pins(monkeypatch):
+    # Gates default ON since fad621da — force OFF; see the note on
+    # ``test_skirt_excluded_from_node_list_gate_off``.
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN", False)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", False)
     layout = _layout_with_skirt()
     nodes, b2i = SP._build_node_list(layout)
     elev, is_hard, have_initial = SP._seed_elevations(layout, nodes, b2i)

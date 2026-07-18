@@ -88,6 +88,7 @@ from shapely.geometry import LineString
 from shapely.errors import GEOSException, TopologicalError
 from shapely.ops import unary_union
 
+from .geom_safe import min_rotated_rect
 from .layout import ROLE_TUNNEL_RAMP
 
 __all__ = ["road_lane_exclusion_union"]
@@ -130,7 +131,7 @@ def _obb_lane(poly):
     oriented bounding box, or ``None``.  The half-width is the OBB short
     side / 2 plus ``_LANE_MARGIN_M``."""
     try:
-        mrr = poly.minimum_rotated_rectangle
+        mrr = min_rotated_rect(poly)
         corners = list(mrr.exterior.coords)[:4]
         if len(corners) < 4:
             return None

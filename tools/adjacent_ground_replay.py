@@ -64,6 +64,22 @@ def do_snapshot(icao):
     real_emit = ag.emit_adjacent_ground_bands
 
     def _hook(layout, dem, tile_lat, tile_lon, source_runways=None):
+        # Some pipeline stages cache unpicklable objects (shapely
+        # PREPARED geometries) on the layout.  Drop those attributes
+        # from the snapshot — they are derived caches the consumers
+        # rebuild on demand — and report what was dropped so a replay
+        # divergence can be traced back here.
+        dropped = []
+        for name in list(vars(layout)):
+            try:
+                pickle.dumps(getattr(layout, name),
+                             protocol=pickle.HIGHEST_PROTOCOL)
+            except Exception:
+                dropped.append(name)
+                delattr(layout, name)
+        if dropped:
+            print(f"[snapshot] dropped unpicklable layout attribute(s): "
+                  f"{dropped}")
         with open(snap, "wb") as fh:
             pickle.dump((layout, dem, tile_lat, tile_lon, source_runways),
                         fh, protocol=pickle.HIGHEST_PROTOCOL)

@@ -32,6 +32,8 @@ from pathlib import Path
 
 import O4_UI_Utils as UI
 
+from .geom_safe import min_rotated_rect
+
 _TAXI_ROLES = ("primary_parallel", "secondary_parallel",
                "stub", "cross_connector")
 
@@ -1413,7 +1415,7 @@ def check_adjacent_ground(layout, dem, tile_lat, tile_lon,
         END-edge skipping.  ``(0.0, None)`` when degenerate (never raises;
         ``runway_code_number(0.0)`` keys the smallest code)."""
         try:
-            xs = list(poly.minimum_rotated_rectangle.exterior.coords)
+            xs = list(min_rotated_rect(poly).exterior.coords)
         except CL._GEOM_EXC:
             return (0.0, None)
         best = None
@@ -2424,6 +2426,67 @@ def junction_mesh_edges_ll(layout):
             edges_ll.append([[round(lat_a, 7), round(lon_a, 7)],
                              [round(lat_b, 7), round(lon_b, 7)]])
     return edges_ll
+
+
+def lockstep_pair_caps_ll(layout):
+    """The solver's WITHIN-SHAPE baked pair allowances as lat/lon endpoint
+    pairs + metre caps — the sidecar's ``pair_caps`` key (the last lockstep
+    reader: axes, routes, seam pins, mesh edges and crown drops are already
+    exported; the PAIR SELECTION + per-pair anisotropic allowance was not,
+    so the standalone check re-baked them from the emitted ring and drifted
+    whenever post-projection vertex inserts shortened the spans — measured
+    CYXY 2026-07-17: 11 of 12 within-shape flags were pairs the projection
+    had enforced at a LOOSER lawful cap, the 12th a pair the law-side bake
+    never selected).
+
+    Source: ``layout._lockstep_shape_bake`` (grade_graph's per-shape export,
+    ring-POSITION space at the ring state of the last law-graph build — the
+    solve or ``final_grade_projection``).  Positions are resolved to
+    coordinates through the entry's own stored ring signature, then to the
+    CANONICAL point (the exact coordinates ``to_osm`` emits), so post-solve
+    ring mutations cannot desynchronize the mapping; a vertex that no
+    longer exists simply drops its pairs.  Caps are metres (the pair's
+    grade budget); duplicate pairs keep the SMALLEST cap (the MIN-budget
+    aggregation ruling, test_single_graph_acceptance 2026-07-17)."""
+    import math as _math
+    from .grade_law import pair_grade_budget_m
+    store = getattr(layout, "_lockstep_shape_bake", None)
+    registry = getattr(layout, "canonical_points", None)
+    if not store or registry is None:
+        return []
+    best: dict = {}
+    for (_role, ring_signature, baked_edges, _spine) in store.values():
+        for (position_a, position_b, cap_allowance) in baked_edges:
+            if (position_a >= len(ring_signature)
+                    or position_b >= len(ring_signature)):
+                continue
+            (ax, ay) = ring_signature[position_a]
+            (bx, by) = ring_signature[position_b]
+            point_a = registry.find_nearest(ax, ay, registry.tol_m)
+            point_b = registry.find_nearest(bx, by, registry.tol_m)
+            if point_a is None or point_b is None:
+                continue
+            # The metre budget through THE shared pair-law formula, at
+            # the solve-ring pair distance (the distance the projection
+            # enforced the budget over).
+            distance = _math.hypot(bx - ax, by - ay)
+            if distance < 1e-9:
+                continue
+            try:
+                budget = float(pair_grade_budget_m(cap_allowance, distance))
+            except Exception:
+                continue
+            lat_a, lon_a = layout.m_to_ll(*point_a)
+            lat_b, lon_b = layout.m_to_ll(*point_b)
+            key_a = (round(lat_a, 7), round(lon_a, 7))
+            key_b = (round(lat_b, 7), round(lon_b, 7))
+            if key_a == key_b:
+                continue
+            pair_key = (min(key_a, key_b), max(key_a, key_b))
+            if pair_key not in best or budget < best[pair_key]:
+                best[pair_key] = budget
+    return [[list(a), list(b), budget]
+            for ((a, b), budget) in sorted(best.items())]
 
 
 def taxi_routes_ll(layout):

@@ -65,6 +65,7 @@ try:
         ROLE_GRADE_LIMITS,
         GRADE_VISIBILITY_BUFFER_M as _GRADE_VISIBILITY_BUFFER_M,
         ELEV_ROUNDING_NOISE_M,
+        SLOPED_QUAD_ROUNDING_NOISE_M,
         ROUTE_FIELD_MODEL,
         ROUTE_FIELD_LOCAL_WINDOW_M,
         ROAD_FRONTAGE_TOL_M,
@@ -81,6 +82,7 @@ except Exception:
     SHARED_VERTEX_TOL_M = 0.5
     _GRADE_VISIBILITY_BUFFER_M = 1.0
     ELEV_ROUNDING_NOISE_M = 0.03
+    SLOPED_QUAD_ROUNDING_NOISE_M = 0.1
     ROUTE_FIELD_MODEL = False
     ROUTE_FIELD_LOCAL_WINDOW_M = 80.0
     ROAD_FRONTAGE_TOL_M = 3.0
@@ -842,8 +844,10 @@ class ShapePairConstraint:
     """One within-shape grade constraint on a vertex pair (the SINGLE source
     of truth for the constrained pair set — consumed by the validator AND the
     feasibility oracle ``tools/grade_feasibility_audit.py``).  The grade law
-    is ``|elev_a - elev_b| <= cap * dist`` (the validator allows an extra
-    ``ELEV_ROUNDING_NOISE_M`` on top, folded into ``allowance``)."""
+    is ``|elev_a - elev_b| <= cap * dist`` plus the emit/weld quantization
+    envelope, folded into ``allowance`` by :func:`_pair_grade_allowance`
+    (``max(route-baked budget, cap*dist)`` — never TIGHTER than the flat cap —
+    plus the per-shape quantization noise, :func:`_pair_quant_noise_m`)."""
     way: "Way"
     nid_a: str
     nid_b: str
@@ -855,11 +859,64 @@ class ShapePairConstraint:
     eb: float
     dist: float
     cap: float          # decimal grade limit for this pair (role / road / ramp)
-    allowance: float    # cap*dist + ELEV_ROUNDING_NOISE_M (validator tolerance)
+    allowance: float    # max(baked, cap*dist) + quant-noise (validator tolerance)
     # SPINE CROWN (part 30): the designed crown target of ``ea − eb``
     # (``grade_law.crown_pair_offset`` over the sidecar drop field); the
     # law is ``|(ea − eb) − offset| ≤ allowance``.  0 for uncrowned pairs.
     offset: float = 0.0
+
+
+_WELD_HUB_ROLES = frozenset({"junction", "service_junction"})
+
+
+def _pair_quant_noise_m(way: "Way") -> float:
+    """Quantization allowance for a within-shape PAIR on ``way`` — the emit /
+    weld micro-step envelope the pair's Δz can carry without meaning a real
+    grade defect.
+
+    Per-node ``alt_abs`` emits at 0.01 m, so an all-per-node body pair carries
+    only ``ELEV_ROUNDING_NOISE_M`` of rounding.  The coarse envelope
+    ``SLOPED_QUAD_ROUNDING_NOISE_M`` (0.1 m) applies to two shape classes whose
+    ring edges carry a full decimetre of emit/weld displacement:
+
+    * **Sloped-quad ways** (``altitude_high``/``altitude_low``) emit at 0.1 m
+      (``bridges.py`` ``_emit_tunnel_portals`` grade_safety_margin) — a pair
+      spanning the high and low corners carries a full 0.1-m round.
+    * **Junction-family ways** (the emit WELD HUBS): junction rings are
+      rebuilt by the conformance / planarization pass — T-vertex inserts,
+      unshared-neighbour-corner inserts, epsilon-wedge welds (see the
+      ``[conformance]`` / ``[pav-builder]`` junction logs) — which displace a
+      short ring edge by up to the same decimetre.  A junction's short ring
+      edge can therefore read a few % over its 1.5 % cap purely from that
+      weld displacement (SPLP junction #68: 6 cm over 0.85 m).  On a LONG
+      junction pair the absolute 0.1 m adds only a fraction of a % of grade
+      headroom, so this loosens only the short weld-artifact edges, not the
+      real long-range junction grade the field solver owns."""
+    if "altitude_high" in way.tags and "altitude_low" in way.tags:
+        return SLOPED_QUAD_ROUNDING_NOISE_M
+    if way.tags.get("role") in _WELD_HUB_ROLES:
+        return SLOPED_QUAD_ROUNDING_NOISE_M
+    return ELEV_ROUNDING_NOISE_M
+
+
+def _pair_grade_allowance(cap_allow, dist: float, way: "Way") -> float:
+    """The within-shape PAIR grade tolerance ``cap × run + allowance`` (the
+    symmetric quantization envelope the plane-gradient law already grants —
+    ``_check_plane_gradient`` uses ``grade_cap·dist + ELEV_ROUNDING_NOISE_M``).
+
+    ``cap × run`` is the FLAT budget ``cap_allow.flat_cap() · dist``; a
+    route-decomposed BAKED allowance (``cap_allow.at`` returning an anisotropic
+    ``√((cL·Δs∥)² + (cT·Δs⊥)²)`` budget) is honoured only when it EXCEEDS the
+    flat budget (the curve arc-credit case) — never when it is TIGHTER, so an
+    at-cap emitted pair never false-flags merely because its route projection
+    trimmed the budget below the flat cap (SPJC service_road #461: 5.006 % =
+    0.5 mm over the 5 % cap, but the baked budget sat 5 cm below it).  The
+    quantization allowance on top is the emit/weld envelope for the shape's
+    encoding (``_pair_quant_noise_m``).  The budget core is
+    ``grade_law.pair_grade_budget_m`` — THE single formula shared with
+    ``grade_graph_validate`` so the two pair-law readers cannot drift."""
+    from auto_patch.grade_law import pair_grade_budget_m
+    return pair_grade_budget_m(cap_allow, dist) + _pair_quant_noise_m(way)
 
 
 _SLOPING_RECT_OSM_ROLES = frozenset({
@@ -1003,6 +1060,7 @@ def iter_shape_grade_constraints(
         mesh_edges_m: Optional[list] = None,
         crown_by_nid: Optional[Dict[str, float]] = None,
         crown_centerline_nids: Optional[set] = None,
+        pair_caps_ll: Optional[list] = None,
         ) -> "list[ShapePairConstraint]":
     """Yield every within-shape vertex-pair the grade check constrains.
 
@@ -1069,6 +1127,22 @@ def iter_shape_grade_constraints(
     from auto_patch.grade_law import crown_pair_offset as _crown_off
     crown_by_nid = crown_by_nid or {}
     crown_centerline_nids = crown_centerline_nids or set()
+    # BAKED PAIR CAPS (sidecar ``pair_caps``, 2026-07-17): the exact pair
+    # selection + metre allowances the solver's final projection enforced
+    # (``verification.lockstep_pair_caps_ll``).  When a SOFT shape has
+    # coverage, constrain exactly these pairs — re-baking from the
+    # emitted ring diverges: post-projection vertex inserts shorten the
+    # spans (tighter anisotropic credit than was lawfully enforced) and
+    # the OSM-side context can select pairs the law-side bake never did.
+    _pair_cap_map: Dict[tuple, float] = {}
+    for _entry in (pair_caps_ll or []):
+        (_pla, _plo), (_plb, _plo2), _pcap = _entry
+        _ka = (round(float(_pla), 7), round(float(_plo), 7))
+        _kb = (round(float(_plb), 7), round(float(_plo2), 7))
+        _pk = (min(_ka, _kb), max(_ka, _kb))
+        _pcap = abs(float(_pcap))
+        if _pk not in _pair_cap_map or _pcap < _pair_cap_map[_pk]:
+            _pair_cap_map[_pk] = _pcap
     _SOFT_ROLES = _GG.SOFT_VISIBILITY_ROLES
     for w in ways:
         grade_cap = _role_grade_limit(w, max_grade)
@@ -1093,6 +1167,44 @@ def iter_shape_grade_constraints(
             continue
         # ── SOFT airside shapes → THE LAW (one shared within-shape rule set) ──
         role0 = w.tags.get("role")
+        if role0 in _SOFT_ROLES and _pair_cap_map:
+            # LOCKSTEP CONSUMPTION: constrain exactly the solver-baked
+            # pairs of this ring (matched by rounded lat/lon endpoint
+            # keys).  Vertices absent from the bake (post-projection
+            # inserts — their values interpolate along a baked edge)
+            # contribute no pairs; a ring with ZERO matches falls
+            # through to the re-bake path below (no bake ⇒ old law).
+            _llk = [(round(nodes[pnids[k]][0], 7),
+                     round(nodes[pnids[k]][1], 7)) for k in range(n)]
+            _matched = []
+            for _ia in range(n):
+                for _ib in range(_ia + 1, n):
+                    _pk = (min(_llk[_ia], _llk[_ib]),
+                           max(_llk[_ia], _llk[_ib]))
+                    _cap_m = _pair_cap_map.get(_pk)
+                    if _cap_m is not None:
+                        _matched.append((_ia, _ib, _cap_m))
+            if _matched:
+                for (_ia, _ib, _cap_m) in _matched:
+                    xi, yi, ei, _si = pts[_ia]
+                    xj, yj, ej, _sj = pts[_ib]
+                    d = math.hypot(xi - xj, yi - yj)
+                    if d < 0.5:
+                        continue
+                    # Same envelope structure as _pair_grade_allowance:
+                    # the baked budget, floored at the flat cap (the
+                    # pair-law MAX), plus the shape's quantization
+                    # noise.
+                    out.append(ShapePairConstraint(
+                        way=w, nid_a=pnids[_ia], nid_b=pnids[_ib],
+                        xa=xi, ya=yi, ea=ei, xb=xj, yb=yj, eb=ej,
+                        dist=d, cap=grade_cap,
+                        allowance=(max(_cap_m, grade_cap * d)
+                                   + _pair_quant_noise_m(w)),
+                        offset=_crown_off(
+                            crown_by_nid.get(pnids[_ia], 0.0),
+                            crown_by_nid.get(pnids[_ib], 0.0))))
+                continue
         if role0 in _SOFT_ROLES:
             ring = [(p[0], p[1]) for p in pts]
             gs = _GG.GradeShape(
@@ -1125,7 +1237,7 @@ def iter_shape_grade_constraints(
                     way=w, nid_a=pnids[ia], nid_b=pnids[ib],
                     xa=xi, ya=yi, ea=ei, xb=xj, yb=yj, eb=ej,
                     dist=d, cap=cap.flat_cap(),
-                    allowance=cap.at(d, 0.0) + ELEV_ROUNDING_NOISE_M,
+                    allowance=_pair_grade_allowance(cap, d, w),
                     offset=_crown_off(crown_by_nid.get(pnids[ia], 0.0),
                                       crown_by_nid.get(pnids[ib], 0.0))))
             continue
@@ -1164,7 +1276,7 @@ def iter_shape_grade_constraints(
                 way=w, nid_a=pnids[ia], nid_b=pnids[ib],
                 xa=xi, ya=yi, ea=ei, xb=xj, yb=yj, eb=ej,
                 dist=d, cap=capp.flat_cap(),
-                allowance=capp.at(d, 0.0) + ELEV_ROUNDING_NOISE_M,
+                allowance=_pair_grade_allowance(capp, d, w),
                 offset=_crown_off(crown_by_nid.get(pnids[ia], 0.0),
                                   crown_by_nid.get(pnids[ib], 0.0))))
     return out
@@ -1343,18 +1455,22 @@ def _check_within_shape(ways: List[Way],
                         mesh_edges_m: Optional[list] = None,
                         crown_by_nid: Optional[Dict[str, float]] = None,
                         crown_centerline_nids: Optional[set] = None,
+                        pair_caps_ll: Optional[list] = None,
                         ) -> List[Violation]:
     """Grade check between vertex pairs on the same way.  Consumes
     ``iter_shape_grade_constraints`` (the single source of constrained pairs)
     and flags any pair whose stored Δelev exceeds its allowance — a violation
-    requires ``|de − crown_offset| > cap*dist + ELEV_ROUNDING_NOISE_M`` (the
-    crown offset is 0 for uncrowned pairs) so single-decimal rounding doesn't
-    produce spurious sub-metre flags."""
+    requires ``|de − crown_offset| > max(baked, cap*dist) + quant_noise`` (see
+    ``_pair_grade_allowance`` — the flat-cap floor mirrors the plane-gradient
+    law's ``cap*dist + noise``, and ``quant_noise`` is the shape's emit/weld
+    envelope; crown offset is 0 for uncrowned pairs) so emit rounding and
+    weld-insert micro-steps don't produce spurious sub-metre flags."""
     out: List[Violation] = []
     for c in iter_shape_grade_constraints(
             ways, nodes, ll_to_m, max_grade, seam_nids, taxi_axes, routes_ll,
             mesh_edges_m=mesh_edges_m, crown_by_nid=crown_by_nid,
-            crown_centerline_nids=crown_centerline_nids):
+            crown_centerline_nids=crown_centerline_nids,
+            pair_caps_ll=pair_caps_ll):
         de = abs((c.ea - c.eb) - c.offset)
         if de <= c.allowance:
             continue
@@ -1828,6 +1944,7 @@ def run_checks(
     mesh_edges_ll: Optional[list] = None,
     crown_drops_ll: Optional[list] = None,
     crown_centerline_ll: Optional[list] = None,
+    pair_caps_ll: Optional[list] = None,
 ) -> Tuple[List[Violation], List[Violation], List[EdgeStep]]:
     """``taxi_axes_ll`` (the builder's APT.DAT taxi centerlines as
     ``[(latlon_points, cL, cT), …]``) supplies the within-shape grade graph's
@@ -1916,7 +2033,8 @@ def run_checks(
         ways, nodes, ll_to_m, max_grade, seam_nids=seam_nids,
         taxi_axes=taxi_axes, routes_ll=routes_ll,
         mesh_edges_m=mesh_edges_m, crown_by_nid=crown_by_nid,
-        crown_centerline_nids=crown_centerline_nids)
+        crown_centerline_nids=crown_centerline_nids,
+        pair_caps_ll=pair_caps_ll)
     # BREAK-REGION split (user 2026-07-05): pairs touching a node the
     # SOLVER declared broken (genuine anchor contradiction, rendered as
     # the contained distance-weighted blend) are the pocket's designed
@@ -2086,7 +2204,7 @@ def main(argv=None) -> int:
     # every spine/blend-relaxed pair.
     taxi_axes_ll = routes_ll = anchor = seam_pins_ll = None
     break_nodes_ll = mesh_edges_ll = crown_drops_ll = None
-    crown_centerline_ll = None
+    crown_centerline_ll = pair_caps_ll = None
     sidecar = Path(str(args.osm) + ".axes.json")
     if sidecar.exists():
         try:
@@ -2107,6 +2225,7 @@ def main(argv=None) -> int:
             mesh_edges_ll = _data.get("mesh_edges") or None
             crown_drops_ll = _data.get("crown_drops") or None
             crown_centerline_ll = _data.get("crown_centerline") or None
+            pair_caps_ll = _data.get("pair_caps") or None
             print(f"  (axes sidecar loaded: {len(taxi_axes_ll or [])} axes"
                   + (" [exact]" if _exact else "")
                   + f", {len(routes_ll or [])} routes"
@@ -2135,6 +2254,7 @@ def main(argv=None) -> int:
         mesh_edges_ll=mesh_edges_ll,
         crown_drops_ll=crown_drops_ll,
         crown_centerline_ll=crown_centerline_ll,
+        pair_caps_ll=pair_caps_ll,
     )
     if args.strict and (within or cross or steps):
         return 1

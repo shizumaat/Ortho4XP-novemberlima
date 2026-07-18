@@ -80,6 +80,13 @@ RESIDUAL_COMPARISON_TOLERANCE_METRES = 1e-6
 # skipping left 49 resources floating at anchor minus local ground.
 A3_GUARD_MAXIMUM_DIAMETER_METRES = 100.0
 
+# Stable phrase carried in the ``skip_reason`` of a structure left at its
+# authored elevations because its ground-contact terrain span exceeds
+# ``DSF_OBJECT_BAKE_MAX_GROUND_SPAN_M``.  ``post_mesh`` matches on it to
+# count the per-airport "left at authored elevations" summary, so the
+# reason text and this phrase must stay in lockstep.
+GROUND_SPAN_SKIP_REASON_PHRASE = "exceeds the rigid-seat limit"
+
 
 @dataclass(frozen=True)
 class ObjectPool:
@@ -403,6 +410,149 @@ def detect_foot_clusters(
         )
     feet.sort(key=lambda foot: (foot.centroid_x, foot.centroid_z))
     return feet
+
+
+@dataclass(frozen=True)
+class ConnectorMetrics:
+    """Footprint metrics that recognise a CONNECTOR object.
+
+    Defect 2026-07-17 (UK payware co-baked airports): scenery packs bake
+    a whole airport as many ``.obj`` files sharing one anchor, and among
+    them are CONNECTOR meshes — perimeter fences, road/rail networks,
+    whole-complex ground slabs — whose base geometry physically touches
+    (within the contact epsilon) every real building.  Left in the pool
+    they chain all the buildings into one connected structure whose
+    convex hull fills the field, burying the real buildings and the
+    below-grade tunnels under one airport-sized pad (EGGW building1 was
+    2,814,841 m²; EGLL's T5 web 537,939 m²).
+
+    A connector is long AND sparse: a fence or branching road covers only
+    a thin sliver of the convex hull it stretches across; a solid terminal
+    slab, however large, fills most of its hull.  Both must hold to flag,
+    so a genuine large filled terminal is never mistaken for a connector.
+
+    * ``span_metres`` — the larger side of the solid footprint's
+      axis-aligned bounding box (the object's own authored horizontal
+      frame; span is invariant to translation and, for the elongated
+      connectors this targets, dominated by the long axis regardless of
+      heading — measuring in the tight authored frame is the conservative
+      choice against false positives on a rotated compact building).
+    * ``hull_fill_ratio`` — horizontal solid-triangle area ÷ convex-hull
+      area of the footprint (0 when the hull is degenerate).
+    """
+
+    span_metres: float
+    hull_fill_ratio: float
+    footprint_area_square_metres: float
+    hull_area_square_metres: float
+
+
+def _convex_hull_area_square_metres(
+    points: list[tuple[float, float]],
+) -> float:
+    """Area of the convex hull of 2-D ``points`` (Andrew's monotone chain
+    followed by the shoelace formula).  Zero when the points do not span
+    a two-dimensional area (fewer than three, or all collinear)."""
+    unique_points = sorted(set(points))
+    if len(unique_points) < 3:
+        return 0.0
+
+    def cross(
+        origin: tuple[float, float],
+        first: tuple[float, float],
+        second: tuple[float, float],
+    ) -> float:
+        return (first[0] - origin[0]) * (second[1] - origin[1]) - (
+            first[1] - origin[1]
+        ) * (second[0] - origin[0])
+
+    lower: list[tuple[float, float]] = []
+    for point in unique_points:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0.0:
+            lower.pop()
+        lower.append(point)
+    upper: list[tuple[float, float]] = []
+    for point in reversed(unique_points):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0.0:
+            upper.pop()
+        upper.append(point)
+    hull = lower[:-1] + upper[:-1]
+    if len(hull) < 3:
+        return 0.0
+    twice_area = 0.0
+    for index in range(len(hull)):
+        x1, y1 = hull[index]
+        x2, y2 = hull[(index + 1) % len(hull)]
+        twice_area += x1 * y2 - x2 * y1
+    return abs(twice_area) / 2.0
+
+
+def resource_connector_metrics(
+    geometry: ObjectGeometry,
+) -> ConnectorMetrics:
+    """Measure one object's solid footprint span and hull-fill ratio.
+
+    Pure: geometry in, numbers out (see :class:`ConnectorMetrics` for the
+    defect and the metric definitions).  Works on the object's own
+    authored ``(x, z)`` horizontal coordinates — both the footprint area
+    and the hull area are rotation-invariant, and the bounding-box span is
+    measured in the tight authored frame."""
+    solid_triangles = geometry.solid_triangles
+    if not solid_triangles:
+        return ConnectorMetrics(0.0, 0.0, 0.0, 0.0)
+    used_indices = {
+        index for triangle in solid_triangles for index in triangle
+    }
+    x_values = [geometry.vertices[index][0] for index in used_indices]
+    z_values = [geometry.vertices[index][2] for index in used_indices]
+    span_metres = max(
+        max(x_values) - min(x_values), max(z_values) - min(z_values)
+    )
+    footprint_area = 0.0
+    for first, second, third in solid_triangles:
+        ax, az = geometry.vertices[first][0], geometry.vertices[first][2]
+        bx, bz = geometry.vertices[second][0], geometry.vertices[second][2]
+        cx, cz = geometry.vertices[third][0], geometry.vertices[third][2]
+        footprint_area += abs(
+            (bx - ax) * (cz - az) - (cx - ax) * (bz - az)
+        ) / 2.0
+    hull_area = _convex_hull_area_square_metres(
+        [
+            (geometry.vertices[index][0], geometry.vertices[index][2])
+            for index in used_indices
+        ]
+    )
+    hull_fill_ratio = (
+        footprint_area / hull_area if hull_area > 0.0 else 0.0
+    )
+    return ConnectorMetrics(
+        span_metres=span_metres,
+        hull_fill_ratio=hull_fill_ratio,
+        footprint_area_square_metres=footprint_area,
+        hull_area_square_metres=hull_area,
+    )
+
+
+def is_connector_resource(
+    geometry: ObjectGeometry,
+    *,
+    connector_span_metres: float,
+    connector_maximum_fill: float,
+) -> tuple[bool, ConnectorMetrics]:
+    """Return ``(is_connector, metrics)`` for one object.
+
+    A resource is a CONNECTOR — excluded from building pooling and
+    partitioning before weld/contact so it cannot chain real buildings
+    into one field-spanning structure — only when BOTH conditions hold:
+    its footprint span exceeds ``connector_span_metres`` AND its hull-fill
+    ratio is below ``connector_maximum_fill``.  A large but FILLED
+    footprint (a real mega-terminal) fails the fill test and is kept."""
+    metrics = resource_connector_metrics(geometry)
+    is_connector = (
+        metrics.span_metres > connector_span_metres
+        and metrics.hull_fill_ratio < connector_maximum_fill
+    )
+    return is_connector, metrics
 
 
 def _build_pool_frame(
@@ -793,6 +943,7 @@ def structure_deltas(
     concern, not this function's.
     """
     from .config import (
+        DSF_OBJECT_BAKE_MAX_GROUND_SPAN_M,
         DSF_OBJECT_ELEVATED_BASE_M,
         DSF_OBJECT_FOOT_ANCHOR,
         DSF_OBJECT_FOOT_BAND_M,
@@ -1242,6 +1393,39 @@ def structure_deltas(
         else:
             ground_span_metres = 0.0
         needs_pad = ground_span_metres > DSF_OBJECT_PAD_FLAG_SPAN_M
+
+        # Rigid-seat span limit (design 2026-07-17, EGGW UK2000 pack): a
+        # structure whose ground-contact terrain span exceeds
+        # ``DSF_OBJECT_BAKE_MAX_GROUND_SPAN_M`` cannot be seated by one
+        # rigid vertical offset — whatever offset the best fit picks,
+        # one end floats or sinks past the seating tolerance.  Co-baked
+        # payware packs chain real buildings into airport-scale contact
+        # components via connector objects; baking one offset for such a
+        # component floated the EGGW chains by +33 m and +20 m.  Leave
+        # the whole structure at its AUTHORED elevations; its real
+        # buildings are carried by their own Phase-1 pads instead.  Feet
+        # keep the per-foot machinery below — each foot seats
+        # independently, so a large inter-foot span is exactly what that
+        # path is for, never a reason to refuse.  A skip is per
+        # STRUCTURE: the resource carries no delta, so the byte-idempotent
+        # rewrite (and the reversion pass) leave it at its authored y.
+        if (
+            anchored_feet is None
+            and ground_span_metres > DSF_OBJECT_BAKE_MAX_GROUND_SPAN_M
+        ):
+            updated_structures.append(
+                replace(
+                    structure,
+                    ground_span_metres=ground_span_metres,
+                    needs_pad=needs_pad,
+                    skip_reason=(
+                        f"ground span {ground_span_metres:.1f} m "
+                        f"{GROUND_SPAN_SKIP_REASON_PHRASE} — left at "
+                        "authored elevations"
+                    ),
+                )
+            )
+            continue
 
         # Amendment A3, bounded by amendment A19: always bake the best
         # single offset; do-not-bake ONLY when the arithmetic says

@@ -58,6 +58,7 @@ from .config import (
     CROWN_TAXI,
     ENABLE_SPINE_CROWN,
     RUNWAY_CROWN_TRANSVERSE,
+    RUNWAY_MAX_GRADE,
     SERVICE_ROAD_CROWN_TRANSVERSE,
     TAXI_CROWN_TRANSVERSE,
 )
@@ -424,6 +425,44 @@ def build_crown_drop_field(layout, nodes, bucket_to_idx,
             if vertex_bucket(float(x), float(y)) in seam_keys:
                 seam_pts.append((x, y))
 
+    # RUNWAY END/WELD AXIAL TAPER frontier (the fix for the HECA runway
+    # longitudinal-grade violations, user ruling 2026-07-16: fix the physical
+    # taper, do not teach the checker the crown).  A runway ring vertex that is
+    # runway-owned but emits UNCROWNED (drop 0 = at the centerline profile)
+    # forms a step against its crowned rail neighbours: the emitted rail loses
+    # the full crown drop (≈ RUNWAY_CROWN_TRANSVERSE × half-width ≈ 0.30 m) over
+    # the short longitudinal gap between them (HECA: 0.30 m over 2-11 m near the
+    # runway ends = a 5-13 % longitudinal grade the profile itself does not
+    # carry).  A rail vertex emits uncrowned when the RUNWAY-owned registration
+    # loop below SKIPS it — because a non-crown neighbour co-owns the vertex
+    # (a runway-end skirt ``runway_clearance`` or an ``adjacent_ground`` /
+    # ``gap_fill_spine`` ``graded_strip`` weld → the key is in ``frozen_keys``),
+    # or it is a solver value contract / weld (``idx in freeze_idx``), or a
+    # tile-seam bucket.  These are the UNCROWNED FRONTIER points; the crown must
+    # shed toward them at no more than the runway's own longitudinal cap so no
+    # rail step exceeds it.
+    #
+    # PROFILE-RECONSTRUCTION CONTRACT: a UNIFORM per-ref drop keeps the
+    # reconstructed longitudinal profile untouched because adjacent emitted
+    # values ``profile(s) − drop`` differ only by the profile step (the equal
+    # drops cancel).  This taper deliberately makes the drop NON-uniform, but
+    # ONLY in the end/weld region and at a rate ≤ RUNWAY_MAX_GRADE, so the
+    # injected ``|Δdrop|`` per adjacent pair is ≤ RUNWAY_MAX_GRADE × run.  That
+    # region is where the profile is threshold-/RESA-anchored (near flat), so
+    # the profile's own longitudinal grade plus the shed stays within the cap +
+    # the reconstruction's 0.10 m quantization noise floor — the profile
+    # elsewhere (the crowned interior, where the drop stays uniform) is
+    # untouched.
+    rwy_uncrowned_pts: List[Tuple[float, float]] = []
+    for key in rwy_by_key:
+        idx = bucket_to_idx.get(key)
+        if idx is None:
+            continue
+        x, y = nodes[idx]
+        if (key in frozen_keys or idx in freeze_idx
+                or vertex_bucket(float(x), float(y)) in seam_keys):
+            rwy_uncrowned_pts.append((float(x), float(y)))
+
     drop_by_idx: Dict[int, float] = {}
     drop_by_key: Dict[object, float] = {}
 
@@ -459,6 +498,16 @@ def build_crown_drop_field(layout, nodes, bucket_to_idx,
             d_seam = min(math.hypot(x - sx, y - sy)
                          for (sx, sy) in seam_pts)
             d = min(d, TAXI_CROWN_TRANSVERSE * d_seam)
+        if rwy_uncrowned_pts:
+            # Axially shed the crown toward the nearest uncrowned runway
+            # frontier (end skirt / adjacent-ground weld / freeze contract /
+            # seam) at no more than the runway longitudinal cap, so a crowned
+            # rail vertex next to an uncrowned one steps by ≤ RUNWAY_MAX_GRADE
+            # × the horizontal run.  min() with the frontier's OWN vertex
+            # (distance 0) leaves it at 0, matching its uncrowned emission.
+            d_front = min(math.hypot(x - fx, y - fy)
+                          for (fx, fy) in rwy_uncrowned_pts)
+            d = min(d, RUNWAY_MAX_GRADE * d_front)
         _register(key, idx, d)
 
     # Crowned-runway pavement (for the shadow-adoption rule below).

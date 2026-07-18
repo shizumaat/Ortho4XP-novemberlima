@@ -91,6 +91,85 @@ def _dem_sampler(layout, dem, tile_lat, tile_lon):
 # polygons don't carry needless node density into the patch.
 GROUNDSIDE_SIMPLIFY_TOL_M = 2.0
 
+# Width (m) of the corridor cut that opens an enclosed hole to the polygon
+# exterior (see ``_open_polygon_holes``).  Wide enough to survive the 2 m
+# groundside simplify without collapsing (which would re-close the hole),
+# narrow enough that the driveway-like notch loses negligible lot area.
+_HOLE_OPEN_CUT_WIDTH_M = 3.0
+
+
+def _open_polygon_holes(p, _depth: int = 0):
+    """Return ``p`` re-expressed with NO interior ring, as a list of
+    hole-free ``Polygon`` pieces.
+
+    The OSM emitter (``layout.to_osm``) writes only a shape's EXTERIOR
+    ring — interior rings are dropped for X-Plane patch compatibility.  A
+    groundside polygon that ENCLOSES a building (or any airside shape the
+    separation pass subtracted out) therefore re-covers that footprint
+    once emitted, producing a 100 %-contained self-overlap (SPJC: building
+    #31 inside groundside #455).  Opening the hole here — cutting a thin
+    mitre corridor from the hole to the nearest exterior edge so the
+    enclosed void becomes an open notch (a simply-connected C-shape) —
+    keeps the void real in BOTH the shapely geometry and the emitted
+    exterior ring.
+
+    ``[p]`` unchanged when ``p`` already has no holes; ``[]`` if ``p`` is
+    unusable.  Usually one piece — the nearest-edge cut reaches only just
+    past the exterior on the near side, so the far-side material keeps the
+    ring connected.
+    """
+    if p is None or p.is_empty or p.geom_type != "Polygon":
+        return []
+    if not p.interiors or _depth > 4:
+        return [p]
+    cutters = []
+    ext = p.exterior
+    for interior in p.interiors:
+        try:
+            hole_ring = LineString(interior)
+            a, b = nearest_points(hole_ring, ext)   # a on hole, b on ext
+        except _GEOM_EXC:
+            continue
+        dx, dy = b.x - a.x, b.y - a.y
+        d = math.hypot(dx, dy)
+        if d < 1e-9:
+            # Hole boundary touches the exterior — push the corridor
+            # radially outward from the hole centroid instead.
+            try:
+                cx, cy = Polygon(interior).representative_point().coords[0]
+            except _GEOM_EXC:
+                continue
+            dx, dy = a.x - cx, a.y - cy
+            d = math.hypot(dx, dy) or 1.0
+        ux, uy = dx / d, dy / d
+        start = (a.x - ux * 0.5, a.y - uy * 0.5)     # inside the hole
+        end = (b.x + ux * 0.5, b.y + uy * 0.5)       # just past exterior
+        try:
+            cutters.append(LineString([start, end]).buffer(
+                _HOLE_OPEN_CUT_WIDTH_M / 2.0,
+                cap_style=2, join_style=2))
+        except _GEOM_EXC:
+            continue
+    if not cutters:
+        return [p]
+    try:
+        opened = p.difference(unary_union(cutters))
+    except _GEOM_EXC:
+        return [p]
+    if opened is None or opened.is_empty:
+        return [p]
+    pieces: List[Polygon] = []
+    parts = ([opened] if opened.geom_type == "Polygon"
+             else list(getattr(opened, "geoms", [])))
+    for part in parts:
+        if part.geom_type != "Polygon" or part.is_empty:
+            continue
+        if part.interiors:
+            pieces.extend(_open_polygon_holes(part, _depth + 1))
+        else:
+            pieces.append(part)
+    return pieces or [p]
+
 
 def _grade_limit_ring(coords, alts, max_grade, iters=None):
     """Relax per-vertex altitudes so no adjacent ring edge exceeds
@@ -143,6 +222,17 @@ def _dem_follow_polygon(p, _dem_at, densify_step_m: float = 15.0,
     """
     if p is None or p.is_empty or p.geom_type != "Polygon":
         return None
+    # Open any interior ring (hole) to the exterior before emitting: the
+    # OSM emitter writes only the exterior ring, so an enclosed hole (a
+    # building the separation pass subtracted out) would silently re-cover
+    # its footprint (SPJC building #31 ⊂ groundside #455).  The nearest-
+    # edge corridor keeps the polygon a single connected piece; if it ever
+    # splits, follow the largest piece (this function returns one shape).
+    if p.interiors:
+        opened = _open_polygon_holes(p)
+        if not opened:
+            return None
+        p = max(opened, key=lambda g: g.area)
     # Simplify pass: drop over-resolved boundary detail before densifying
     # so the per-vertex-DEM emit carries fewer nodes.  Densify below
     # re-establishes uniform altitude sampling on the simplified ring.
@@ -1945,23 +2035,68 @@ def _reclassify_groundside_orphan_junctions(
             orphan_set.add(ji)
     if not orphan_set:
         return 0
+    # Building union (buffered to the groundside clearance): an orphan
+    # junction can fully enclose a building footprint, and re-roling it to
+    # groundside verbatim would cover that building — a 100 %-contained
+    # self-overlap once emitted (the OSM emitter drops interior rings, so
+    # the hole a later ``_separate`` cut would leave does not survive).
+    # Subtract buildings HERE so the re-roled groundside honours the gap at
+    # its source, like every other groundside rebuild path.
+    _bldg_buf = None
+    try:
+        _bpolys = [b.polygon for b in layout.shapes
+                   if b.role == ROLE_BUILDING
+                   and b.polygon is not None and not b.polygon.is_empty]
+        if _bpolys:
+            _bldg_buf = unary_union(
+                [bp.buffer(GROUNDSIDE_CLEARANCE_M) for bp in _bpolys])
+            if _bldg_buf.is_empty:
+                _bldg_buf = None
+    except _GEOM_EXC:
+        _bldg_buf = None
     # Re-elevate each orphan junction to follow the DEM and reclassify it
     # as groundside pavement — keep the pavement, lose the cliff.  If the
     # DEM-follow can't be built, LEAVE the shape unchanged (never erase
     # real pavement).
     _dem_at = _dem_sampler(layout, dem, tile_lat, tile_lon)
     n = 0
+    new_shapes: List["BuiltShape"] = []
     for ji in orphan_set:
         s = layout.shapes[ji]
-        built = _dem_follow_polygon(s.polygon, _dem_at)
-        if built is None:
-            continue
-        new_poly, node_alts = built
+        # Cut buildings out first — the result may be a polygon with a hole
+        # (opened by ``_dem_follow_polygon``) or split into several pieces.
+        src_polys: List[Polygon] = [s.polygon]
+        if _bldg_buf is not None:
+            try:
+                diff = s.polygon.difference(_bldg_buf)
+            except _GEOM_EXC:
+                diff = s.polygon
+            if diff is not None and not diff.is_empty:
+                src_polys = ([diff] if diff.geom_type == "Polygon"
+                             else [g for g in getattr(diff, "geoms", [])
+                                   if g.geom_type == "Polygon"
+                                   and not g.is_empty
+                                   and g.area >= _GROUNDSIDE_MIN_AREA_M2])
+        builts = []
+        for sp in src_polys:
+            b = _dem_follow_polygon(sp, _dem_at)
+            if b is not None:
+                builts.append(b)
+        if not builts:
+            continue          # never erase real pavement — leave unchanged
+        # Largest piece keeps the shape's identity; extras are appended.
+        builts.sort(key=lambda t: -t[0].area)
+        new_poly, node_alts = builts[0]
         s.polygon = new_poly
         s.role = ROLE_GROUNDSIDE_PAVEMENT
         s.ref = "groundside"
         s.node_altitudes = node_alts
+        for extra_poly, extra_alts in builts[1:]:
+            new_shapes.append(BuiltShape(
+                polygon=extra_poly, role=ROLE_GROUNDSIDE_PAVEMENT,
+                ref="groundside", node_altitudes=extra_alts))
         n += 1
+    layout.shapes.extend(new_shapes)
     return n
 
 
@@ -2274,6 +2409,77 @@ def _separate_groundside_from_airside(
     return n_clipped
 
 
+def _clip_shape_yielding_to(ys, kept_polygon):
+    """Clip shape ``ys`` so it yields its overlap with ``kept_polygon``:
+    snap-then-difference (the contact chain passes exactly through the
+    kept vertices), largest surviving part, kept-vertex projections
+    inserted on the new ring (no residual T-junction), and
+    ``node_altitudes`` carried from the nearest original vertex.
+
+    Returns the new ``Polygon`` (``ys`` already mutated), or ``None``
+    when nothing survives — the yielder lies (essentially) wholly
+    inside the kept geometry and the caller should drop it.
+    Extracted verbatim from the service↔service loop so the
+    senior-pavement stage shares one clip semantics."""
+    try:
+        diff = snap(ys.polygon, kept_polygon, 0.25).difference(
+            kept_polygon)
+    except _GEOM_EXC:
+        return ys.polygon
+    parts = ([diff] if diff.geom_type == "Polygon"
+             else [g for g in getattr(diff, "geoms", ())
+                   if g.geom_type == "Polygon"])
+    parts = [g for g in parts if g.area >= 1.0]
+    if not parts:
+        return None
+    new_poly = max(parts, key=lambda g: g.area)
+    new_ring = list(new_poly.exterior.coords)
+    if new_ring and new_ring[0] == new_ring[-1]:
+        new_ring = new_ring[:-1]
+    kept_ring = list(kept_polygon.exterior.coords)
+    inserts = []          # (segment index, u along segment, point)
+    for (kx, ky) in kept_ring:
+        if any(math.hypot(kx - nx, ky - ny) <= 0.02
+               for (nx, ny) in new_ring):
+            continue
+        best = None
+        for t in range(len(new_ring)):
+            ax, ay = new_ring[t]
+            bx, by = new_ring[(t + 1) % len(new_ring)]
+            dx, dy = bx - ax, by - ay
+            seg2 = dx * dx + dy * dy
+            if seg2 < 1e-9:
+                continue
+            u = ((kx - ax) * dx + (ky - ay) * dy) / seg2
+            u = min(1.0, max(0.0, u))
+            px, py = ax + u * dx, ay + u * dy
+            d = math.hypot(kx - px, ky - py)
+            if best is None or d < best[0]:
+                best = (d, t, u, (px, py))
+        if best is not None and best[0] <= 0.25:
+            inserts.append(best[1:])
+    for (t, u, pt) in sorted(inserts, key=lambda e: (-e[0], -e[1])):
+        new_ring.insert(t + 1, pt)
+    try:
+        new_poly = Polygon(new_ring)
+    except _GEOM_EXC:
+        pass
+    old_ring = list(ys.polygon.exterior.coords)
+    old_alts = list(ys.node_altitudes or [])
+    ys.polygon = new_poly
+    if old_alts and len(old_alts) >= len(old_ring) - 1:
+        out_ring = list(new_poly.exterior.coords)
+        new_alts = []
+        for (nx, ny) in out_ring:
+            best_k = min(
+                range(min(len(old_ring), len(old_alts))),
+                key=lambda t: (old_ring[t][0] - nx) ** 2
+                + (old_ring[t][1] - ny) ** 2)
+            new_alts.append(old_alts[best_k])
+        ys.node_altitudes = new_alts
+    return new_poly
+
+
 def _deconflict_service_overlaps(
         layout: "PavementLayout", min_overlap_m2: float = 1e-3) -> int:
     """Clip lens-scale overlaps between SERVICE shapes (last word, before
@@ -2322,20 +2528,8 @@ def _deconflict_service_overlaps(
             yi, ys = (ia, sa) if sa.polygon.area < sb.polygon.area \
                 else (ib, sb)
             ki, ks = (ib, sb) if ys is sa else (ia, sa)
-            try:
-                # Snap the yielding ring onto the kept ring first so the
-                # clipped contact chain passes EXACTLY through the kept
-                # shape's vertices — a plain difference leaves the kept
-                # vertices ~0.1 m off the new edge (residual T-junction).
-                diff = snap(ys.polygon, ks.polygon, 0.25).difference(
-                    ks.polygon)
-            except _GEOM_EXC:
-                continue
-            parts = ([diff] if diff.geom_type == "Polygon"
-                     else [g for g in getattr(diff, "geoms", ())
-                           if g.geom_type == "Polygon"])
-            parts = [g for g in parts if g.area >= 1.0]
-            if not parts:
+            new_poly = _clip_shape_yielding_to(ys, ks.polygon)
+            if new_poly is None:
                 # Nothing survives the difference → the yielder lies
                 # (essentially) WHOLLY inside the kept shape.  A plain
                 # ``continue`` here left the fully-covered yielder in place
@@ -2346,61 +2540,53 @@ def _deconflict_service_overlaps(
                 drop_ids.add(id(ys))
                 n_clipped += 1
                 continue
-            new_poly = max(parts, key=lambda g: g.area)
-            # T-vertex conformance with the KEPT ring: a kept-shape
-            # vertex can sit near the new ring's edge INTERIOR (the
-            # near-gap wedge left where the two boundaries crossed) —
-            # flagged as a residual T-junction.  Insert the vertex's
-            # PROJECTION onto the edge (a true on-edge insert; inserting
-            # the kept vertex itself would bow the edge and can re-mint
-            # an overlap sliver).
-            new_ring = list(new_poly.exterior.coords)
-            if new_ring and new_ring[0] == new_ring[-1]:
-                new_ring = new_ring[:-1]
-            kept_ring = list(ks.polygon.exterior.coords)
-            inserts = []          # (segment index, u along segment, point)
-            for (kx, ky) in kept_ring:
-                if any(math.hypot(kx - nx, ky - ny) <= 0.02
-                       for (nx, ny) in new_ring):
-                    continue
-                best = None
-                for t in range(len(new_ring)):
-                    ax, ay = new_ring[t]
-                    bx, by = new_ring[(t + 1) % len(new_ring)]
-                    dx, dy = bx - ax, by - ay
-                    seg2 = dx * dx + dy * dy
-                    if seg2 < 1e-9:
-                        continue
-                    u = ((kx - ax) * dx + (ky - ay) * dy) / seg2
-                    u = min(1.0, max(0.0, u))
-                    px, py = ax + u * dx, ay + u * dy
-                    d = math.hypot(kx - px, ky - py)
-                    if best is None or d < best[0]:
-                        best = (d, t, u, (px, py))
-                if best is not None and best[0] <= 0.25:
-                    inserts.append(best[1:])
-            for (t, u, pt) in sorted(inserts, key=lambda e: (-e[0], -e[1])):
-                new_ring.insert(t + 1, pt)
-            try:
-                new_poly = Polygon(new_ring)
-            except _GEOM_EXC:
-                pass
-            old_ring = list(ys.polygon.exterior.coords)
-            old_alts = list(ys.node_altitudes or [])
-            ys.polygon = new_poly
-            if old_alts and len(old_alts) >= len(old_ring) - 1:
-                out_ring = list(new_poly.exterior.coords)
-                new_alts = []
-                for (nx, ny) in out_ring:
-                    best_k = min(
-                        range(min(len(old_ring), len(old_alts))),
-                        key=lambda t: (old_ring[t][0] - nx) ** 2
-                        + (old_ring[t][1] - ny) ** 2)
-                    new_alts.append(old_alts[best_k])
-                ys.node_altitudes = new_alts
+            # (Snap-difference, largest part, kept-vertex conformance
+            # inserts and altitude carry-over all happen inside
+            # ``_clip_shape_yielding_to`` — one clip semantics shared
+            # with the senior-pavement stage below.)
             # keep the STRtree list coherent for later pairs
             polys[a if ys is sa else b] = new_poly
             n_clipped += 1
+
+    # SENIOR-PAVEMENT SENIORITY (2026-07-17, SPJC apron #89 ∩
+    # service_junction #96, 9.4 m²): a service shape overlapping APRON
+    # or JUNCTION pavement YIELDS its overlap — the apron-edge-service
+    # ruling grades service portions inside an apron as apron anyway,
+    # and no earlier pass owns the cross-role pair (the fixed-shape
+    # overlap ladder has no service tier; the groundside separation
+    # cuts only groundside).  Same clip semantics as service↔service.
+    from .layout import ROLE_APRON as _R_AP, ROLE_JUNCTION as _R_JN
+    senior_polys = [s.polygon for s in layout.shapes
+                    if s.role in (_R_AP, _R_JN)
+                    and s.polygon is not None and not s.polygon.is_empty
+                    and s.polygon.geom_type == "Polygon"]
+    if senior_polys:
+        senior_tree = STRtree(senior_polys)
+        for s in layout.shapes:
+            if (s.role not in (ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION)
+                    or id(s) in drop_ids or s.polygon is None
+                    or s.polygon.is_empty
+                    or s.polygon.geom_type != "Polygon"):
+                continue
+            try:
+                candidates = senior_tree.query(s.polygon)
+            except _GEOM_EXC:
+                continue
+            for qk in candidates:
+                kept_polygon = senior_polys[int(qk)]
+                try:
+                    overlap = s.polygon.intersection(kept_polygon).area
+                except _GEOM_EXC:
+                    continue
+                if overlap <= min_overlap_m2:
+                    continue
+                new_poly = _clip_shape_yielding_to(s, kept_polygon)
+                if new_poly is None:
+                    drop_ids.add(id(s))
+                    n_clipped += 1
+                    break
+                n_clipped += 1
+
     if drop_ids:
         layout.shapes = [s for s in layout.shapes if id(s) not in drop_ids]
     return n_clipped

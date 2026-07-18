@@ -223,6 +223,15 @@ class ObjectGeometry(NamedTuple):
     level_of_detail_count: int
     vertex_line_indices: list[int]
     solid_triangle_hardness: tuple[str, ...] = ()
+    # ``ATTR_layer_group_draped <group> <offset>`` — the draped draw
+    # layer the object declares, or ``None`` when the file declares
+    # none.  Ground-paint packs use it to stack base pavement UNDER
+    # markings (HECA: base asphalt/concrete at ``("runways", 1)``,
+    # taxi lines at ``("runways", 3)``, decals in group ``markings``),
+    # which is exactly the signal the object-pavement classifier keys
+    # on.  Only the LAST declaration in the file is kept (the exemplar
+    # packs declare it once, in the header).
+    draped_layer_group: tuple[str, int] | None = None
 
     def hard_deck_solid_triangles(self) -> list[tuple[int, int, int]]:
         """The subset of ``solid_triangles`` emitted under ``ATTR_hard_deck``
@@ -291,6 +300,7 @@ def load_object_file(path: str) -> ObjectGeometry:
     level_of_detail_count = 0
     currently_draped = False
     currently_hard = ""  # "" | "hard" | "hard_deck"
+    draped_layer_group: tuple[str, int] | None = None
 
     with open(path, errors="replace") as handle:
         for line_index, line in enumerate(handle):
@@ -315,6 +325,17 @@ def load_object_file(path: str) -> ObjectGeometry:
                 currently_hard = "hard"
             elif keyword == "ATTR_no_hard":
                 currently_hard = ""
+            elif keyword == "ATTR_layer_group_draped":
+                # ``ATTR_layer_group_draped <group> [<offset>]`` — a
+                # missing or non-numeric offset reads as 0 (the X-Plane
+                # default).  Malformed lines leave the field untouched.
+                if len(tokens) >= 2:
+                    try:
+                        layer_offset = (
+                            int(tokens[2]) if len(tokens) >= 3 else 0)
+                    except ValueError:
+                        layer_offset = 0
+                    draped_layer_group = (tokens[1].lower(), layer_offset)
             elif keyword == "TRIS":
                 triangle_ranges.append(
                     (
@@ -370,6 +391,7 @@ def load_object_file(path: str) -> ObjectGeometry:
         level_of_detail_count=level_of_detail_count,
         vertex_line_indices=vertex_line_indices,
         solid_triangle_hardness=tuple(solid_hardness),
+        draped_layer_group=draped_layer_group,
     )
 
 

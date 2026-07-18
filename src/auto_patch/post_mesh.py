@@ -858,6 +858,21 @@ def rebake_dsf_objects(tile) -> dict:
                         else ""
                     ),
                 )
+            structures_left_at_authored = sum(
+                1
+                for _pool, decision in airport_result["decisions"]
+                for structure in decision.structures
+                if structure.skip_reason
+                and object_anchor.GROUND_SPAN_SKIP_REASON_PHRASE
+                in structure.skip_reason
+            )
+            if structures_left_at_authored:
+                UI.vprint(
+                    1,
+                    f"  [object-anchor] {icao}: "
+                    f"{structures_left_at_authored} structure(s) left at "
+                    "authored elevations (ground span > limit)",
+                )
             if (
                 (
                     airport_result["objects_written"]

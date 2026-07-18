@@ -39,13 +39,18 @@ for path in (os.path.join(ROOT, "src"), ROOT, os.path.join(ROOT, "tests"),
 
 # Phase boundaries = the `_progress.step()` call sites in pipeline.py.
 # Samples are bucketed by the innermost pipeline.py line on the stack.
+# These line numbers are the ``_progress.step()`` call sites in pipeline.py
+# that begin each phase; a sample is attributed to the phase whose step()
+# most recently preceded the innermost pipeline.py frame.  Keep them in sync
+# with pipeline.py (they drifted from 486/562/1642/2972/3892/5590, which
+# mis-attributed late phase-4 taxi-rect construction to the solve phase).
 PHASE_STARTS = [
-    (486, "1 Loading apt.dat & runway geometry"),
-    (562, "2 Assembling pavement & runway shoulders"),
-    (1642, "3 Building taxiways & terminals"),
-    (2972, "4 Building taxi rects, junctions & service roads"),
-    (3892, "5 Solving elevations (FAA grade compliance)"),
-    (5590, "6 Emitting terrain features & finalizing"),
+    (619, "1 Loading apt.dat & runway geometry"),
+    (695, "2 Assembling pavement & runway shoulders"),
+    (1991, "3 Building taxiways & terminals"),
+    (3321, "4 Building taxi rects, junctions & service roads"),
+    (4241, "5 Solving elevations (FAA grade compliance)"),
+    (5939, "6 Emitting terrain features & finalizing"),
 ]
 
 

@@ -58,6 +58,7 @@ __all__ = [
     "_resolve_runway_crossings",
     "_insert_runway_chain_bridges",
     "_detect_runway_shoulders",
+    "_detect_runway_border_strip_shoulders",
     "_detect_runway_shoulder_extent",
     "_widen_runway_rect",
 ]
@@ -1069,6 +1070,119 @@ def _detect_runway_shoulders(
         if n_max > new_right:
             new_right = n_max
     return (new_left, new_right, absorbed)
+
+
+def _detect_runway_border_strip_shoulders(
+        runway,
+        to_m,
+        border_lines,
+        *,
+        edge_tol_m: float,
+        sample_step_m: float,
+        min_strip_cover_m: float,
+        min_side_cover_m: float,
+        min_w: float,
+        max_w: float,
+        ) -> "tuple[float, float] | None":
+    """Derive per-side runway shoulder widths from wide draped ``.lin``
+    border strips traced along the runway's own outline.
+
+    Construction style (KBNA): the runway ships as exact-runway-width
+    draped ``.pol`` pieces plus a wide ``.lin`` border traced ON the
+    ``.pol`` outline.  X-Plane centers a line texture on its path, so
+    the strip's outer half renders as pavement past the ``.pol`` edge —
+    that outer half IS the author's shoulder, and the resource-declared
+    strip width states the shoulder width exactly: ``width / 2`` per
+    side (KBNA 13/31: 24 m border ⇒ 12 m shoulder; 02C/20C: 20 m ⇒
+    10 m).
+
+    ``border_lines``: ``[(line, width_m)]`` with ``line`` a meter-space
+    ``LineString`` (the pipeline's ``dsf_border_line_candidates``).
+
+    A strip contributes to a side when at least ``min_strip_cover_m``
+    of its arc length runs within ``edge_tol_m`` of that runway edge
+    (inside the runway's longitudinal extent ± 20 m) — taxiway borders
+    that merely cross the runway at exits stay below the floor.  The
+    RUNWAY qualifies when either side's contributing strips jointly
+    cover at least ``min_side_cover_m`` of edge length.
+
+    Shoulders are a PER-RUNWAY, SYMMETRIC property (user 2026-07-17):
+    real-world shoulders run both sides, and the side without border
+    evidence is simply the side where abutting taxiway/apron ``.pol``
+    pavement covers the shoulder band (KBNA 13/31's right edge).  The
+    caller injects the returned width into the apt.dat coded-shoulder
+    path ("this runway HAS 12 m shoulders"), which widens
+    symmetrically and cuts junctions at the shoulder edge — the
+    OMAA-proven model.
+
+    Returns the shoulder width in meters (the arc-length-weighted
+    median of all contributing strips' ``width / 2`` across both
+    sides, clamped to ``[min_w, max_w]``), or ``None`` when no side
+    qualifies.
+    """
+    ax, ay = to_m(runway.lon_a, runway.lat_a)
+    bx, by = to_m(runway.lon_b, runway.lat_b)
+    L = math.hypot(bx - ax, by - ay)
+    if L < 50.0:
+        return None
+    ux, uy = (bx - ax) / L, (by - ay) / L
+    nx, ny = -uy, ux
+    half = runway.width_m / 2.0
+
+    # side key: -1.0 = left (n < 0), +1.0 = right (n > 0).
+    cover_by_side: dict[float, list[tuple[float, float]]] = {
+        -1.0: [], 1.0: []}
+    for line, width_m in border_lines:
+        if line is None or line.is_empty or width_m is None:
+            continue
+        try:
+            length = float(line.length)
+        except _GEOM_EXC:
+            continue
+        if length < min_strip_cover_m:
+            continue
+        n_samples = max(2, int(length / sample_step_m))
+        on_edge = {-1.0: 0, 1.0: 0}
+        try:
+            for k in range(n_samples):
+                p = line.interpolate((k + 0.5) / n_samples,
+                                     normalized=True)
+                u = (p.x - ax) * ux + (p.y - ay) * uy
+                if u < -20.0 or u > L + 20.0:
+                    continue
+                n = (p.x - ax) * nx + (p.y - ay) * ny
+                if abs(n + half) <= edge_tol_m:
+                    on_edge[-1.0] += 1
+                elif abs(n - half) <= edge_tol_m:
+                    on_edge[1.0] += 1
+        except _GEOM_EXC:
+            continue
+        step = length / n_samples
+        for side in (-1.0, 1.0):
+            cover_m = on_edge[side] * step
+            if cover_m >= min_strip_cover_m:
+                cover_by_side[side].append((cover_m, float(width_m)))
+
+    if not any(
+            sum(c for c, _w in contributions) >= min_side_cover_m
+            for contributions in cover_by_side.values()):
+        return None
+    # Arc-length-weighted median of ALL contributing strips'
+    # half-widths (both sides pooled — the shoulder is one per-runway
+    # width).
+    contributions = cover_by_side[-1.0] + cover_by_side[1.0]
+    total_cover = sum(c for c, _w in contributions)
+    if total_cover <= 0.0:
+        return None
+    ranked = sorted(((w / 2.0, c) for c, w in contributions))
+    accumulated = 0.0
+    shoulder_w = ranked[-1][0]
+    for half_width, cover_m in ranked:
+        accumulated += cover_m
+        if accumulated >= 0.5 * total_cover:
+            shoulder_w = half_width
+            break
+    return min(max_w, max(min_w, shoulder_w))
 
 
 def _detect_runway_shoulder_extent(

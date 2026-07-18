@@ -69,6 +69,22 @@ def _footprint_area_square_metres(footprint_lonlat: Polygon) -> float:
             * metres_per_degree_longitude)
 
 
+def _footprint_span_metres(footprint_lonlat: Polygon) -> float:
+    """Larger side of the metric bounding box of a small lon/lat polygon
+    (same local equirectangular scale as ``_footprint_area_square_metres``)
+    — the structure span gate's metric (defect 2026-07-17)."""
+    centroid_latitude = footprint_lonlat.centroid.y
+    metres_per_degree_longitude = (
+        obj8_reader.METRES_PER_DEGREE_LATITUDE
+        * math.cos(math.radians(centroid_latitude)))
+    minimum_longitude, minimum_latitude, maximum_longitude, maximum_latitude = (
+        footprint_lonlat.bounds)
+    return max(
+        (maximum_longitude - minimum_longitude) * metres_per_degree_longitude,
+        (maximum_latitude - minimum_latitude)
+        * obj8_reader.METRES_PER_DEGREE_LATITUDE)
+
+
 def _triangle_union_footprint(
     triangle_corner_points: list[tuple[tuple[float, float],
                                        tuple[float, float],
@@ -165,6 +181,102 @@ def foot_pad_ring(
     return ring if len(ring) >= 3 else None
 
 
+def draped_pavement_patches(
+    geometry: ObjectGeometry,
+    placement: ObjectPlacement,
+    minimum_patch_area_square_metres: float,
+) -> list[tuple[list[tuple[float, float]],
+                list[list[tuple[float, float]]]]]:
+    """Union one placement's DRAPED triangles into pavement patches.
+
+    The object-pavement source (HECA Tai Models,
+    ``dsf_reader.read_dsf_object_pavements``): a ground-paint ``.obj``
+    carries the whole airport's geometry for one texture, so its draped
+    triangles union into MANY disjoint pavement areas.  Unlike the
+    building-pad ring (:func:`structure_ring` — one structure, one
+    dominant patch, holes dropped), pavement keeps EVERY patch above
+    ``minimum_patch_area_square_metres`` and honours interior rings: a
+    perforated apron sheet must not fill its infield holes.
+
+    Returns ``(outer_ring, hole_rings)`` pairs in ``(longitude,
+    latitude)``, rings unclosed — the ``read_dsf_pavements`` ring
+    contract, so the caller can feed both sources through one path.
+    Returns ``[]`` when the geometry has no draped triangles or the
+    union degenerates.
+    """
+    if not geometry.draped_triangles:
+        return []
+    projected_by_vertex_index: dict[int, tuple[float, float]] = {}
+    triangle_polygons = []
+    for triangle in geometry.draped_triangles:
+        corner_points = []
+        for vertex_index in triangle:
+            point = projected_by_vertex_index.get(vertex_index)
+            if point is None:
+                local_x, _local_y, local_z = (
+                    geometry.vertices[vertex_index])
+                latitude, longitude = obj8_reader.local_offset_to_lonlat(
+                    placement.latitude,
+                    placement.longitude,
+                    placement.heading_degrees,
+                    local_x,
+                    local_z,
+                )
+                point = (longitude, latitude)
+                projected_by_vertex_index[vertex_index] = point
+            corner_points.append(point)
+        try:
+            triangle_polygon = Polygon(corner_points)
+            if not triangle_polygon.is_valid:
+                triangle_polygon = triangle_polygon.buffer(0)
+            if (not triangle_polygon.is_empty
+                    and triangle_polygon.geom_type == "Polygon"
+                    and triangle_polygon.area > 0.0):
+                triangle_polygons.append(triangle_polygon)
+        except (ValueError, _GEOS_EXCEPTION):
+            continue
+    if not triangle_polygons:
+        return []
+    try:
+        union = unary_union(triangle_polygons)
+        if not union.is_valid:
+            union = union.buffer(0)
+    except (ValueError, _GEOS_EXCEPTION):
+        return []
+    if union.is_empty:
+        return []
+    patches = list(union.geoms) if union.geom_type == "MultiPolygon" else (
+        [union] if union.geom_type == "Polygon" else [])
+
+    out: list[tuple[list[tuple[float, float]],
+                    list[list[tuple[float, float]]]]] = []
+    for patch in patches:
+        if (_footprint_area_square_metres(patch)
+                < minimum_patch_area_square_metres):
+            continue
+        try:
+            simplified = patch.simplify(
+                FOOTPRINT_SIMPLIFY_TOLERANCE_DEGREES,
+                preserve_topology=True)
+        except (ValueError, _GEOS_EXCEPTION):
+            simplified = patch
+        if simplified.is_empty or simplified.geom_type != "Polygon":
+            simplified = patch
+        outer_ring = [(float(longitude), float(latitude))
+                      for longitude, latitude
+                      in simplified.exterior.coords[:-1]]
+        if len(outer_ring) < 3:
+            continue
+        hole_rings = []
+        for interior in simplified.interiors:
+            hole_ring = [(float(longitude), float(latitude))
+                         for longitude, latitude in interior.coords[:-1]]
+            if len(hole_ring) >= 3:
+                hole_rings.append(hole_ring)
+        out.append((outer_ring, hole_rings))
+    return out
+
+
 def structure_ring(
     structure: Structure,
     geometry_by_resource: dict[str, ObjectGeometry],
@@ -193,6 +305,7 @@ def structure_ring(
         DSF_OBJECT_FOOTPRINT_HEIGHT_M,
         DSF_OBJECT_FOOTPRINT_UNION,
         DSF_OBJECT_MAX_FOOTPRINT_AREA_M2,
+        DSF_OBJECT_MAX_STRUCTURE_SPAN_M,
         DSF_OBJECT_MIN_BUILDING_HEIGHT_M,
     )
 
@@ -301,6 +414,22 @@ def structure_ring(
                              and hull.geom_type == "Polygon") else None
     if footprint is None:
         return None
+
+    # Structure span gate (defect 2026-07-17): a structure whose footprint
+    # ring spans past the cap is a residual field-spanning hull the
+    # connector pre-filter did not fully un-chain — never a building-pad
+    # seed.  Skip-and-report through the same path as the area cap.
+    if DSF_OBJECT_MAX_STRUCTURE_SPAN_M > 0.0:
+        span_metres = _footprint_span_metres(footprint)
+        if span_metres > DSF_OBJECT_MAX_STRUCTURE_SPAN_M:
+            UI.vprint(
+                1,
+                "  [object-footprints] structure footprint span "
+                f"{span_metres:.0f} m exceeds the "
+                f"{DSF_OBJECT_MAX_STRUCTURE_SPAN_M:.0f} m structure span "
+                "gate (O4_DSF_OBJECT_MAX_STRUCTURE_SPAN_M) — skipped; a "
+                "field-spanning structure is not a building pad.")
+            return None
 
     if DSF_OBJECT_MAX_FOOTPRINT_AREA_M2 > 0.0:
         area_square_metres = _footprint_area_square_metres(footprint)

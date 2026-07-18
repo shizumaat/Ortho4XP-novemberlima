@@ -51,9 +51,19 @@ FLAG_EXPECTATIONS = [
     ("DSF_OBJECT_CONTACT_EPSILON_M", float, 0.25),
     ("DSF_OBJECT_FOOTPRINT_HEIGHT_M", float, 1.5),
     ("DSF_OBJECT_ELEVATED_BASE_M", float, 0.5),
-    ("DSF_OBJECT_MAX_FOOTPRINT_AREA_M2", float, 0.0),
+    # Backstop enabled by default (was 0.0 = disabled) — defect 2026-07-17,
+    # UK payware co-baked airports: an airport-sized chained hull would
+    # otherwise cannibalise the real building pads it overlaps.
+    ("DSF_OBJECT_MAX_FOOTPRINT_AREA_M2", float, 100000.0),
     ("DSF_OBJECT_MIN_BUILDING_HEIGHT_M", float, 2.5),
     ("DSF_OBJECT_PAD_FLAG_SPAN_M", float, 2.0),
+    # Connector pre-filter + structure span gate (same defect).  Both are
+    # refinements gated OFF by default (the area backstop is the shipping
+    # fix); the connector flag is a bool, the span gate a 0-disabled cap.
+    ("DSF_OBJECT_CONNECTOR_PREFILTER", bool, False),
+    ("DSF_OBJECT_CONNECTOR_SPAN_M", float, 300.0),
+    ("DSF_OBJECT_CONNECTOR_MAX_FILL", float, 0.20),
+    ("DSF_OBJECT_MAX_STRUCTURE_SPAN_M", float, 0.0),
 ]
 
 

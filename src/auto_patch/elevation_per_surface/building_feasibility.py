@@ -41,8 +41,12 @@ from shapely.errors import GEOSException
 
 from auto_patch.config import (
     ANISO_EDGES,
+    BUILDING_AIRSIDE_CONTACT_MIN_COMPONENT_M2,
     BUILDING_FULL_FRONTAGE,
-    BUILDING_FULL_FRONTAGE_AREA_M2, TAXI_MAX_GRADE, VISIBLE_CHORD_CONNECT,
+    BUILDING_FULL_FRONTAGE_AREA_M2,
+    BUILDING_SEAT_FLATNESS_TOLERANCE_M,
+    FLAT_CERTIFICATE_COVERAGE,
+    TAXI_MAX_GRADE, VISIBLE_CHORD_CONNECT,
 )
 from auto_patch.grade_law import APRON_MAX_GRADE, BUILDING_REACH_CORRIDOR_M
 from auto_patch.layout import (
@@ -562,6 +566,30 @@ def _chord_on_pavement(c, foot, vis):
     return vis.contains(chord)
 
 
+def _decrowned_anchor_seeds(layout, G, anchor_elev):
+    """Lift CROWNED runway-edge anchor values into the ONE uncrowned profile
+    space the reach band is documented to solve in.
+
+    The runway-join anchors are VALUE-DERIVED from the EMITTED runway edge
+    (2026-07-16 edge-anchor ruling), so on a wide runway each carries the
+    profile MINUS the transverse crown drop (``RUNWAY_CROWN_TRANSVERSE`` ×
+    half-width).  The band, however, is the in-solve profile field and its
+    consumer ``grade_graph_validate.route_band_violations`` de-crowns each
+    vertex by ``+crown_drop`` before comparing — the ONE uncrowned space the
+    space invariant declares.  Adding the crown drop back at each anchor's
+    own position puts the seed in that same space (``crown_drop_at`` returns
+    0.0 with no crown field, so non-crowned airports stay byte-identical).
+
+    ``anchor_elev`` is ``{node_index: crowned_elev}``; returns a new dict with
+    the same keys and de-crowned values."""
+    from auto_patch.crown import crown_drop_at
+    out = {}
+    for k, ae in anchor_elev.items():
+        p = G.pos.get(k)
+        out[k] = float(ae) + (crown_drop_at(layout, p[0], p[1]) if p else 0.0)
+    return out
+
+
 def _build_skeleton_band(layout, G):
     """EDGE-SKELETON reach for NO-CENTERLINE pavement (user 2026-06-28).
 
@@ -602,7 +630,14 @@ def _build_skeleton_band(layout, G):
             _add(a, b, cap.at(_d(a, b), 0.0))
 
     # Anchors: centerline→runway joins + runway-coincident pavement nodes.
-    anchor_elev = dict(G.runway_anchor)
+    # All seeds are de-crowned into the ONE uncrowned profile space the band
+    # is documented to solve in (see :func:`_decrowned_anchor_seeds` and the
+    # matching de-crown in reach_band_unified): the runway-join anchors AND
+    # the runway-ring vertices both carry the EMITTED crowned edge value, but
+    # route_band_violations compares against a de-crowned vertex, so seeding
+    # the reach field crowned depresses the whole field by the edge drop.
+    from auto_patch.crown import crown_drop_at
+    anchor_elev = _decrowned_anchor_seeds(layout, G, G.runway_anchor)
     pos_to_idx = {(round(x, 3), round(y, 3)): i for (i, (x, y)) in G.pos.items()}
     for s in layout.shapes:
         if (s.role != ROLE_RUNWAY or s.polygon is None or s.polygon.is_empty):
@@ -614,7 +649,7 @@ def _build_skeleton_band(layout, G):
         for (x, y), e in zip(ring, elevs):
             i = pos_to_idx.get((round(x, 3), round(y, 3)))
             if i is not None and e is not None and i not in anchor_elev:
-                anchor_elev[i] = float(e)
+                anchor_elev[i] = float(e) + crown_drop_at(layout, x, y)
     if not anchor_elev:
         return lambda x, y: None
 
@@ -691,6 +726,20 @@ def reach_band_unified(layout, G):
     if not getattr(G, "runway_anchor", None) or not getattr(G, "spine_adj", None):
         return lambda x, y: None
 
+    # De-crown the runway-join anchor SEEDS into the ONE uncrowned profile
+    # space this band is documented to live in (space invariant — see
+    # crown.crown_drop_at / the flex_slack_at note; grade_graph_validate.
+    # route_band_violations de-crowns each vertex by ``+crown_drop`` before
+    # the band test).  ``G.runway_anchor`` is VALUE-DERIVED from the EMITTED
+    # runway edge (2026-07-16 edge-anchor ruling), which on a wide runway
+    # carries the profile MINUS the transverse crown drop; seeding the field
+    # with that crowned value depresses the whole ceiling/floor field by the
+    # edge drop, so a de-crowned airside vertex reads its own designed crown
+    # drop above the ceiling (SPJC: 216 phantom ``ceil`` flags, ~0.30 m at a
+    # ~30 m half-width edge).  ``crown_drop_at`` is 0.0 with no crown field,
+    # so non-crowned airports stay byte-identical.
+    anchor_seeds = _decrowned_anchor_seeds(layout, G, G.runway_anchor)
+
     # Value-seeded reach FIELDS (perf 2026-07-04, same collapse as the
     # skeleton band above): the per-anchor Dijkstras were only ever
     # consumed as ``min over anchors (ae + dist + extras)`` /
@@ -702,8 +751,8 @@ def reach_band_unified(layout, G):
     # patches stay byte-identical.
     def _runway_value_field(sign):
         best: dict = {}
-        pq = [((float(ae) if sign > 0 else -float(ae)), 0.0, float(ae), k)
-              for (k, ae) in G.runway_anchor.items()]
+        pq = [((ae if sign > 0 else -ae), 0.0, ae, k)
+              for (k, ae) in anchor_seeds.items()]
         heapq.heapify(pq)
         while pq:
             _key, dd, ae, u = heapq.heappop(pq)
@@ -970,6 +1019,38 @@ def _frontage_band(poly, band, cls, vis, max_corridor_m):
     return (floor, ceil) if got else None
 
 
+def _footprint_dem_relief(poly, dem_sampler):
+    """DEM mean and relief (``max − min``) over a building footprint — its ring
+    vertices plus its centroid — through the SAME ``dem_sampler`` the seat path
+    uses (so the mean is bit-identical to what the band path would sample).
+
+    Returns ``(mean, relief)`` or ``None`` on ANY sampling gap (off-tile, DEM
+    error, NaN) — the seat certificate then refuses and the normal band path
+    runs, failing toward correctness (spec §2.2)."""
+    values = []
+    centroid = poly.centroid
+    ring = list(poly.exterior.coords)
+    for (x, y) in ring + [(centroid.x, centroid.y)]:
+        value = dem_sampler(x, y)
+        if value is None or value != value:
+            return None
+        values.append(float(value))
+    if not values:
+        return None
+    return (sum(values) / len(values), max(values) - min(values))
+
+
+def _footprint_radius(poly, centroid):
+    """Largest distance from ``centroid`` to any footprint ring vertex (the
+    reach the band-margin soundness guard must cover)."""
+    radius = 0.0
+    for (x, y) in poly.exterior.coords:
+        distance = math.hypot(x - centroid.x, y - centroid.y)
+        if distance > radius:
+            radius = distance
+    return radius
+
+
 def building_feasible_levels(
         layout,
         runway_pts_xyz: List[Tuple[float, float, float]],
@@ -1009,6 +1090,23 @@ def building_feasible_levels(
         # segments).  buffer(0) renodes each input; the union of the
         # repaired polygons is geometrically the same airside region.
         airside = unary_union([p.buffer(0) for p in polys])
+    # Significance gate (user 2026-07-17, KBNA SE lot): a pad only
+    # counts as airside-served when the airside COMPONENT it touches is
+    # big enough to serve aircraft.  KBNA building23 touched an
+    # ISOLATED 66 m² apron scrap and inherited the runway reach floor,
+    # emitting 11.6 m above its own ground.  Components come from the
+    # union (touching/overlapping shapes merge), so a connected apron
+    # complex passes regardless of how the slice fragmented it, while
+    # an isolated scrap fails alone.
+    airside_components = [
+        part for part in (airside.geoms
+                          if airside.geom_type == "MultiPolygon"
+                          else [airside])
+        if not part.is_empty
+        and part.area >= BUILDING_AIRSIDE_CONTACT_MIN_COMPONENT_M2]
+    if not airside_components:
+        return {}
+    airside = unary_union(airside_components)
 
     # Buildings ≥ this footprint must clear their ENTIRE frontage, not just a
     # single central chord (user 2026-06-27); small buildings keep the centroid
@@ -1025,6 +1123,29 @@ def building_feasible_levels(
                and not cl.is_service]
         vis = _pavement_visibility(layout) if VISIBLE_CHORD_CONNECT else None
 
+    # SEAT CERTIFICATE (Tier 1, spec §3.2 + §2.4 "buildings are FLAT"): a
+    # building whose whole footprint DEM relief fits the seat flatness tolerance
+    # is feasible FLAT at its DEM mean by inspection, so it skips the expensive
+    # per-building reach-band frontage construction and records that mean as its
+    # seated level.  Sound guard: the DEM mean must also sit inside the central
+    # reach band with a margin ≥ ``footprint_radius · APRON_MAX_GRADE`` (so the
+    # whole flat footprint stays reachable — a building near a constraining, and
+    # thus tight, route band refuses and takes the normal clamp).  Gated by
+    # ``O4_FLAT_CERTIFICATE_COVERAGE`` (read at call time); OFF → byte-identical.
+    seat_certificate_enabled = (
+        FLAT_CERTIFICATE_COVERAGE
+        and os.environ.get("O4_FLAT_CERTIFICATE_COVERAGE", "1") != "0")
+    try:
+        from auto_patch.elevation_per_surface.solver_primitives import (
+            _record_flat_certificate, _report_flat_certificate_counts)
+    except Exception:                                      # pragma: no cover
+        _record_flat_certificate = None
+        _report_flat_certificate_counts = None
+
+    def _record(outcome):
+        if _record_flat_certificate is not None:
+            _record_flat_certificate(layout, "seat", outcome)
+
     out: Dict[int, float] = {}
     for s in layout.shapes:
         if (s.role != ROLE_BUILDING or s.polygon is None
@@ -1033,6 +1154,25 @@ def building_feasible_levels(
         if airside.is_empty or s.polygon.distance(airside) > _TOUCH_TOL_M:
             continue                            # not airside-served → DEM
         c = s.polygon.centroid
+        # Seat certificate: a flat footprint seats at its DEM mean, skipping the
+        # frontage band, when the mean is comfortably inside the central band.
+        if seat_certificate_enabled:
+            _record("candidate")
+            relief = _footprint_dem_relief(s.polygon, dem_sampler)
+            certified_seat = None
+            if relief is not None and relief[1] <= BUILDING_SEAT_FLATNESS_TOLERANCE_M:
+                seat_mean = relief[0]
+                central = band(c.x, c.y)
+                if central is not None:
+                    floor_c, ceil_c = central
+                    margin = APRON_MAX_GRADE * _footprint_radius(s.polygon, c)
+                    if floor_c + margin <= seat_mean <= ceil_c - margin:
+                        certified_seat = seat_mean
+            if certified_seat is not None:
+                _record("certified")
+                out[id(s)] = certified_seat
+                continue
+            _record("refused")
         # LARGE building → intersect the band over the whole frontage; SMALL (or no
         # qualifying frontage side) → the single central chord from the centroid.
         b = None
@@ -1052,4 +1192,14 @@ def building_feasible_levels(
             out[id(s)] = 0.5 * (floor + ceil)
         else:
             out[id(s)] = min(max(de, floor), ceil)
+    # One per-airport certificate summary line (spec §2 item 7), printed once —
+    # after the building-seat pass, so rect/apron/junction counts from the
+    # preceding constraint build and the seat counts here are all present.
+    if (_report_flat_certificate_counts is not None
+            and not getattr(layout, "_flat_certificate_reported", False)):
+        try:
+            _report_flat_certificate_counts(layout, getattr(layout, "icao", ""))
+            layout._flat_certificate_reported = True
+        except Exception:                                  # pragma: no cover
+            pass
     return out

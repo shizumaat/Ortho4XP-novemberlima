@@ -707,3 +707,57 @@ law value). Post-solve plate emission and deconflict participation are retired f
 features. Supersedes the iteration-3 post-solve cut/plate approach; W-B iteration 4 implements
 the restructure. Amendment recorded live during the KBNA build iterations (J/R abutments pass
 at 167.10/167.09; the trench plate's repeated loss to mutation passes is what this ruling ends).
+
+---
+
+## 11. Status — Feature A build (W-T, 2026-07-18)
+
+**Feature A (tunnels) is BUILT, DEFAULT OFF (`O4_OBJECT_TUNNEL_TERRAIN`, default `"0"`).**
+Files: `config.py` (gate + `TUNNEL_FLOOR_BELOW_OBJECT_DECK_M = 0.5`), `grade_law.py`
+(`tunnel_trench_floor_elevation_m` / `tunnel_trench_rim_elevation_m`, the lockstep single
+source), `bridges.py` (the flat-plate birth primitive `_born_flat` promoted to module-level
+`born_flat_solver_plate` with a `record_pins` opt-out; no other change),
+`object_terrain_assembly.build_tunnel_layout_shapes` (the emitter, consuming
+`classification.tunnels` beside the bridge emitter), `layout.py` (`ROLE_TUNNEL_TRENCH`),
+`pipeline.py` (one wiring call). Classifier, R4 exclusions, and y-bake drops shipped earlier.
+
+**Design as built (per §3.3 + amendment A1, ruling R12).** One WHOLE-BODY trench per tunnel,
+born pre-solve at layout time from the classified deck footprint: a flat floor pan at
+`datum − body_depth − 0.5 m` inset `_TRENCH_INSET_M`, and a rim collar at the datum, the two a
+node-split gap apart forming the R2 near-vertical wall. Datum = DEM at the placement anchor
+(circular-datum rule); the negative-`OBJECT_AGL` offset is already folded into the classifier's
+effective `body_depth_m`, so it is not re-applied. PAVEMENT WINS (R2/R8): the airside pavement
+union is subtracted from the body before birth and the yielded area is logged per tunnel.
+
+**One deliberate deviation from the literal work order, with data.** The order said the trench
+role must be in the solver's `PAVEMENT_ROLES` "exactly like `ROLE_BRIDGE_TRENCH`". Measured, that
+reused role dragged **30 % of EGLL airside pavement down, up to 8.3 m near tunnels** (the deep
+floor pins couple neighbouring pavement through the one-solve — correct for a bridge deck-end,
+wrong for off-pavement tunnel terrain, §2.5). `ROLE_TUNNEL_TRENCH` is therefore a LAW-tier
+off-pavement terrain role (decimation-exempt, per-node `alt_abs`, LAW-tier weld — all the
+`ROLE_BRIDGE_TRENCH` plumbing) that is **NOT** a pavement solver member and births with
+`record_pins=False`. This decoupling also keeps the change inside the W-T file scope (no
+`solver_primitives.py` edit). Re-measured: airside pavement mean move **0.004 m**, max 0.94 m,
+99th pct 0.05 m; far-field (>60 m) 0.3 % moved by ≤0.05 m, zero >0.5 m. Floors still land in the
+mesh (flat-by-law per-node `alt_abs`, not solver membership — layout.py `force_per_node`).
+
+**Acceptance measured.** EGLL production mesh vs the author-mesh oracle (§2.4, ruling R11): the
+large well-formed tunnels match within ±1.0 m of the author's cut (tunnel 2 depth 5.5 m vs 6.0;
+11: 6.4 vs 7.0; 8: 4.5 vs 5.0). Where they diverge (tunnels 9/12) the OBJECT's own `body_depth`
+under-specifies the depth the author cut — the object-vs-author disagreement open question 1 was
+raised to quantify, not an implementation error (we render each tunnel to its object's depth and
+the audit reports the delta). Tunnel 5 is fully under airside pavement ⇒ correctly NOT cut (R2,
+open question 5). EGGW (0 tunnels) patch byte-identical gate-on vs gate-off (provenance header
+excepted). CYYZ: the road tunnels-under-taxiways classify as BRIDGES (Feature B); the one
+Feature-A tunnel is a Terminal-1 below-grade part (`Parte49`, 3656 m², cut to depth 2.46 m).
+
+**Before the gate can default ON (owner review).** (i) Rule on the object-vs-author datum/depth
+disagreement (open question 1) — do we deepen shallow-object tunnels toward the author, or hold
+the object? (ii) Ship the `verification.py` lockstep validator that imports the `grade_law`
+tunnel functions (out of W-T file scope this round). (iii) Rule whether an enclosed terminal
+below-grade part (CYYZ `Parte49`) should be Feature A (open trench) or Feature C (interior
+cutout, R10). (iv) Add `ROLE_TUNNEL_TRENCH` to the flat-airport fast-path REFUSAL set
+(`flat_airport_fast_path._flat_refusal_reason` `bridge_roles`, out of W-T scope): a flat airport
+whose ONLY relief is a tunnel would otherwise take the fast path and skip the trench. Latent only
+— EGLL/CYYZ refuse the fast path for other reasons (crossing zone / object-bridge pins), so no
+test airport is affected, but it must land before a flat tunnel-only airport is built gate-on.

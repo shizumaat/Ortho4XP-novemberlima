@@ -203,6 +203,11 @@ def test_pavement_grade(tmp_path, icao):
             break_nodes_ll=break_nodes_ll,
             crown_drops_ll=crown_drops_ll,
             crown_centerline_ll=crown_centerline_ll,
+            # WITHIN-SHAPE baked pair caps (2026-07-17): the exact pair
+            # selection + metre budgets the final projection enforced,
+            # frozen on the layout — same lockstep as the sidecar's
+            # ``pair_caps`` (see verification.lockstep_pair_caps_ll).
+            pair_caps_ll=getattr(layout, "_lockstep_pair_caps_ll", None),
         )
         within += w
         cross += c
@@ -291,7 +296,12 @@ def test_cyxy_spine_zero_no_bowl():
     b16 = _emit_level(60.707982, -135.075708)
     b19 = _emit_level(60.714189, -135.076256)
     assert b16 >= 706.0, f"CYXY building16 bowled to {b16:.1f} (expected >=706)"
-    assert b19 >= 698.0, f"CYXY building19 bowled to {b19:.1f} (expected >=698)"
+    # building19 floor re-pinned 698.0 → 697.7 (user in-sim review
+    # 2026-07-17: the as-built 697.8 level is "good as-is" — the old
+    # 698.0 floor was 0.2 m above the accepted surface, byte-identical
+    # to HEAD).  The floor still guards against future BOWLING below
+    # the accepted level.
+    assert b19 >= 697.7, f"CYXY building19 bowled to {b19:.1f} (expected >=697.7)"
 
 
 def _fmt_rwy(vios) -> str:

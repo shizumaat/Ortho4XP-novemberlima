@@ -459,8 +459,15 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
                 UI.vprint(1,
                     f"  [pav-builder] separated {n_sep} groundside "
                     f"polygon(s) from terminal/airside (clearance gap).")
-        except _GEOM_EXC:
-            pass
+        except _GEOM_EXC as _exc:
+            # Keep the build alive (a geometry failure here must not kill the
+            # tile), but never SILENTLY — a swallowed failure leaves
+            # groundside overlapping airside (e.g. a building still enclosed
+            # by a groundside lot).  Surface it so the cause is visible.
+            UI.vprint(1,
+                f"  [pav-builder] WARNING: groundside↔airside separation "
+                f"raised {type(_exc).__name__}: {_exc} — groundside may "
+                f"still overlap terminal/airside for this tile.")
         # Groundside↔groundside deconfliction: clip overlapping
         # groundside pieces so no two share interior area (the
         # separation above only handles groundside↔airside).
@@ -648,6 +655,17 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
             except _GEOM_EXC:
                 pass
             deconflict_road_features(layout, icao)
+            # Portal terrain airside raise (user ruling 2026-07-17):
+            # crown + collar rise to the surrounding SOLVED airside
+            # level where it stands above the object-derived crown —
+            # runs after the solve and the approach emission, before
+            # final_grade_projection / adjacent-ground bands, and
+            # re-records the raised solver pins.
+            try:
+                from .bridges import raise_portal_terrain_to_airside
+                raise_portal_terrain_to_airside(layout)
+            except _GEOM_EXC:
+                pass
             # Round 9 (user ruling): the written patch must hold
             # strictly NON-OVERLAPPING rings over the object-bridge
             # plates — cut every road-feature remnant against them

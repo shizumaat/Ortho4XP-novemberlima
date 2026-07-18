@@ -37,6 +37,7 @@ from shapely.geometry import LineString, Polygon
 from shapely.geometry.base import BaseGeometry
 
 from . import apt_dat_reader as APR
+from .geom_safe import min_rotated_rect
 from .pavement import strips as PS
 
 from .config import (
@@ -79,6 +80,7 @@ __all__ = [
     "ROLE_SERVICE_JUNCTION",
     "ROLE_BRIDGE_TRENCH",
     "ROLE_BRIDGE_CAUSEWAY",
+    "ROLE_TUNNEL_TRENCH",
     "AEROWAY_FOR_ROLE",
     "_airport_anchor",
     "_projection",
@@ -222,6 +224,25 @@ ROLE_RUNWAY_CLEARANCE = "runway_clearance"
 # to the lawful corridor bound, so it carries NO within-shape pavement
 # grade rule (ROLE_GRADE_LIMITS None) and is NOT airside pavement.
 ROLE_GRADED_STRIP = "graded_strip"
+
+# Weld-DONOR roles (user rulings 2026-07-09/2026-07-17): the pavement
+# families a SOFT terrain strip may ADOPT a coincident authority value
+# from — at the emit consensus (``to_osm``'s strip-adoption branch) and
+# at adjacent_ground's static-edge weld alike.  Designed splits
+# (buildings, service roads, terminals, groundside, bridge plates) are
+# NOT donors: a strip meeting them keeps its own lawful value — a
+# designed wall — because adopting a foreign authority corner minted
+# near-vertical tears inside the strip (measured CYXY: a building-pad
+# corner at 705.5 welded into a 714.6 band edge = a 9 m face over
+# 0.9 m; the DEM-free tear sentinel flags exactly this class).  THE
+# single source — adjacent_ground imports this set.
+WELD_DONOR_ROLES = frozenset((
+    ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
+    ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+    ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
+    ROLE_APRON,
+    ROLE_RUNWAY_CLEARANCE, ROLE_TAXIWAY_CLEARANCE,
+))
 # Object-derived bridge terrain (feature B, gate O4_OBJECT_BRIDGE_TERRAIN,
 # user ruling R12 — geometry-phase shapes, solver-immutable values):
 # ``bridge_trench`` is the depressed under-deck corridor floor of a
@@ -233,6 +254,22 @@ ROLE_GRADED_STRIP = "graded_strip"
 # solver or any mutation pass — flat by law, no within-shape grade rule.
 ROLE_BRIDGE_TRENCH = "bridge_trench"
 ROLE_BRIDGE_CAUSEWAY = "bridge_causeway"
+
+# Feature A (O4_OBJECT_TUNNEL_TERRAIN, docs/object_terrain_features_spec.md
+# section 3.3 + amendment A1).  The whole-body tunnel trench floor pan (at
+# the law floor) and its rim collar (at the datum) — born at layout time
+# with per-vertex ``node_altitudes`` from ``grade_law.tunnel_trench_*`` and
+# shipped per-node (flat-by-law, decimation-exempt, LAW-tier weld, no
+# within-shape grade rule), exactly like the bridge plates ABOVE with ONE
+# deliberate difference: it is OFF-PAVEMENT terrain (ruling R2 subtracts the
+# airside pavement from the body before birth), so it is NOT a pavement
+# solver member (absent from ``solver_primitives.PAVEMENT_ROLES``).  That
+# keeps the deep floor from dragging adjacent airside pavement down through
+# the one-solve — the trench value still WINS at any shared vertex (LAW
+# tier), the rim welds to the surrounding terrain, and the vertical drop is
+# the R2 node-split wall.  (Measured: reusing ROLE_BRIDGE_TRENCH pulled 30 %
+# of EGLL airside pavement down, up to 8 m near tunnels; this role fixes it.)
+ROLE_TUNNEL_TRENCH = "tunnel_trench"
 
 # SOFT RECEIVERS (weld ruling 2026-07-09): terrain-grading roles whose
 # values ADOPT from pavement / solver-owned shapes at shared vertices —
@@ -267,6 +304,7 @@ AEROWAY_FOR_ROLE = {
     # clearance / graded-strip features — no taxiable aeroway semantics.
     ROLE_BRIDGE_TRENCH: "aerodrome",
     ROLE_BRIDGE_CAUSEWAY: "aerodrome",
+    ROLE_TUNNEL_TRENCH: "aerodrome",
 }
 
 
@@ -277,7 +315,7 @@ def _rect_short_edge_width_m(polygon) -> float | None:
     if polygon is None or polygon.is_empty:
         return None
     try:
-        mrr = polygon.minimum_rotated_rectangle
+        mrr = min_rotated_rect(polygon)
         pts = list(mrr.exterior.coords)
     except _GEOM_EXC:
         return None
@@ -559,6 +597,10 @@ class PavementLayout:
         # a runway ring vertex (the A2 doctrine at emit: authorities
         # never adopt; soft receivers adopt).
         node_id_to_authority_alts: dict[int, list[float]] = {}
+        # Which ROLES claimed each authority node — the strip-adoption
+        # branch admits only WELD_DONOR_ROLES claimants (2026-07-17).
+        node_id_to_authority_roles: dict[int, set] = {}
+        current_shape_role: list = [None]
         # LAW-VALUE claims (feature B): the object-bridge plates carry
         # grade-law constants (deck-end / corridor-floor elevations) —
         # a node with a law claim takes the LAW value; other authority
@@ -588,7 +630,7 @@ class PavementLayout:
         # edge law of its own to violate.
         node_id_to_skirt_alts: dict[int, list[float]] = {}
         _LAW_VALUE_ROLES = frozenset({
-            ROLE_BRIDGE_TRENCH, ROLE_BRIDGE_CAUSEWAY,
+            ROLE_BRIDGE_TRENCH, ROLE_BRIDGE_CAUSEWAY, ROLE_TUNNEL_TRENCH,
         })
         _SOFT_RECEIVER_ROLES = SOFT_RECEIVER_ROLES
         current_shape_is_soft = [False]
@@ -602,6 +644,8 @@ class PavementLayout:
             if not current_shape_is_soft[0]:
                 node_id_to_authority_alts.setdefault(
                     nid, []).append(alt)
+                node_id_to_authority_roles.setdefault(
+                    nid, set()).add(current_shape_role[0])
             if current_shape_is_law[0]:
                 node_id_to_law_alts.setdefault(nid, []).append(alt)
             if current_shape_is_skirt[0]:
@@ -635,9 +679,22 @@ class PavementLayout:
                 # consensus ignores it), so the strip surface bends
                 # to the pavement value.  Deliberate walls
                 # (retaining_wall, skirt lifts) keep the twin path.
+                #
+                # DONOR-GATED (2026-07-17): adoption applies only when
+                # the authority claimant is a WELD_DONOR_ROLES member
+                # (runway/taxi/apron/clearance families).  A designed
+                # split — building pad, service road, terminal,
+                # groundside, bridge plate — is NOT a donor: adopting
+                # its corner minted near-vertical tears inside the
+                # strip (CYXY: building 705.5 into a 714.6 band edge =
+                # 9 m over 0.9 m); the strip keeps its own lawful
+                # value and the fresh-nid path renders the designed
+                # wall.
                 if current_shape_is_strip[0]:
                     for nid, _claimed in existing:
-                        if node_id_to_authority_alts.get(nid):
+                        if (node_id_to_authority_alts.get(nid)
+                                and (node_id_to_authority_roles.get(nid)
+                                     or set()) & WELD_DONOR_ROLES):
                             _record_claim(nid, alt)
                             return nid
                 # No altitude match: real wall / cliff.  Allocate
@@ -771,6 +828,7 @@ class PavementLayout:
             # strips are SOFT receivers, everything else is a value
             # authority (see node_id_to_authority_alts above).
             current_shape_is_soft[0] = s.role in _SOFT_RECEIVER_ROLES
+            current_shape_role[0] = s.role
             # Legacy surface_clearance strips share the graded-strip
             # adoption path: their inner row is defined to sit AT the
             # pavement edge with pavement values verbatim, so a
@@ -1175,7 +1233,61 @@ class PavementLayout:
                     if perp >= _WELD_TOL_M:
                         continue
                     hits.append((t, nid))
+                def _soft_claim_mean(query_nid):
+                    """Mean of the node's NON-authority claims (the
+                    strip-side reading), falling back to all claims."""
+                    alts = node_id_to_alts.get(query_nid)
+                    if not alts:
+                        return None
+                    soft = list(alts)
+                    for value in list(
+                            node_id_to_authority_alts.get(query_nid)
+                            or []):
+                        try:
+                            soft.remove(value)
+                        except ValueError:
+                            pass
+                    pool = soft or alts
+                    return sum(pool) / len(pool)
+
+                _way_is_strip = (
+                    _s.role == ROLE_GRADED_STRIP
+                    or (_s.ref == "surface_clearance"
+                        and _s.role in (ROLE_TAXIWAY_CLEARANCE,
+                                        ROLE_RUNWAY_CLEARANCE)))
                 for _t, nid in sorted(hits):
+                    # DONOR-GATED DESIGNED WALL (2026-07-17): a SOFT
+                    # strip receiving an on-edge node whose authority
+                    # claimants are all NON-donors (building pad,
+                    # service road, terminal, groundside — the
+                    # WELD_DONOR_ROLES complement) must not splice the
+                    # foreign VALUE into its ring: that minted
+                    # near-vertical tears inside the band (CYXY:
+                    # building 705.5 into a ~714 band edge).  Insert a
+                    # COORDINATE-TWIN carrying the strip's own
+                    # edge-interpolated soft value instead — the mesh
+                    # still welds the chains by coordinates (no
+                    # T-vertex Ruppert explosion) and the value step
+                    # renders as the designed wall between the twin
+                    # and the foreign shape's own node.
+                    _authority_roles = node_id_to_authority_roles.get(nid)
+                    if (_way_is_strip and _authority_roles
+                            and not (_authority_roles
+                                     & WELD_DONOR_ROLES)):
+                        _wall_a = _soft_claim_mean(n0)
+                        _wall_b = _soft_claim_mean(n1)
+                        if _wall_a is not None and _wall_b is not None:
+                            twin = next_nid[0]
+                            next_nid[0] -= 1
+                            node_id_to_ll[twin] = node_id_to_ll[nid]
+                            node_id_to_alts[twin] = [
+                                (1.0 - _t) * _wall_a + _t * _wall_b]
+                            _nid_xy[twin] = _nid_xy[nid]
+                            out.append(twin)
+                            member.add(twin)
+                            changed = True
+                            _n_weld += 1
+                            continue
                     if nid in member:
                         # The way already passes through this node
                         # ELSEWHERE (a multi-way collinear seam that
@@ -1198,6 +1310,9 @@ class PavementLayout:
                         if nid in node_id_to_authority_alts:
                             node_id_to_authority_alts[twin] = list(
                                 node_id_to_authority_alts[nid])
+                        if nid in node_id_to_authority_roles:
+                            node_id_to_authority_roles[twin] = set(
+                                node_id_to_authority_roles[nid])
                         if nid in node_id_to_skirt_alts:
                             node_id_to_skirt_alts[twin] = list(
                                 node_id_to_skirt_alts[nid])
@@ -1299,7 +1414,8 @@ class PavementLayout:
         _law_plate_ll: set[tuple] = set()
         for _si, _s, _enids, _sa, _sna in pending:
             if getattr(_s, "role", None) in (ROLE_BRIDGE_TRENCH,
-                                             ROLE_BRIDGE_CAUSEWAY):
+                                             ROLE_BRIDGE_CAUSEWAY,
+                                             ROLE_TUNNEL_TRENCH):
                 for _nid in _enids:
                     _law_plate_ll.add(node_id_to_ll[_nid])
         for _sweep in range(4):
@@ -1651,7 +1767,8 @@ class PavementLayout:
                     # (the pinned junctions at 167.00) landed exactly.
                     # Flat-by-law plates therefore ship per-node.
                     force_per_node = s.role in (
-                        ROLE_BRIDGE_TRENCH, ROLE_BRIDGE_CAUSEWAY)
+                        ROLE_BRIDGE_TRENCH, ROLE_BRIDGE_CAUSEWAY,
+                        ROLE_TUNNEL_TRENCH)
                     if (all_max - all_min <= _CANON_EQ_TOL
                             and not force_per_node):
                         tags["altitude"] = (
@@ -1961,6 +2078,18 @@ class PavementLayout:
                 "crown_centerline": [[la, lo] for (la, lo) in
                                      (getattr(self, "_crown_centerline_ll",
                                               None) or [])],
+                # WITHIN-SHAPE baked pair allowances (2026-07-17): the
+                # exact pair selection + metre budgets the final
+                # projection enforced, frozen by
+                # ``final_grade_projection`` (see
+                # ``verification.lockstep_pair_caps_ll``).  The
+                # validator constrains exactly these pairs instead of
+                # re-baking from the emitted ring — the last lockstep
+                # reader (post-projection vertex inserts otherwise
+                # tighten the re-baked spans below what the solver
+                # lawfully enforced).
+                "pair_caps": (getattr(self, "_lockstep_pair_caps_ll",
+                                      None) or []),
             }
             Path(str(path) + ".axes.json").write_text(_json.dumps(data))
         except Exception:

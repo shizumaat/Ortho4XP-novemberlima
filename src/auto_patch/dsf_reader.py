@@ -1097,7 +1097,7 @@ def airport_mod_cache_dir(pack_root: str) -> str | None:
 # Bump when the partition / footprint logic changes shape in a way that
 # would make an old cached ring set wrong — invalidates every footprint
 # sidecar.
-_OBJECT_FOOTPRINT_CACHE_VERSION = 1
+_OBJECT_FOOTPRINT_CACHE_VERSION = 2  # 2: portal-face exclusions (EGGW)
 
 # Sidecar file name prefix; the full name carries the DSF stem
 # (``o4_object_footprints_<dsf-stem>.cache``) so two DSFs of one pack
@@ -1114,8 +1114,17 @@ def _object_footprint_sidecar(
     pack_root: str | None,
     contact_epsilon_metres: float,
     minimum_reach_metres: float,
+    gate_constants: tuple[float, ...] = (),
+    sidecar_prefix: str = _OBJECT_FOOTPRINT_SIDECAR_PREFIX,
+    cache_version: int = _OBJECT_FOOTPRINT_CACHE_VERSION,
 ) -> tuple[str | None, str | None]:
     """Sidecar path + input fingerprint for the pack footprint cache.
+
+    ``sidecar_prefix`` / ``cache_version`` let the object-PAVEMENT reader
+    (:func:`read_dsf_object_pavements`) keep its own sidecar file and
+    version stream while sharing the fingerprint machinery — its result
+    depends on the same inputs (the overlay DSF, every pack-local
+    ``.obj``, its gate constants).
 
     The return value of :func:`read_dsf_object_buildings` is a pure
     function of everything hashed here, so a fingerprint match makes the
@@ -1132,6 +1141,13 @@ def _object_footprint_sidecar(
     * the two config constants that drive partitioning,
       ``DSF_OBJECT_CONTACT_EPSILON_M`` and ``DSF_OBJECT_MIN_REACH_M``
       (their float values enter the digest);
+    * ``gate_constants`` — the building-pad footprint gates the ring set
+      also depends on (defect 2026-07-17: the connector pre-filter flag /
+      span / fill, the structure span gate, the area backstop, and the
+      ``OBJECT_BRIDGE_TERRAIN`` terrain-feature exclusion that drops
+      tunnel/bridge/deck resources from the pool); a change to any of
+      them invalidates the cache, since the cached rings are computed
+      under them;
     * :data:`_OBJECT_FOOTPRINT_CACHE_VERSION`.
 
     ACCEPTED RISK (identical to the classification cache): out-of-pack,
@@ -1161,7 +1177,7 @@ def _object_footprint_sidecar(
     import hashlib
     digest = hashlib.sha1()
     try:
-        digest.update(str(_OBJECT_FOOTPRINT_CACHE_VERSION).encode())
+        digest.update(str(cache_version).encode())
         dsf_stat = os.stat(dsf_path)
         digest.update(
             f"{os.path.basename(dsf_path)}:{dsf_stat.st_size}"
@@ -1187,13 +1203,19 @@ def _object_footprint_sidecar(
             f"epsilon:{float(contact_epsilon_metres)!r}"
             f":reach:{float(minimum_reach_metres)!r}".encode()
         )
+        digest.update(
+            (
+                "gates:"
+                + ":".join(repr(float(value)) for value in gate_constants)
+            ).encode()
+        )
     except OSError:
         return None, None
     dsf_stem = os.path.splitext(os.path.basename(dsf_path))[0]
     return (
         os.path.join(
             cache_directory,
-            f"{_OBJECT_FOOTPRINT_SIDECAR_PREFIX}_{dsf_stem}.cache",
+            f"{sidecar_prefix}_{dsf_stem}.cache",
         ),
         digest.hexdigest(),
     )
@@ -1251,8 +1273,14 @@ def read_dsf_object_buildings(
     # (the module-level idiom at the top of this file freezes them —
     # spec section 4-W1, "one trap").
     from .config import (
+        DSF_OBJECT_CONNECTOR_MAX_FILL,
+        DSF_OBJECT_CONNECTOR_PREFILTER,
+        DSF_OBJECT_CONNECTOR_SPAN_M,
         DSF_OBJECT_CONTACT_EPSILON_M,
+        DSF_OBJECT_MAX_FOOTPRINT_AREA_M2,
+        DSF_OBJECT_MAX_STRUCTURE_SPAN_M,
         DSF_OBJECT_MIN_REACH_M,
+        OBJECT_BRIDGE_TERRAIN,
     )
     from . import obj8_reader as _OBJ8
     from . import object_anchor as _ANCHOR
@@ -1268,6 +1296,20 @@ def read_dsf_object_buildings(
         sidecar_path, fingerprint = _object_footprint_sidecar(
             dsf_path, _pack_root_for_dsf(dsf_path),
             DSF_OBJECT_CONTACT_EPSILON_M, DSF_OBJECT_MIN_REACH_M,
+            gate_constants=(
+                # Building-pad footprint gates the cached ring set depends
+                # on (defect 2026-07-17) — a change invalidates the cache.
+                DSF_OBJECT_MAX_FOOTPRINT_AREA_M2,
+                DSF_OBJECT_MAX_STRUCTURE_SPAN_M,
+                float(DSF_OBJECT_CONNECTOR_PREFILTER),
+                DSF_OBJECT_CONNECTOR_SPAN_M,
+                DSF_OBJECT_CONNECTOR_MAX_FILL,
+                # Terrain-feature exclusion (defect 2026-07-17, EGLL
+                # Building36): tunnel/bridge/deck resources drop from the
+                # building pool when this feature is on, so the cached
+                # ring set depends on it — a toggle invalidates the cache.
+                float(OBJECT_BRIDGE_TERRAIN),
+            ),
         )
         if sidecar_path and fingerprint and os.path.isfile(sidecar_path):
             try:
@@ -1291,10 +1333,20 @@ def read_dsf_object_buildings(
     lines = _load_dsf_text(dsf_path, cache_dir)
     if not lines:
         return []
-    placements = _OBJ8.read_dsf_object_placements(
+    # Read every OBJECT/OBJECT_AGL/OBJECT_MSL placement.  The building
+    # pool uses only the terrain-relative ones (the historical set — MSL
+    # rows were skipped before), so building formation is unchanged; the
+    # MSL rows feed the Feature-B terrain classifier below (absolute deck
+    # elevations, invariant to the anchor-family read).
+    all_placements = _OBJ8.read_dsf_object_placements(
         lines,
         accept_resource=lambda resource: resource.lower().endswith(".obj"),
+        include_object_msl=True,
     )
+    mean_sea_level_placements = [
+        p for p in all_placements if p.placement_kind == "OBJECT_MSL"]
+    placements = [
+        p for p in all_placements if p.placement_kind != "OBJECT_MSL"]
     if not placements:
         return []
     pack_root = _pack_root_for_dsf(dsf_path)
@@ -1329,10 +1381,105 @@ def read_dsf_object_buildings(
             continue
         if geometry.solid_reach_metres() < DSF_OBJECT_MIN_REACH_M:
             continue
+        # CONNECTOR PRE-FILTER (defect 2026-07-17, UK payware co-baked
+        # airports): a perimeter fence, road/rail network or whole-complex
+        # ground slab spans the field and touches every real building; left
+        # in the pool it chains them all into one convex-hull mega-pad that
+        # buries the real buildings and the below-grade tunnels.  Drop it
+        # here — BEFORE ``discover_object_pools`` and the weld/contact
+        # partition — so it can never chain components; report through the
+        # skip path (config DSF_OBJECT_CONNECTOR_SPAN_M / _MAX_FILL).  A
+        # large but FILLED terminal fails the fill test and is kept.
+        # DEFAULT OFF (verification finding — a per-object span+fill test
+        # cannot separate a co-baked building texture-page from a true
+        # bridging connector, so it gutted EGGW/EGLL buildings; the
+        # STRUCTURE span gate in ``object_footprints.structure_ring`` is
+        # the sound per-structure fix).  Owner ruling pending.
+        is_connector, connector_metrics = (
+            _ANCHOR.is_connector_resource(
+                geometry,
+                connector_span_metres=DSF_OBJECT_CONNECTOR_SPAN_M,
+                connector_maximum_fill=DSF_OBJECT_CONNECTOR_MAX_FILL,
+            )
+            if DSF_OBJECT_CONNECTOR_PREFILTER
+            else (False, None)
+        )
+        if is_connector:
+            UI.vprint(
+                1,
+                f"   [dsf-object] {resource_path} is a CONNECTOR (span "
+                f"{connector_metrics.span_metres:.0f} m > "
+                f"{DSF_OBJECT_CONNECTOR_SPAN_M:.0f} m, hull-fill "
+                f"{connector_metrics.hull_fill_ratio:.3f} < "
+                f"{DSF_OBJECT_CONNECTOR_MAX_FILL:.2f}) — excluded from "
+                "building pooling (O4_DSF_OBJECT_CONNECTOR_SPAN_M).",
+            )
+            continue
         resolved_paths[resource_path] = physical_path
         geometry_by_resource[resource_path] = geometry
     if not resolved_paths:
         return []
+
+    # TERRAIN-FEATURE EXCLUSION (defect 2026-07-17, EGLL Building36): a
+    # tunnel is authored as a shell + deck pair (``N.obj`` + ``Na.obj``)
+    # that share an anchor and weld into one rigid ground-touching
+    # structure at the contact epsilon.  Its convex-hull footprint (EGLL
+    # 9/9a: 88,414 m² over 654 m; 2/2a: 87,148 m² over 1,076 m) falls
+    # under the area backstop, so it emitted AS a building pad — a
+    # phantom flat pad burying the below-grade deck.  Tunnels, bridges
+    # and interior deck cutouts are Feature-B object-TERRAIN material,
+    # not building pads; the shared Feature-B classifier
+    # (``object_terrain_features.classify_object_terrain_features``) is a
+    # geometric recognizer — below-grade drivable enclosure for tunnels,
+    # deck/abutment signature for bridges, with a building-likeness gate
+    # that protects real terminals — and it needs only placements and
+    # geometry, both already in hand here.  Excluding the resources it
+    # consumes BEFORE pooling/weld means they can never chain into a
+    # pad.  Gated on ``OBJECT_BRIDGE_TERRAIN`` (the terrain feature that
+    # then owns them): a tunnel leaves the building pool exactly when the
+    # feature that adapts it is active.  Pavement polygons are not
+    # available at Phase-1 building extraction, so bridge classification
+    # here falls back to the deck-crest contract — a strict subset of
+    # what the elevation-phase classifier consumes, so a bridge missed
+    # here simply stays a building pad as it did before (no regression),
+    # while the below-grade tunnel signature (the reported defect) needs
+    # no pavement.
+    from .config import OBJECT_BRIDGE_TERRAIN
+    if OBJECT_BRIDGE_TERRAIN:
+        from . import object_terrain_features as _TERRAIN
+        classified_placements = [
+            p for p in placements if p.resource_path in geometry_by_resource]
+        try:
+            classification = _TERRAIN.classify_object_terrain_features(
+                classified_placements,
+                geometry_by_resource,
+                pavement_polygons_longitude_latitude=None,
+                mean_sea_level_placements=mean_sea_level_placements,
+                pack_root=pack_root or "",
+            )
+        except Exception:
+            # A classifier failure must never break building extraction;
+            # fall back to the un-excluded pool (the pre-fix behaviour).
+            classification = None
+        if classification is not None:
+            terrain_resources = {
+                resource for _root, resource in classification.exclusions
+                if resource in resolved_paths}
+            if terrain_resources:
+                UI.vprint(
+                    1,
+                    f"   [dsf-object] {len(terrain_resources)} resource(s) "
+                    "classified as tunnel/bridge/deck terrain "
+                    "(O4_OBJECT_BRIDGE_TERRAIN) — excluded from building "
+                    "pooling so they cannot chain into a pad: "
+                    f"{sorted(os.path.basename(r) for r in terrain_resources)}",
+                )
+                for resource in terrain_resources:
+                    resolved_paths.pop(resource, None)
+                    geometry_by_resource.pop(resource, None)
+    if not resolved_paths:
+        return []
+
     kept_placements = [p for p in placements
                        if p.resource_path in resolved_paths]
 
@@ -1407,6 +1554,189 @@ def read_dsf_object_buildings(
                 "   [dsf-object] footprints written to the pack sidecar "
                 f"cache ({os.path.basename(sidecar_path)})",
             )
+        except Exception:
+            pass
+
+    return out
+
+
+# ── OBJ8 scenery objects as PAVEMENT (user 2026-07-17, HECA Tai
+# Models) ──  Ground-paint packs draw base pavement as DRAPED-ONLY
+# ``.obj`` texture pages: one OBJECT placement carries the whole
+# airport's geometry for one texture (HECA ``Airport/ground/asphalt.obj``
+# = 31k draped vertices, zero solid triangles).  The building reader
+# skips them at ``has_solid_geometry``; the ``.pol`` pavement reader
+# never sees them.  The base-vs-decal discriminator is the DECLARED DRAW
+# LAYER: base pavement stacks UNDER markings via
+# ``ATTR_layer_group_draped runways/taxiways <small offset>`` while taxi
+# lines, ramp decals and gate signs sit in group ``markings`` or at
+# offsets 2..5 (HECA survey 2026-07-17 — every base asphalt/concrete
+# page at ``runways 1``, every decal above it).
+_PAVEMENT_OBJECT_LAYER_GROUPS = frozenset({"runways", "taxiways"})
+_OBJECT_PAVEMENT_SIDECAR_PREFIX = "o4_object_pavements"
+_OBJECT_PAVEMENT_CACHE_VERSION = 1
+
+
+def _is_pavement_object(def_path: str, geometry) -> bool:
+    """True when an OBJ8 resource is a base ground-pavement texture page.
+
+    Conjunctive, conservative:
+
+    * draped-only geometry (any solid triangle → it is a 3-D object,
+      the building path's business);
+    * declares ``ATTR_layer_group_draped`` in a pavement group at an
+      offset no greater than ``DSF_OBJECT_PAVEMENT_MAX_LAYER_OFFSET``
+      (an object declaring NO draped layer group is refused — the
+      base-vs-decal ordering signal is the whole classification);
+    * no decorative token in the file's basename (same veto vocabulary
+      as the ``.pol`` SURFACE classifier; basename only, so a
+      directory named e.g. ``Flightline/`` cannot false-veto).
+    """
+    from .config import DSF_OBJECT_PAVEMENT_MAX_LAYER_OFFSET
+
+    if geometry.solid_triangles or not geometry.draped_triangles:
+        return False
+    if geometry.draped_layer_group is None:
+        return False
+    layer_group_name, layer_offset = geometry.draped_layer_group
+    if layer_group_name not in _PAVEMENT_OBJECT_LAYER_GROUPS:
+        return False
+    if layer_offset > DSF_OBJECT_PAVEMENT_MAX_LAYER_OFFSET:
+        return False
+    basename = os.path.basename(def_path).lower()
+    if any(token.lower() in basename
+           for token in _DECORATIVE_SKIP_TOKENS):
+        return False
+    return True
+
+
+def read_dsf_object_pavements(
+    dsf_path: str,
+    cache_dir: str | None = None,
+    xplane_root: str | None = None,
+) -> list[tuple[list[tuple[float, float]],
+                list[list[tuple[float, float]]],
+                str]]:
+    """Extract base-pavement OBJ8 ground-paint patches from a DSF file.
+
+    Walks the ``OBJECT`` placements, resolves and parses each ``.obj``
+    resource, keeps those :func:`_is_pavement_object` classifies as base
+    pavement, and unions each accepted placement's draped triangles into
+    pavement patches (:func:`object_footprints.draped_pavement_patches`
+    — ALL disjoint patches kept, interior holes honoured, patches under
+    ``DSF_OBJECT_PAVEMENT_MIN_PATCH_M2`` dropped).
+
+    Returns the ``read_dsf_pavements`` tuple shape — ``(outer_ring,
+    holes, def_path)``, rings unclosed in ``(longitude, latitude)`` — so
+    the pipeline's DSF pavement sweep (distance gate, boundary gate,
+    overlay drop, third-party marking) applies to both sources through
+    one path.  Returns ``[]`` on any failure to load the DSF text.
+
+    The result is sidecar-cached per pack
+    (``o4_object_pavements_<dsf-stem>.cache`` under
+    :func:`airport_mod_cache_dir`) on the same fingerprint machinery as
+    the object-building footprints, with the pavement gate constants in
+    the digest; ``O4_OBJECT_FOOTPRINT_CACHE=0`` disables this cache too
+    (one switch for both object sidecars).
+    """
+    from .config import (
+        DSF_OBJECT_PAVEMENT_MAX_LAYER_OFFSET,
+        DSF_OBJECT_PAVEMENT_MIN_PATCH_M2,
+    )
+    from . import obj8_reader as _OBJ8
+    from . import object_footprints as _FOOTPRINTS
+
+    sidecar_path: str | None = None
+    fingerprint: str | None = None
+    if os.environ.get("O4_OBJECT_FOOTPRINT_CACHE", "1") == "1":
+        import pickle
+        sidecar_path, fingerprint = _object_footprint_sidecar(
+            dsf_path, _pack_root_for_dsf(dsf_path),
+            0.0, 0.0,  # no contact partition in the pavement path
+            gate_constants=(
+                float(DSF_OBJECT_PAVEMENT_MAX_LAYER_OFFSET),
+                DSF_OBJECT_PAVEMENT_MIN_PATCH_M2,
+            ),
+            sidecar_prefix=_OBJECT_PAVEMENT_SIDECAR_PREFIX,
+            cache_version=_OBJECT_PAVEMENT_CACHE_VERSION,
+        )
+        if sidecar_path and fingerprint and os.path.isfile(sidecar_path):
+            try:
+                with open(sidecar_path, "rb") as sidecar_file:
+                    payload = pickle.load(sidecar_file)
+                if payload.get("fingerprint") == fingerprint:
+                    UI.vprint(
+                        1,
+                        "   [dsf-object] pavement patches read from the "
+                        "pack sidecar cache (fingerprint match)",
+                    )
+                    return payload["result"]
+                UI.vprint(
+                    1,
+                    "   [dsf-object] pavement pack sidecar cache STALE "
+                    "(pack edited since it was written) - recomputing",
+                )
+            except Exception:
+                pass
+
+    lines = _load_dsf_text(dsf_path, cache_dir)
+    if not lines:
+        return []
+    placements = _OBJ8.read_dsf_object_placements(
+        lines,
+        accept_resource=lambda resource: resource.lower().endswith(".obj"),
+    )
+    if not placements:
+        return []
+    pack_root = _pack_root_for_dsf(dsf_path)
+
+    out: list[tuple[list[tuple[float, float]],
+                    list[list[tuple[float, float]]],
+                    str]] = []
+    accepted_resource_count = 0
+    for resource_path in sorted({p.resource_path for p in placements}):
+        physical_path = _OBJ8.resolve_object_resource(
+            resource_path, pack_root, xplane_root)
+        if physical_path is None:
+            continue
+        geometry = _load_object_geometry(physical_path)
+        if geometry is None:
+            continue
+        if not _is_pavement_object(resource_path, geometry):
+            continue
+        resource_patch_count = 0
+        for placement in placements:
+            if placement.resource_path != resource_path:
+                continue
+            for outer_ring, hole_rings in (
+                    _FOOTPRINTS.draped_pavement_patches(
+                        geometry, placement,
+                        DSF_OBJECT_PAVEMENT_MIN_PATCH_M2)):
+                out.append((outer_ring, hole_rings, resource_path))
+                resource_patch_count += 1
+        if resource_patch_count:
+            accepted_resource_count += 1
+            UI.vprint(
+                2,
+                f"  [dsf-object] pavement object {resource_path}: "
+                f"{resource_patch_count} patch(es)",
+            )
+    if out:
+        UI.vprint(
+            1,
+            f"   [dsf-object] {len(out)} ground-paint pavement patches "
+            f"from {accepted_resource_count} draped base-layer object(s)",
+        )
+
+    if sidecar_path is not None and fingerprint is not None:
+        import pickle
+        try:
+            os.makedirs(os.path.dirname(sidecar_path), exist_ok=True)
+            with open(sidecar_path, "wb") as sidecar_file:
+                pickle.dump(
+                    {"fingerprint": fingerprint, "result": out},
+                    sidecar_file,
+                )
         except Exception:
             pass
 

@@ -298,7 +298,8 @@ class TestStructureRingMinimumBuildingHeight:
         structure = make_structure({"a.obj": L_SHAPE_TRIANGLES},
                                    {"a.obj": 0.0})
         placements = [make_placement("a.obj")]
-        # Cap disabled (the 0.0 default): the 350 m2 hull is admitted.
+        # Under the 100,000 m2 backstop default (defect 2026-07-17): the
+        # 350 m2 hull is far below the cap and admitted.
         assert object_footprints.structure_ring(
             structure, {"a.obj": geometry}, placements) is not None
         # Cap enabled below the hull area: None, and reported.
@@ -312,6 +313,35 @@ class TestStructureRingMinimumBuildingHeight:
             structure, {"a.obj": geometry}, placements) is None
         assert len(reports) == 1
         assert "exceeds" in reports[0] and "cap" in reports[0]
+
+    def test_structure_span_gate_returns_none_and_reports(
+            self, fake_projection, monkeypatch):
+        # Defect 2026-07-17: a field-spanning structure (residual chained
+        # hull) is skipped-and-reported through the same path as the area
+        # cap.  A 600 m long, 10 m wide flat slab: 6,000 m2 (well under the
+        # backstop) but its 600 m span trips the structure span gate.
+        long_slab_vertices = [
+            (0.0, 0.0, 0.0), (600.0, 0.0, 0.0),
+            (600.0, 0.0, 10.0), (0.0, 0.0, 10.0),
+        ]
+        long_slab_triangles = [(0, 1, 2), (0, 2, 3)]
+        geometry = make_geometry(long_slab_vertices, long_slab_triangles)
+        structure = make_structure({"a.obj": long_slab_triangles},
+                                   {"a.obj": 0.0})
+        placements = [make_placement("a.obj")]
+        # Gate disabled (the 0.0 shipping default): the slab is admitted.
+        assert object_footprints.structure_ring(
+            structure, {"a.obj": geometry}, placements) is not None
+        # Gate enabled at 500 m: the 600 m-spanning slab is skipped-and-
+        # reported through the same path as the area cap.
+        reports = []
+        monkeypatch.setattr(
+            object_footprints.UI, "vprint",
+            lambda level, message: reports.append(message))
+        monkeypatch.setattr(config, "DSF_OBJECT_MAX_STRUCTURE_SPAN_M", 500.0)
+        assert object_footprints.structure_ring(
+            structure, {"a.obj": geometry}, placements) is None
+        assert any("structure span gate" in message for message in reports)
 
     def test_two_placements_project_through_their_own_anchor(
             self, fake_projection):
@@ -395,9 +425,16 @@ def _write_fake_dsf(tmp_path, body):
 
 
 def _parse_placements_like_the_real_reader(dsf_text_lines,
-                                           accept_resource=None):
+                                           accept_resource=None,
+                                           include_object_msl=False):
     """Trivial stand-in for ``obj8_reader.read_dsf_object_placements``
-    (plain ``OBJECT`` only, honouring ``accept_resource``)."""
+    (plain ``OBJECT`` only, honouring ``accept_resource``).
+
+    Accepts (and ignores) ``include_object_msl`` to match the real
+    reader's signature: ``read_dsf_object_buildings`` opts in so the
+    Feature-B terrain classifier can see absolute-deck ``OBJECT_MSL``
+    rows.  These synthetic DSFs carry only plain ``OBJECT`` rows, so
+    there is nothing extra to emit."""
     definitions = []
     placements = []
     for line in dsf_text_lines:
@@ -660,6 +697,66 @@ class TestReadDsfObjectBuildings:
             tmp_path, "POLYGON_DEF lib/airport/pavement/asphalt.pol\n")
         assert D.read_dsf_object_buildings(dsf_path,
                                            xplane_root=None) == []
+
+    def test_terrain_classified_resource_excluded_from_pool(
+            self, object_building_harness, monkeypatch):
+        """Defect 2026-07-17 (EGLL Building36): a resource the Feature-B
+        classifier consumes as tunnel/bridge/deck terrain is dropped
+        from the building pool BEFORE pooling, so it can never chain
+        into a pad.  Here ``objects/row_warehouse.obj`` (its two
+        placements would be two buildings) is returned in the
+        classifier's exclusions; only ``big_bake.obj``'s single building
+        must survive."""
+        from auto_patch import object_terrain_features
+
+        harness = object_building_harness
+        pack_root = harness.pack_root
+
+        def fake_classify(placements, geometry_by_resource, *,
+                          pavement_polygons_longitude_latitude=None,
+                          mean_sea_level_placements=None, pack_root="",
+                          **kwargs):
+            return object_terrain_features.ClassificationResult(
+                tunnels=[], bridges=[],
+                exclusions=[(pack_root, "objects/row_warehouse.obj")])
+
+        monkeypatch.setattr(object_terrain_features,
+                            "classify_object_terrain_features",
+                            fake_classify)
+
+        buildings = D.read_dsf_object_buildings(
+            harness.dsf_path, xplane_root="/nonexistent-xplane")
+        # big_bake alone remains; the two row_warehouse placements are
+        # excluded as classified terrain — the reader never pooled them.
+        assert len(buildings) == 1
+        pooled_resources = {
+            resource
+            for _placements, resolved_paths, _epsilon in harness.pool_calls
+            for resource in resolved_paths}
+        assert "objects/row_warehouse.obj" not in pooled_resources
+        assert "Terminals/Hangar/big_bake.obj" in pooled_resources
+
+    def test_terrain_exclusion_off_when_feature_gate_off(
+            self, object_building_harness, monkeypatch):
+        """With ``OBJECT_BRIDGE_TERRAIN`` off the classifier never runs,
+        so no resource is excluded and the full building set is
+        emitted (the pre-feature behaviour)."""
+        from auto_patch import object_terrain_features
+
+        monkeypatch.setattr(config, "OBJECT_BRIDGE_TERRAIN", False)
+
+        def exploding_classify(*args, **kwargs):
+            raise AssertionError(
+                "classifier must not run when the gate is off")
+
+        monkeypatch.setattr(object_terrain_features,
+                            "classify_object_terrain_features",
+                            exploding_classify)
+
+        harness = object_building_harness
+        buildings = D.read_dsf_object_buildings(
+            harness.dsf_path, xplane_root="/nonexistent-xplane")
+        assert len(buildings) == 3
 
 
 # ── footprint sidecar cache (data root Airport_mod_cache/<pack>/) ────

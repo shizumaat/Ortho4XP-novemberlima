@@ -18,7 +18,8 @@ import os as _os
 import time as _time
 
 from .anchors import (
-    apron_body_nodes, build_building_seats, build_nobuilding_apron_seats,
+    apron_body_nodes, build_building_seats, build_detached_pad_dem_pins,
+    build_nobuilding_apron_seats,
     build_apron_contact_floors, building_spine_floor, node_bands, reach_band_for)
 from .one_solve import one_profile_solve
 
@@ -548,6 +549,32 @@ def solve_route_profile(layout, icao: str,
             _UI_flex.vprint(1, f"  [pav-builder] WARN: {icao}: runway "
                                f"flex pass failed ({_flex_exc}) — "
                                f"profiles stay frozen.")
+    # ── FLAT-AIRPORT FAST PATH (spec §3.3, Tier 2, O4_FLAT_AIRPORT_FAST_PATH) ──
+    # The runway profiles are now final (birth-datum law + flex).  BEFORE any
+    # reach-band / spine / body-fill / feasibility work, test a whole-airport
+    # flat certificate: when it holds, every soft node is already feasible and
+    # in grade at its DEM seed, so those stages do nothing.  Seed every soft
+    # node at DEM, write back, and let the scoped final projection defer every
+    # certified shape.  Any refusal falls straight through to the normal solve
+    # (the fast path is an optimisation with a provable precondition, never a
+    # behavioural mode).
+    if _os.environ.get("O4_FLAT_AIRPORT_FAST_PATH", "1") == "1":
+        from .flat_airport_fast_path import (
+            apply_flat_airport_fast_path, certify_flat_airport,
+            report_flat_certificate_fast_path)
+        _flat_cert = certify_flat_airport(
+            layout, dem, tile_lat, tile_lon,
+            nodes=nodes, bucket_to_idx=bucket_to_idx, elev=elev,
+            base_hard=base_hard, dem_elev=dem_elev, runway_nodes=runway_nodes,
+            shape_constraints=shape_constraints, unified_graph=G)
+        if _flat_cert is not None:
+            apply_flat_airport_fast_path(
+                layout, icao, nodes, bucket_to_idx, elev, base_hard,
+                _flat_cert, t0)
+            return
+        report_flat_certificate_fast_path(
+            layout, icao,
+            f"refused({getattr(layout, '_flat_airport_fast_path_reason', '?')})")
     band, dem_fn, runway_pts, _G = reach_band_for(
         layout, elev, bucket_to_idx, dem, tile_lat, tile_lon, unified_graph=G)
     # ZONE-NODE REACH-BAND SKIP (Slice B stage B3 performance lever,
@@ -691,6 +718,36 @@ def solve_route_profile(layout, icao: str,
                 elev[i] = float(lv)
                 base_hard[i] = True
                 _hard_cat.setdefault(i, "seat_on_spine")
+
+        # DETACHED building pads → HARD flat DEM pins (user 2026-07-17,
+        # KBNA SE lot): a pad with NO airside-served seat follows local
+        # ground.  Un-pinned, its ring nodes are free field nodes and
+        # the route-profile blend paints them with the surrounding
+        # airside level (measured: flat plateaus 6-11 m above the DEM
+        # and the abutting groundside).  Pinned here, the field grades
+        # around them.  ``layout._detached_pad_node_idx`` keeps them
+        # out of every movable-pad relaxation downstream (the final
+        # scoped projection's rigid flat groups included).
+        _detached_pad_pins = build_detached_pad_dem_pins(
+            layout, bucket_to_idx, dem_fn, building_seats)
+        _detached_pad_node_idx: set = set()
+        for i, lv in _detached_pad_pins.items():
+            if i < n and lv is not None and i not in _seam_pin_idx \
+                    and not base_hard[i]:
+                elev[i] = float(lv)
+                base_hard[i] = True
+                _hard_cat.setdefault(i, "pad_detached_dem")
+                _detached_pad_node_idx.add(i)
+        layout._detached_pad_node_idx = _detached_pad_node_idx
+        if _detached_pad_node_idx:
+            try:
+                import O4_UI_Utils as _UI_dp
+                _UI_dp.vprint(1,
+                    f"  [seats] {len(_detached_pad_node_idx)} detached "
+                    f"building-pad node(s) pinned flat at footprint "
+                    f"DEM.")
+            except Exception:
+                pass
 
         # SEAM SPINE ANCHORS (user 2026-06-28): where a taxi centerline crosses a
         # tile seam, pin the nearest SPINE node to the SMOOTHED seam DEM as a HARD
@@ -1922,6 +1979,81 @@ def final_grade_projection(layout, icao: str = "", dem=None,
 
     hard = {i for i in range(n) if base_hard[i]}
     hard |= {i for i in runway_idx if i < n}
+    # EMITTED TERRAIN-BAND FREEZE (2026-07-17, for the LATE
+    # pipeline-end re-projection): graded_strip / gap-fill terrain
+    # surfaces are emit-derived (per-vertex DEM-into-corridor clamps,
+    # healed at emit, NO neighbour coupling) — once emitted they are
+    # final.  Their zone vertices are solver variables, so an
+    # unconstrained re-projection can move ONE zone vertex to its own
+    # re-referenced clamp while its neighbours keep the emitted value
+    # (measured SPJC: one vertex 32.9 → 34.0 = a fresh 1.1 m in-band
+    # TEAR).  Freeze every already-emitted terrain-band ring vertex;
+    # pavement↔band weld rows reconcile at ``to_osm`` (authority
+    # consensus — pavement wins, strips bend).  Before band emission
+    # the mid-pipeline call finds no such shapes and is unchanged.
+    # Freeze ONLY band-exclusive vertices: a weld-row node SHARED with a
+    # pavement ring stays free (it must move with the pavement the late
+    # projection is fixing; the band's claim reconciles at ``to_osm``).
+    _late_projection_run = False
+    try:
+        from auto_patch.layout import ROLE_GRADED_STRIP as _R_STRIP
+        from auto_patch.clearance import (
+            _AIRSIDE_PAVEMENT_ROLES as _FRZ_PAV_ROLES)
+        _cps_freeze = layout.canonical_points
+        _pav_idx: set = set()
+        _strip_shapes = []
+        for _s in layout.shapes:
+            if (_s.polygon is None or _s.polygon.is_empty
+                    or _s.polygon.geom_type != "Polygon"):
+                continue
+            if _s.role == _R_STRIP:
+                _strip_shapes.append(_s)
+            elif _s.role in _FRZ_PAV_ROLES:
+                for (_px, _py) in _s.polygon.exterior.coords:
+                    _pk = _cps_freeze.find_nearest(
+                        float(_px), float(_py), _cps_freeze.tol_m)
+                    _pi = b2i.get(_pk) if _pk is not None else None
+                    if _pi is not None:
+                        _pav_idx.add(_pi)
+        _late_projection_run = bool(_strip_shapes)
+        for _s in _strip_shapes:
+            for (_fx, _fy) in _s.polygon.exterior.coords:
+                _fk = _cps_freeze.find_nearest(
+                    float(_fx), float(_fy), _cps_freeze.tol_m)
+                _fi = b2i.get(_fk) if _fk is not None else None
+                if _fi is not None and _fi < n and _fi not in _pav_idx:
+                    hard.add(_fi)
+        if _late_projection_run:
+            # RUNWAY-BOUNDARY freeze (late run only): a vertex lying ON
+            # a runway boundary EDGE INTERIOR (a junction/crossing weld
+            # between two runway ring vertices) is not in ``runway_idx``
+            # (that set is ring-VERTEX keyed) yet carries the runway
+            # longitudinal profile — the late pass moved one +0.24 m at
+            # HECA 05L/23R and minted a 3.7 % profile kink.  The runway
+            # is the datum; nothing on its boundary moves late.
+            from shapely.geometry import Point as _FrzPt
+            from shapely.ops import unary_union as _frz_union
+            from shapely.prepared import prep as _frz_prep
+            from auto_patch.layout import (
+                ROLE_RUNWAY as _FRZ_RWY,
+                ROLE_RUNWAY_CROSSING as _FRZ_RWX,
+                SHARED_VERTEX_TOL_M as _FRZ_TOL)
+            _rwy_lines = [
+                _s.polygon.exterior for _s in layout.shapes
+                if (_s.role in (_FRZ_RWY, _FRZ_RWX)
+                    and _s.polygon is not None
+                    and not _s.polygon.is_empty
+                    and _s.polygon.geom_type == "Polygon")]
+            if _rwy_lines:
+                _rwy_zone = _frz_prep(
+                    _frz_union(_rwy_lines).buffer(_FRZ_TOL))
+                for _fi2, (_fx2, _fy2) in enumerate(nodes):
+                    if _fi2 in hard or _fi2 >= n:
+                        continue
+                    if _rwy_zone.contains(_FrzPt(_fx2, _fy2)):
+                        hard.add(_fi2)
+    except _snapshot_geom_exceptions():                # pragma: no cover
+        pass
     # RUNWAY-JOIN anchored nodes (user ruling 2026-07-16: taxi joins
     # anchor to the RUNWAY EDGE value — the crowned edge): the solve
     # pinned each join hard at the runway value and the drop field lands
@@ -2041,9 +2173,14 @@ def final_grade_projection(layout, icao: str = "", dem=None,
                 torn_feature_weld.add(i)
 
     # building pads: rigid movable FLAT groups (same model as the yield).
+    # DETACHED pads (user 2026-07-17) stay OUT: they are hard flat DEM
+    # pins, not airside-coupled surfaces — freeing them here let the
+    # projection park them at the surrounding airside field level.
     cps = layout.canonical_points
     pad_groups = []
     pad_nodes: set = set()
+    _detached_pad_idx = (
+        getattr(layout, "_detached_pad_node_idx", None) or set())
     if _os.environ.get("O4_YIELD_MOVABLE_PADS", "1") == "1":
         for s in layout.shapes:
             if (s.role != ROLE_BUILDING or s.polygon is None
@@ -2051,7 +2188,8 @@ def final_grade_projection(layout, icao: str = "", dem=None,
                 continue
             g = {b2i.get(cps.get_or_add(float(x), float(y)))
                  for (x, y) in s.polygon.exterior.coords}
-            g = {i for i in g if i is not None and i < n}
+            g = {i for i in g if i is not None and i < n
+                 and i not in _detached_pad_idx}
             if len(g) >= 2:
                 pad_groups.append(g)
                 pad_nodes |= g
@@ -2084,12 +2222,94 @@ def final_grade_projection(layout, icao: str = "", dem=None,
     # over-cap ramps as ACTIONABLE (the solve-time export alone missed any
     # pocket only the final geometry manufactures).
     _projection_broken_idx: set = set()
+    # Sweep budget raised 400 → 2400 (2026-07-17, same headroom as the
+    # in-solve projection): 400 exited HECA (158k nodes) with 5,822
+    # edges still over cap, 0 both-hard — pure non-convergence, whose
+    # worst survivors emitted as the within-shape building/apron
+    # violation class.  The loop exits early at tol, so converged
+    # airports pay nothing.  O4_FINAL_PROJECTION_MAX_ITERS overrides.
+    # BROKEN-QUARANTINE CARRY (2026-07-17, for the LATE re-projection):
+    # the scoped machinery re-quarantines only UNTOUCHED broken nodes,
+    # and after the mid-pipeline projection every value looks touched —
+    # so a second (late) run re-solves the solve-declared infeasible
+    # pockets "normally" and SMEARS them (measured SPJC: a 1.1 m
+    # pavement move beside an already-emitted band = a fresh TEAR).
+    # Carry every previously-declared broken key into ``pre_broken``.
+    _prior_broken_keys = getattr(
+        layout, "_final_projection_broken_keys", None) or set()
+    if _prior_broken_keys:
+        pre_broken = set(pre_broken or ())
+        for _bk in _prior_broken_keys:
+            _bi = b2i.get(_bk)
+            if _bi is not None and _bi < n:
+                pre_broken.add(_bi)
+    # LIFT-ONLY PADS in the late run: the mid projection seated every
+    # pad at (or above) its route-feasible floor (the no-bowl ruling —
+    # CYXY building16 ≥706 / building19 ≥698); the late pass may RAISE
+    # a pad toward the final network ("the spine rises to serve a
+    # building") but must never SINK one (measured: movable pads let
+    # the late pass drop building16's group 0.23 m below its floor;
+    # frozen pads instead undid the b19 lift).  Snapshot the seeded
+    # group levels; sinks are restored after the projection.
+    _pad_seed_levels = ([(g, {i: elev[i] for i in g})
+                         for g in pad_groups]
+                        if _late_projection_run else [])
+    # RUNWAY PROFILE PRESERVE (both runs, 2026-07-17): the runway /
+    # runway_crossing shapes carry the authoritative CIFP+flex profile;
+    # this projection exists to close apron/junction/building
+    # within-shape pairs on the final geometry and must never re-shape a
+    # runway.  ``_writeback`` re-reads every runway ring vertex through
+    # ``get_or_add`` and re-stamps it from ``elev`` — and on the
+    # DENSIFIED final geometry a runway ring vertex spaced under the
+    # 0.5 m canonical tolerance from ANOTHER vertex ALIASES to that
+    # vertex's grade-graph node, so the writeback stamps the other
+    # node's value onto the runway and mints a longitudinal kink.  Two
+    # measured instances, one per run: LATE — two densified runway ring
+    # vertices alias each other (HECA 05L/23R: a 60.46 boundary vertex
+    # re-stamped from an aliased 60.7 neighbour = a 3.70 % > 1.5 %
+    # step); MID — a NEIGHBOUR shape's boundary vertex welded onto the
+    # runway's beyond-threshold blast-pad corner aliases it (HECA
+    # 05L/23R + the object-pavement junction pressed to terrain: corner
+    # 57.56 re-stamped 55.31 = a 1.8 % end kink; the corruption then
+    # re-seeds as HARD truth in every later pass and the late run's
+    # preserve faithfully restores the corrupted value).  The runway
+    # nodes are already frozen through the projection (hard via
+    # ``runway_idx``); the ONLY corruption is the aliased writeback.
+    # Snapshot the runway altitude fields now and restore them verbatim
+    # after the writeback — byte-identical to the pre-projection profile
+    # in BOTH runs.
+    _rwy_alt_snapshot = []
+    from auto_patch.layout import (
+        ROLE_RUNWAY as _PR_RWY, ROLE_RUNWAY_CROSSING as _PR_RWX)
+    for _rs in layout.shapes:
+        if _rs.role in (_PR_RWY, _PR_RWX):
+            _rwy_alt_snapshot.append((
+                _rs,
+                list(_rs.node_altitudes)
+                if _rs.node_altitudes is not None else None,
+                _rs.altitude, _rs.altitude_high, _rs.altitude_low))
     rem, bh = feasibility_project(elev, joint, hard, force_scalar=True,
-                                  max_iters=400,
+                                  max_iters=int(_os.environ.get(
+                                      "O4_FINAL_PROJECTION_MAX_ITERS",
+                                      "2400")),
                                   flat_groups=pad_groups or None,
                                   pre_broken=(pre_broken or None),
                                   broken_out=_projection_broken_idx,
                                   edge_couple_nodes=(_svc_couple_nodes or None))
+    # Late-run lift-only pad restore (see the snapshot above): a group
+    # the projection SANK reverts to its seeded level; lifts stay.
+    # Tolerance 0.15 m: a pad may absorb a small law-driven settle (the
+    # welded apron pairs need centimetre moves — restoring those re-mints
+    # marginal apron over-caps, measured SPJC apron #81 +0.05 m); only a
+    # BOWL-scale sink (>0.15 m, e.g. building16's 0.23 m) is restored.
+    for _g, _seed_by_node in _pad_seed_levels:
+        if not _g:
+            continue
+        _now = min(elev[i] for i in _g)
+        _was = min(_seed_by_node.values())
+        if _now < _was - 0.15:
+            for _i in _g:
+                elev[_i] = _seed_by_node[_i]
     # TERRAIN-PINNED PAIR EXPORT (user 2026-07-06, CYXY #26/#29 after the
     # apron route-proximity cut): a violated law edge touching a
     # terrain-dictated pin (tile-seam node, agreeing boundary/feature
@@ -2231,6 +2451,23 @@ def final_grade_projection(layout, icao: str = "", dem=None,
             layout._break_node_ll = _existing_break_ll
         except Exception:
             pass
+    # Persist the quarantine as canonical keys so a LATER projection run
+    # (the pipeline-end re-projection) carries it in ``pre_broken`` — see
+    # the broken-quarantine-carry note at the projection call above.
+    try:
+        _carry_keys = set(getattr(
+            layout, "_final_projection_broken_keys", None) or set())
+        _cps_carry = layout.canonical_points
+        for i in (_projection_broken_idx | set(pre_broken or ())):
+            if i < len(nodes):
+                _ck = _cps_carry.find_nearest(
+                    float(nodes[i][0]), float(nodes[i][1]),
+                    _cps_carry.tol_m)
+                if _ck is not None:
+                    _carry_keys.add(_ck)
+        layout._final_projection_broken_keys = _carry_keys
+    except Exception:
+        pass
     _n_deferred = _n_expanded = 0
     if scoped:
         _n_deferred = sum(1 for _sc in shape_constraints
@@ -2300,7 +2537,27 @@ def final_grade_projection(layout, icao: str = "", dem=None,
         for _i, _v in _crown_of.items():
             elev[_i] = elev[_i] - _v
     _writeback(layout, elev, b2i)
+    # Restore the runway profile the aliased writeback may have re-stamped
+    # (see the RUNWAY PROFILE PRESERVE snapshot above): both runs.
+    for (_rs, _na, _al, _ah, _lo) in _rwy_alt_snapshot:
+        _rs.node_altitudes = list(_na) if _na is not None else None
+        _rs.altitude = _al
+        _rs.altitude_high = _ah
+        _rs.altitude_low = _lo
     _stage("writeback")
+    # LOCKSTEP PAIR-CAP FREEZE (2026-07-17): capture the baked pair
+    # allowances THIS projection just enforced (grade_graph refreshed
+    # ``layout._lockstep_shape_bake`` during the constraint build above)
+    # as lat/lon + metre caps, BEFORE any later law-graph rebuild (an
+    # in-memory validator run re-bakes on mutated rings and would
+    # overwrite the store with tighter, never-enforced caps).  ``to_osm``
+    # exports this frozen copy as the sidecar's ``pair_caps``;
+    # ``tools/check_grade.py`` consumes it in place of its own re-bake.
+    try:
+        from auto_patch.verification import lockstep_pair_caps_ll
+        layout._lockstep_pair_caps_ll = lockstep_pair_caps_ll(layout)
+    except Exception:
+        pass
     try:
         import O4_UI_Utils as _UI
         _scope_note = ""

@@ -79,7 +79,8 @@ def test_interior_edge_crossing_detects_single_transversal(tmp_path, capsys):
     osm_path = os.path.join(str(tmp_path), "synthetic_crossing.osm")
     _write_osm(osm_path)
 
-    total_tv, near_parallel, crossings = module.analyze(osm_path)
+    total_tv, near_parallel, crossings, _self_crossings = module.analyze(
+        osm_path)
 
     # exactly one interior crossing: the taxiway/runway diagonals.
     assert crossings == 1, f"expected 1 crossing, got {crossings}"
@@ -110,5 +111,5 @@ def test_endpoint_touch_and_parallel_are_not_crossings(tmp_path):
     with open(osm_path, "w") as handle:
         handle.write("\n".join(lines))
 
-    _tv, _np, crossings = module.analyze(osm_path)
+    _tv, _np, crossings, _self_crossings = module.analyze(osm_path)
     assert crossings == 0, f"parallel/touch pair miscounted: {crossings}"

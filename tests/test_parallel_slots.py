@@ -59,8 +59,9 @@ def test_explicit_build_slots_pass_through_beyond_auto_cap(monkeypatch):
 
 
 # ---------------------------------------------------------------------
-# Convert slots: (cores - 2) shared among concurrent tile builds,
-# clamped to 2..16.
+# Convert slots: cores - 2, clamped to 2..16, at FULL width even with
+# concurrent sibling builds (2026-07-17 ruling: the operating system
+# arbitrates processor contention — no per-tile rationing).
 # ---------------------------------------------------------------------
 @pytest.mark.parametrize(
     "cores,expected",
@@ -74,23 +75,14 @@ def test_auto_convert_slots(monkeypatch, cores, expected):
     assert PARALLEL_UTILS.effective_convert_slots(0) == expected
 
 
-@pytest.mark.parametrize(
-    "cores,siblings,expected",
-    [
-        (16, 4, 3),   # (16-2)//4 = 3
-        (10, 4, 2),   # floors at 2
-        (32, 2, 15),  # (32-2)//2 = 15
-        (12, 6, 2),
-    ],
-)
-def test_auto_convert_slots_share_among_siblings(
-    monkeypatch, cores, siblings, expected
-):
-    _machine(monkeypatch, cores, 64)
+def test_auto_convert_slots_ignore_sibling_count(monkeypatch):
+    """Sibling tiles no longer shrink the conversion pool — processor
+    contention is the operating system's to arbitrate."""
+    _machine(monkeypatch, 16, 64)
     monkeypatch.setenv(
-        PARALLEL_UTILS.PARALLEL_SIBLINGS_ENVIRONMENT_KEY, str(siblings)
+        PARALLEL_UTILS.PARALLEL_SIBLINGS_ENVIRONMENT_KEY, "4"
     )
-    assert PARALLEL_UTILS.effective_convert_slots(0) == expected
+    assert PARALLEL_UTILS.effective_convert_slots(0) == 14
 
 
 def test_explicit_convert_slots_pass_through(monkeypatch):
@@ -102,7 +94,7 @@ def test_explicit_convert_slots_pass_through(monkeypatch):
 
 
 # ---------------------------------------------------------------------
-# Download slots: network-bound, Auto is a fixed two
+# Download slots: network-bound, Auto is a fixed two per tile
 # ---------------------------------------------------------------------
 def test_auto_download_slots_is_two_regardless_of_cores(monkeypatch):
     monkeypatch.delenv(
@@ -114,12 +106,14 @@ def test_auto_download_slots_is_two_regardless_of_cores(monkeypatch):
     assert PARALLEL_UTILS.effective_download_slots(0) == 2
 
 
-def test_auto_download_slots_drop_to_one_with_siblings(monkeypatch):
+def test_auto_download_slots_keep_full_width_with_siblings(monkeypatch):
+    """Sibling tiles no longer halve the per-tile download streams —
+    commercial imagery hosts take a handful of streams comfortably and
+    the orchestrator's imagery class cap bounds concurrent tiles."""
     monkeypatch.setenv(
         PARALLEL_UTILS.PARALLEL_SIBLINGS_ENVIRONMENT_KEY, "4"
     )
-    assert PARALLEL_UTILS.effective_download_slots(0) == 1
-    # Explicit values are untouched by sibling sharing.
+    assert PARALLEL_UTILS.effective_download_slots(0) == 2
     assert PARALLEL_UTILS.effective_download_slots(3) == 3
 
 

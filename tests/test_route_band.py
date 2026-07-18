@@ -28,7 +28,10 @@ from conftest import cached_airport_layout
 # Airports whose route-band outcome is currently RED — tracked, not ignored.
 # Each is an infeasibility under root-cause (handover items 1–3); the xfail flips
 # to XPASS the moment the solver/rule lands every airside vertex in its band.
-_KNOWN_RED = {"CYXY", "SPLP", "HECA"}
+# SPJC green since 2026-07-05; SPLP flipped to XPASS 2026-07-17 (the
+# runway-datum reach exemption — vertices grading at cap from a local
+# runway contact are the runway's own datum) and now gates hard.
+_KNOWN_RED = {"CYXY", "HECA"}
 _FIXTURES = ["SPJC", "CYXY", "SPLP", "HECA"]
 
 

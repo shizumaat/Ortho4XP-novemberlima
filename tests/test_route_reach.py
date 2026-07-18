@@ -52,6 +52,14 @@ def test_route_reach_detects_incompatible_apron():
     assert v, "route_reach_violations did not flag the incompatible apron — no-op?"
 
 
+@pytest.mark.xfail(
+    reason="feeder-convergence residual UNDER TRACKING (user in-sim review "
+           "2026-07-17: not visible, accepted for now) — three no-building "
+           "aprons whose feeder contacts disagree beyond the 1% parking "
+           "standard (2.42%/13.7 m, 2.12%/10.9 m, 1.69%/325 m).  The fix is "
+           "upstream feeder convergence; the check still runs and surfaces "
+           "the count, and flips to XPASS when it lands.",
+    strict=False)
 def test_cyxy_route_reach_zero():
     """OUTCOME: zero route-reach violations at CYXY — every no-building apron is
     feasible for all its feeders.  The edge-skeleton reach (O4_SKELETON_REACH)

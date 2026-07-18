@@ -158,6 +158,13 @@ def test_solver_validator_same_edge_budgets(monkeypatch):
     def _k(x, y):
         return (round(x, 2), round(y, 2))
 
+    # Aggregate by MIN per coordinate pair: a node pair can carry
+    # SEVERAL law edges (the shapes' shared ring edge plus a route-arc
+    # spine edge that references global nodes and has no ring
+    # identity), and last-writer-wins made the comparison depend on
+    # iteration order — the BINDING budget is the law both sides must
+    # agree on (measured CYXY: ring edge 0.0187 + solver-only arc edge
+    # 0.0238 on one coordinate pair read as a phantom mismatch).
     solver = {}
     for (a, b, cap, _is_sp) in G.edges:
         pa, pb = G.pos.get(a), G.pos.get(b)
@@ -166,14 +173,20 @@ def test_solver_validator_same_edge_budgets(monkeypatch):
         d = math.hypot(pa[0] - pb[0], pa[1] - pb[1])
         if d < 1e-9:
             continue
-        solver[tuple(sorted((_k(*pa), _k(*pb))))] = cap.at(d, 0.0)
+        key = tuple(sorted((_k(*pa), _k(*pb))))
+        budget = cap.at(d, 0.0)
+        if key not in solver or budget < solver[key]:
+            solver[key] = budget
 
     val = {}
     for (_role, _sp, (xa, ya), _za, (xb, yb), _zb, cap) in _iter_checked_pairs(layout):
         d = math.hypot(xa - xb, ya - yb)
         if d < 1e-9:
             continue
-        val[tuple(sorted((_k(xa, ya), _k(xb, yb))))] = cap.at(d, 0.0)
+        key = tuple(sorted((_k(xa, ya), _k(xb, yb))))
+        budget = cap.at(d, 0.0)
+        if key not in val or budget < val[key]:
+            val[key] = budget
 
     shared = set(solver) & set(val)
     assert len(shared) > 100, f"too few shared edges ({len(shared)}) to prove lockstep"

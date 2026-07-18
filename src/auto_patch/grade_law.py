@@ -773,6 +773,24 @@ class Allowance:
         return self.cL
 
 
+def pair_grade_budget_m(cap_allow: "Allowance", distance_m: float) -> float:
+    """The within-shape PAIR law's rise budget for one vertex pair —
+    ``max(anisotropic bake, flat cap × run)``, WITHOUT the reader's
+    quantization noise (each reader adds its own encoding envelope).
+
+    The flat floor keeps the pair law symmetric with the plane-gradient
+    law: a route-arc BAKED allowance can trim the budget BELOW
+    ``cap × run``, so an at-cap emitted pair false-flagged by
+    sub-millimetres (SPJC service_road #461: 5.006 % = 0.5 mm over the
+    flat 5 % cap while the baked budget sat ~5 cm under it).  A LARGER
+    baked budget on curves is honoured.  THE single source shared by
+    ``tools/check_grade.py`` and ``grade_graph_validate`` — the two
+    pair-law readers cannot drift on the budget formula (2026-07-17).
+    """
+    return max(cap_allow.at(distance_m, 0.0),
+               cap_allow.flat_cap() * distance_m)
+
+
 @dataclass(frozen=True)
 class PairContext:
     """Everything the law needs about ONE vertex pair, computed by the reader
@@ -1033,4 +1051,45 @@ def bridge_crossing_floor_m(
         float(road_surface_elevation_m)
         + float(BRIDGE_ROAD_CLEARANCE_M)
         + max(0.0, float(structure_thickness_m))
+    )
+
+
+# ── Object-derived tunnel law (feature A, docs/object_terrain_features_spec.md
+# section 3.3 + amendment A1).  Single source for the layout emitter
+# (``object_terrain_assembly.build_tunnel_layout_shapes``) and any future
+# tunnel-trench validator, the same lockstep pattern as the bridge laws and
+# the runway-end skirt above.  Pure functions of the classified deck depth
+# and the anchor-terrain datum; the strictly-below offset lives in
+# ``config.TUNNEL_FLOOR_BELOW_OBJECT_DECK_M``.
+
+def tunnel_trench_rim_elevation_m(datum_elevation_m: float) -> float:
+    """THE trench rim (top-of-wall) elevation: the anchor-terrain datum
+    (spec section 3.3 step 3, amendment A1).  The roof OBJECT renders at
+    grade over the roofed body, so the rim welds to the surrounding terrain
+    at the datum and the vertical drop to the floor is a node-split wall
+    (ruling R2; author-mesh dissection section 2.4)."""
+    return float(datum_elevation_m)
+
+
+def tunnel_trench_floor_elevation_m(
+        datum_elevation_m: float,
+        deck_level_y_m: float) -> float:
+    """THE trench floor (flat pan) elevation: the datum plus the deck's
+    effective level minus ``config.TUNNEL_FLOOR_BELOW_OBJECT_DECK_M`` so the
+    mesh floor sits STRICTLY below the OBJ8 road deck (spec section 3.3 step
+    3, amendment A1; section 2.4 point 3 — the deck carries the visible
+    road, the mesh only clears it).
+
+    ``deck_level_y_m`` is the deck's EFFECTIVE height above the datum —
+    negative below grade, so the classifier's ``-body_depth_m`` is passed
+    directly.  The negative-``OBJECT_AGL`` offset (EGLL tunnels 6/7/10) is
+    ALREADY folded into that effective height by the classifier
+    (``object_terrain_features``: ``effective_y = above_ground_level_metres
+    + authored_y``), so no offset is re-applied here — adding it again would
+    double-count and drop those floors 7 m too far."""
+    from .config import TUNNEL_FLOOR_BELOW_OBJECT_DECK_M
+    return (
+        float(datum_elevation_m)
+        + float(deck_level_y_m)
+        - float(TUNNEL_FLOOR_BELOW_OBJECT_DECK_M)
     )

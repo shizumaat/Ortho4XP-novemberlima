@@ -1475,6 +1475,41 @@ def build_unified_graph(layout, bucket_to_idx, ctx=None, *,
                 continue
             is_spine = (min(a, b), max(a, b)) in spine_pairs
             G.edges.append((a, b, cap, is_spine))
+        # LOCKSTEP BAKE EXPORT (2026-07-17): persist THIS shape's baked
+        # decomposition in RING-POSITION space so the validator
+        # (``grade_graph_validate._iter_checked_pairs``) consumes the
+        # identical allowances instead of re-baking with a context it
+        # cannot reconstruct (its ``build_context(layout)`` has no
+        # ``bucket_to_idx``; measured CYXY: 29 of 9,915 shared edges
+        # resolved a marginally different route-arc allowance on
+        # re-bake).  Keyed by ``id(s)`` and guarded by (role, ring
+        # signature): a post-solve-mutated ring misses the guard and
+        # the validator re-bakes fresh — correct, its geometry changed.
+        # Repeat builds (the scoped final projection) re-bake only the
+        # shapes they re-run; skipped shapes keep the solve-time entry,
+        # whose ring is unchanged by definition of the skip.
+        position_of_key = {key: p for p, key in enumerate(keys)}
+        ring_signature = tuple(
+            (round(x, 6), round(y, 6)) for (x, y) in ring)
+        baked_edges = []
+        for (a, b, cap) in sc.edges:
+            pa = position_of_key.get(a)
+            pb = position_of_key.get(b)
+            if pa is not None and pb is not None:
+                baked_edges.append((pa, pb, cap))
+        baked_spine = set()
+        for chain in sc.spine_chains:
+            for u, v in zip(chain, chain[1:]):
+                pu = position_of_key.get(u)
+                pv = position_of_key.get(v)
+                if pu is not None and pv is not None:
+                    baked_spine.add((min(pu, pv), max(pu, pv)))
+        bake_store = getattr(layout, "_lockstep_shape_bake", None)
+        if bake_store is None:
+            bake_store = {}
+            layout._lockstep_shape_bake = bake_store
+        bake_store[id(s)] = (
+            s.role, ring_signature, baked_edges, baked_spine)
 
     # ── sloping-rect + cap all-pair edges (the taxi spine as tilted planes) ───
     rect_caps = []                          # (corner_idx_set, cap)

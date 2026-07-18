@@ -116,6 +116,7 @@ from . import finalize, junction_emit
 # ──────────────────────────────────────────────────────────────────
 from .pavement.runways import (
     _detect_runway_shoulders,
+    _detect_runway_border_strip_shoulders,
     _detect_runway_shoulder_extent,
     _runway_rect_m,
     _widen_runway_rect,
@@ -846,300 +847,6 @@ def build_airport_pavement(icao: str, xplane_root: str,
         layout.runway_union = (unary_union(runway_polys)
                                 if runway_polys else None)
 
-    # ── Pavement-runway intersection points (per user 2026-05-05) ──
-    # Walk each apt.dat row-110 pavement polygon's exterior; collect
-    # the vertices that sit within ``INTERSECTION_PROX_M`` of a
-    # runway's 4-corner rect boundary AND project to a centerline
-    # parameter strictly between 0 and 1 (not at the runway ends).
-    # These t-values become segment seam corners during Phase 2's
-    # runway segmentation, so chain corners (= the runway-union
-    # exterior) align exactly with apt.dat-pavement boundaries.
-    # Without this, the junction-widening pass has to bridge the
-    # gap with boundary-trace waypoints — the alignment makes that
-    # unnecessary.  Per user direction: dedup intersections within
-    # 2 m centerline distance (a junction can span a 2 m gap
-    # without needing a node there).
-    #
-    # Per user 2026-05-11: tolerance widened from 0.5 m to 3.0 m so
-    # apt.dat pavement boundaries drawn slightly INSIDE the row-100
-    # runway rect (1-2 m offsets are common — SPJC's row-110 stops
-    # 1.75 m short of 16R/34L at the V1 throat) still register as
-    # runway intersection points.  Without this, the segmenter
-    # doesn't insert a seam corner at the chart-level pavement
-    # transition, and the downstream junction-widening pass can't
-    # share a vertex with the runway there — leaving a visible
-    # 1-2 m sliver gap between every taxi-junction and the runway
-    # boundary.  The runway segmenter projects each kept point onto
-    # the centerline and emits the seam corner there; the actual
-    # corner sits on the runway boundary (rect-perpendicular at
-    # half-width) regardless of how far the source pavement vertex
-    # was off-edge, so widening the tolerance just unlocks more
-    # near-runway pavement landmarks as segmentation breakpoints
-    # without distorting the segmenter's output geometry.
-    #
-    # Per user 2026-05-14: bumped 3.0 → 6.0 m to capture SPLP's
-    # north-end pavement corners drawn ~5 m INSIDE the runway
-    # rect.  At 3 m those corners were missed; the runway
-    # segmenter put no seam there, and the apron junction between
-    # the A stub and the runway had to span ~110 m of runway
-    # boundary (segment 25's full length) without a shared-vertex
-    # snap point — the junction's runway edge ran past the A-stub
-    # corner with no clean trapezoid shape.
-    #
-    # Per user 2026-05-17: budget = RUNWAY_SHOULDER_M (standard
-    # FAA shoulder allowance, ~7.6 m per side) + CHART_TOL_M.
-    # The runway rect from apt.dat row 100 covers only the
-    # published runway width; the actual paved area extends past
-    # this by the shoulder width on each side (SPJC's row 100
-    # declares shoulder surface code 27/28 for 16L/34R — shoulders
-    # are present but not given an explicit width in apt.dat).
-    # apt.dat row-110 boundary polygons that include the shoulder
-    # area sit up to ~RUNWAY_SHOULDER_M past the row-100 rect.
-    # Without this allowance the intersection collector misses
-    # SPJC's apt.dat boundary vertex at lat -12.036366 lon
-    # -77.107520 (11.3 m perpendicular from runway 16L rect — the
-    # shoulder edge), no runway seam fires at Lima's natural
-    # pavement termination, and Lima's end junction degenerates
-    # into a triangle.
-    from .config import RUNWAY_SHOULDER_SEGMENT
-    RUNWAY_SHOULDER_M = 7.6
-    CHART_TOL_M = 4.4
-    INTERSECTION_PROX_M = RUNWAY_SHOULDER_M + CHART_TOL_M  # 12.0 m
-    # Dedup proportionally to PROX so multi-vertex clusters of a
-    # single pavement transition (row-110 boundaries drawn with 3-4
-    # vertices within a 3 m span at the runway edge) collapse to one
-    # seam corner instead of fragmenting the runway segment.
-    INTERSECTION_DEDUP_M = 5.0
-    pav_runway_intersections: dict = {}
-    for ridx, r in enumerate(apt.runways):
-        if ridx >= len(runway_polys):
-            continue
-        rect = runway_polys[ridx]
-        if rect is None or rect.is_empty:
-            continue
-        rect_boundary = rect.exterior
-        cl_ax, cl_ay = to_m(r.lon_a, r.lat_a)
-        cl_bx, cl_by = to_m(r.lon_b, r.lat_b)
-        cl_dx = cl_bx - cl_ax
-        cl_dy = cl_by - cl_ay
-        cl_L2 = cl_dx * cl_dx + cl_dy * cl_dy
-        if cl_L2 < 1.0:
-            continue
-        # Extend centerline endpoints by blast pads so ``t`` is
-        # computed in the blast-extended frame — matching both the
-        # rect_boundary (which includes blast pads, see
-        # ``_runway_rect_m``) and the segmenter's own phys_end_a/b
-        # parameterisation (which also absorbs blast pads).  Without
-        # this, a row-110 vertex sitting in the blast-pad zone (e.g.
-        # SPJC 16R V1 throat at 1.79 m off the runway boundary,
-        # ax≈−5 m in row-100 frame) lands at t<0 and gets dropped
-        # by ``end_skirt`` — the segmenter never sees it as a
-        # candidate breakpoint, so the sloped end-segment (which
-        # must stay 4-corner) can't split there to give the apron
-        # junction a shared snap node.
-        blast_a_m = r.blast_a_m or 0.0
-        blast_b_m = r.blast_b_m or 0.0
-        if blast_a_m > 0.0 or blast_b_m > 0.0:
-            row100_dist = math.sqrt(cl_L2)
-            ux = cl_dx / row100_dist
-            uy = cl_dy / row100_dist
-            cl_ax -= ux * blast_a_m
-            cl_ay -= uy * blast_a_m
-            cl_bx += ux * blast_b_m
-            cl_by += uy * blast_b_m
-            cl_dx = cl_bx - cl_ax
-            cl_dy = cl_by - cl_ay
-            cl_L2 = cl_dx * cl_dx + cl_dy * cl_dy
-        phys_dist = math.sqrt(cl_L2)
-        # Avoid the runway end zones — the segmenter handles those
-        # via thresholds + physical-end anchors and we don't want
-        # spurious end-zone seams.
-        end_skirt_t = 5.0 / phys_dist
-        intersections: List[Tuple[float, float]] = []
-        # Split the runway at each adjacent pavement shape's CONTACT with
-        # it — the NEAR and FAR edges of where the shape's boundary runs
-        # along / abuts / crosses the runway — NOT at every intermediate
-        # node (user 2026-05-23).  Intersect each pavement polygon's
-        # boundary with a narrow band around the runway boundary: each
-        # contiguous arc within the band is ONE contact (one abutting
-        # shape's run along the runway edge), so we cut only at the arc's
-        # two along-runway extremes and skip its interior nodes.  This
-        # makes a junction whose straight edge runs 100 m along the runway
-        # with no intermediate vertices ONE contact → ONE runway sub-rect,
-        # and — being PROXIMITY-based, not crossing-based — also catches a
-        # shape that comes right up to the runway edge without crossing
-        # it.  Blast pads / displaced thresholds are part of the runway
-        # rect and treated the same (contacts there cut too); only the
-        # CIFP threshold cut itself comes from the segmenter's anchored
-        # fractions.
-        # Reach to the apt.dat-DECLARED shoulder edge.  ``rect`` is the
-        # row-100 rect, but where apt.dat row-100 codes an explicit
-        # shoulder width (``shoulder_code // 100`` ≥ 1) the runway is
-        # widened to it downstream and exits/taxiways physically connect
-        # at that shoulder edge — so the contact budget must span the
-        # coded shoulder (OMAA 20 m ⇒ reach 24.4 m), not the generic
-        # 7.6 m FAA allowance, or no seam fires there and the segment
-        # boundary lands at the wrong longitudinal position (the OMAA
-        # 13R/31L gap).  Runways with NO coded shoulder keep the FAA
-        # allowance (the reach for a shoulder apt.dat shows but doesn't
-        # size — SPJC's ~11 m row-110 boundary) ⇒ byte-identical.
-        prox_m = INTERSECTION_PROX_M
-        if RUNWAY_SHOULDER_SEGMENT:
-            coded_shoulder_m = r.shoulder_code // 100
-            if coded_shoulder_m >= 1:
-                prox_m = max(RUNWAY_SHOULDER_M,
-                             float(coded_shoulder_m)) + CHART_TOL_M
-        try:
-            prox_band = rect_boundary.buffer(prox_m)
-        except _GEOM_EXC:
-            prox_band = None
-        if prox_band is not None:
-            for pav_poly in apt_only_pav_polys:
-                try:
-                    near = pav_poly.boundary.intersection(prox_band)
-                except _GEOM_EXC:
-                    continue
-                if near.is_empty:
-                    continue
-                arcs = (list(near.geoms)
-                        if near.geom_type in ("MultiLineString",
-                                              "GeometryCollection",
-                                              "MultiPoint")
-                        else [near])
-                for arc in arcs:
-                    if arc.is_empty:
-                        continue
-                    if arc.geom_type == "Point":
-                        acoords = [(arc.x, arc.y)]
-                    elif arc.geom_type == "LineString":
-                        acoords = list(arc.coords)
-                    else:
-                        continue
-                    a_ts = [((px - cl_ax) * cl_dx
-                             + (py - cl_ay) * cl_dy) / cl_L2
-                            for px, py in acoords]
-                    # Cut at the contact arc's near + far edges only.
-                    for t in (min(a_ts), max(a_ts)):
-                        if t <= end_skirt_t or t >= 1.0 - end_skirt_t:
-                            continue
-                        intersections.append((t, cl_ax + t * cl_dx,
-                                              cl_ay + t * cl_dy))
-        # Per user (session 44): also break EVERY runway at its RUNWAY
-        # CROSSINGS — where another runway's pavement overlaps this
-        # one.  Without a seam there, a runway with no pavement-vertex
-        # breakpoints emits as ONE rect that runs un-split across the
-        # other runway, so ``_resolve_runway_crossings`` has no sub-rect
-        # boundary to isolate and the crossing never becomes a clean
-        # junction (CYXY 02/20).  Use RECT-OVERLAP, not centerline×
-        # centerline: at CYXY the short 02/20 crosses 14L/32R's pavement
-        # but 02/20's centerline ends before reaching 14L/32R's
-        # centerline, so a centerline-intersection test misses that
-        # crossing entirely.  Clip on BOTH sides of each crossing:
-        # project the overlap REGION onto this runway's centerline and
-        # add a seam at its ENTRY (t_lo) and EXIT (t_hi), so the crossing
-        # region becomes its own segment (the segmenter splits there, the
-        # two runways' crossing sub-rects overlap exactly, and
-        # ``_resolve_runway_crossings`` merges them into one clean
-        # crossing-junction; the apron can absorb a freed runway end —
-        # CYXY runway-02 end).  ``rect`` includes blast pads / displaced-
-        # threshold pavement, so crossings in those paved zones split too.
-        for r2idx in range(len(apt.runways)):
-            if r2idx == ridx or r2idx >= len(runway_polys):
-                continue
-            r2_rect = runway_polys[r2idx]
-            if r2_rect is None or r2_rect.is_empty:
-                continue
-            try:
-                ov = rect.intersection(r2_rect)
-            except _GEOM_EXC:
-                continue
-            if ov.is_empty or ov.area < 1.0:
-                continue
-            # Project every vertex of the overlap region onto this
-            # runway's centerline → t-range [t_lo, t_hi].
-            ov_polys = (list(ov.geoms)
-                        if ov.geom_type == "MultiPolygon" else [ov])
-            ov_ts: List[float] = []
-            for op in ov_polys:
-                if op.geom_type != "Polygon" or op.is_empty:
-                    continue
-                for ox, oy in op.exterior.coords:
-                    ov_ts.append(
-                        ((ox - cl_ax) * cl_dx
-                         + (oy - cl_ay) * cl_dy) / cl_L2)
-            if not ov_ts:
-                continue
-            for t in (min(ov_ts), max(ov_ts)):
-                if t <= end_skirt_t or t >= 1.0 - end_skirt_t:
-                    continue
-                # Seam point ON this runway's centerline at parameter t.
-                intersections.append((t, cl_ax + t * cl_dx,
-                                      cl_ay + t * cl_dy))
-        if not intersections:
-            continue
-        # Sort by centerline t and dedup.  Per user 2026-05-11: dedup
-        # by EUCLIDEAN distance between consecutive candidate points
-        # rather than centerline-t alone.  A row-110 boundary that
-        # approaches the runway with a slight angle puts multiple
-        # close-together apt.dat vertices on the runway edge —
-        # each at a slightly different axial position but only ~3 m
-        # apart in real space.  Centerline-t dedup keeps them all
-        # (their t values differ by ≥ dedup_t_gap); euclidean dedup
-        # merges them into a single seam corner, which is what the
-        # runway segmenter actually needs.  Without this, every
-        # close-together row-110 vertex becomes a runway-segment
-        # seam corner and the downstream junction polygon has to
-        # wrap around all of them (the cluster of -349/-351/-352
-        # corners on -10109's east edge that pinched -10182).
-        intersections.sort(key=lambda x: x[0])
-        dedup_m2 = INTERSECTION_DEDUP_M * INTERSECTION_DEDUP_M
-        # Per user 2026-05-14: also dedup by ALONG-AXIS distance.
-        # With INTERSECTION_PROX_M widened to 6 m we pick up
-        # opposite-side pavement vertices at the same chart-level
-        # runway transition (e.g. SPLP north end: an outside-edge
-        # vertex on the west boundary at one t and an inside-the-
-        # rect vertex on the east boundary at a t value only 4 m
-        # along the runway).  Euclidean dedup misses these (10 m
-        # apart across the runway), but they represent the SAME
-        # transition and should collapse to one seam.  Otherwise
-        # the runway segmenter inserts two adjacent seams ~4 m
-        # apart and the resulting micro-segment fails the grade
-        # check at the 23 % vertex-pair grade on its short edge.
-        INTERSECTION_DEDUP_ALONG_M = 5.0
-        deduped: List[Tuple[float, float, float]] = []
-        for t, px, py in intersections:
-            if deduped:
-                dpx = px - deduped[-1][1]
-                dpy = py - deduped[-1][2]
-                if dpx * dpx + dpy * dpy < dedup_m2:
-                    continue
-                dt_along_m = abs(t - deduped[-1][0]) * phys_dist
-                if dt_along_m < INTERSECTION_DEDUP_ALONG_M:
-                    continue
-            deduped.append((t, px, py))
-        # Convert intersection meter-coords back to lat/lon via the
-        # layout's m_to_ll (the segmenter consumes lat/lon).  Store
-        # under both designator orderings so the segmenter lookup
-        # finds them regardless of which key it tries.
-        ll_pts = [layout.m_to_ll(px, py) for _, px, py in deduped]
-        # Also store under the canonical (zero-padding-reconciled) pair
-        # so the segmenter — which iterates CIFP's zero-padded ``RW09``
-        # designators — matches regardless of whether THIS apt.dat
-        # zero-pads its single-digit runways (see
-        # ``runway_segments.canonical_runway_desig``).
-        from .pavement.runway_segments import canonical_runway_desig
-        ca = canonical_runway_desig(r.desig_a)
-        cb = canonical_runway_desig(r.desig_b)
-        for key in (
-                (r.desig_a, r.desig_b),
-                (r.desig_b, r.desig_a),
-                ("RW" + r.desig_a.lstrip("RW"),
-                 "RW" + r.desig_b.lstrip("RW")),
-                ("RW" + r.desig_b.lstrip("RW"),
-                 "RW" + r.desig_a.lstrip("RW")),
-                (ca, cb), (cb, ca)):
-            pav_runway_intersections[key] = list(ll_pts)
-    layout._pav_runway_intersections = pav_runway_intersections
 
     # Add draped pavement polygons from every available DSF for
     # this airport.  Some scenery packs (e.g. CYXY Whitehorse) ship
@@ -1299,8 +1006,21 @@ def build_airport_pavement(icao: str, xplane_root: str,
             if dsf is None or dsf in seen_dsf:
                 continue
             seen_dsf.add(dsf)
-            for outer, holes, def_path in _DSFR.read_dsf_pavements(
-                    dsf, xplane_root=xplane_root):
+            # ``.pol`` draped pavement, then — behind its gate — the
+            # draped-only OBJ8 ground-paint pages (HECA Tai Models:
+            # base asphalt/concrete drawn as one whole-airport object
+            # per texture).  Both readers return the same tuple shape,
+            # so ONE loop applies the distance/boundary/overlay gates
+            # and third-party marking to both sources (object def
+            # paths are never stock ⇒ marked third-party below).
+            _dsf_pavement_tuples = list(_DSFR.read_dsf_pavements(
+                dsf, xplane_root=xplane_root))
+            from .config import DSF_OBJECT_PAVEMENT as _DSF_OBJECT_PAVEMENT
+            if _DSF_OBJECT_PAVEMENT:
+                _dsf_pavement_tuples.extend(
+                    _DSFR.read_dsf_object_pavements(
+                        dsf, xplane_root=xplane_root))
+            for outer, holes, def_path in _dsf_pavement_tuples:
                 if len(outer) < 3:
                     continue
                 try:
@@ -1645,6 +1365,80 @@ def build_airport_pavement(icao: str, xplane_root: str,
         except _GEOM_EXC:
             pass
 
+    # ── Border-strip-derived shoulder DECLARATION (user 2026-07-17) ──
+    # KBNA construction style: the runway's own ``.pol`` pieces are
+    # exact runway width and the shoulder is a wide draped ``.lin``
+    # border traced along the runway outline — the strip's declared
+    # width states the shoulder width EXACTLY (width/2; 13/31's 24 m
+    # border ⇒ 12 m, 02C/20C's 20 m ⇒ 10 m).  Rather than grow a new
+    # widening mechanism, DECLARE the measurement into the apt.dat
+    # coded-shoulder path below ("this runway HAS 12 m shoulders"):
+    # the established block widens symmetrically, junctions cut at the
+    # shoulder edge (the OMAA-proven model), downstream segmentation
+    # reads the widened ``width_m``, and the extent pass skips the
+    # runway via the coded skip-set update.  Shoulders are symmetric
+    # even when the border evidence is one-sided — the other side's
+    # shoulder band is simply covered by abutting taxiway/apron
+    # ``.pol`` pavement (13/31's right edge), and cutting junctions at
+    # the shoulder line there is exactly the coded-shoulder semantics.
+    # NOTE: the runway-segmentation contact budget
+    # (RUNWAY_SHOULDER_SEGMENT) ran BEFORE DSF ingest, so it cannot
+    # see a border-derived code — inert at KBNA (zero row-110
+    # contacts); revisit if a border-styled pack ships row-110
+    # contact geometry.
+    # Without the wide-biased extent clamp these runways used to get
+    # (15 m/side against continuous flanking pavement), the emitted
+    # rect lands on the author's true shoulder edge instead of eating
+    # ~4 m of taxiway complex per side and shredding the junctions.
+    from .config import (
+        RUNWAY_BORDER_SHOULDER,
+        RUNWAY_BORDER_SHOULDER_EDGE_TOL_M,
+        RUNWAY_BORDER_SHOULDER_MIN_SIDE_COVER_M,
+        RUNWAY_BORDER_SHOULDER_MIN_STRIP_COVER_M,
+        RUNWAY_BORDER_SHOULDER_SAMPLE_STEP_M,
+        RUNWAY_SHOULDER_EXTENT_MAX_M,
+        RUNWAY_SHOULDER_EXTENT_MIN_M,
+    )
+    if (RUNWAY_BORDER_SHOULDER and runway_polys
+            and dsf_border_line_candidates):
+        _border_strip_lines = [
+            (_bl_line, _bl_width)
+            for (_bl_line, _bl_width, _bl_closed, _bl_def)
+            in dsf_border_line_candidates]
+        for r in apt.runways:
+            if r.shoulder_code // 100 >= 1:
+                continue        # apt.dat already declares a width
+            ref = f"{r.desig_a}/{r.desig_b}"
+            if ref in _shoulder_widened_refs:
+                continue
+            try:
+                border_shoulder_w = (
+                    _detect_runway_border_strip_shoulders(
+                        r, to_m, _border_strip_lines,
+                        edge_tol_m=RUNWAY_BORDER_SHOULDER_EDGE_TOL_M,
+                        sample_step_m=(
+                            RUNWAY_BORDER_SHOULDER_SAMPLE_STEP_M),
+                        min_strip_cover_m=(
+                            RUNWAY_BORDER_SHOULDER_MIN_STRIP_COVER_M),
+                        min_side_cover_m=(
+                            RUNWAY_BORDER_SHOULDER_MIN_SIDE_COVER_M),
+                        min_w=RUNWAY_SHOULDER_EXTENT_MIN_M,
+                        max_w=RUNWAY_SHOULDER_EXTENT_MAX_M))
+            except _GEOM_EXC:
+                continue
+            if border_shoulder_w is None:
+                continue
+            coded_width_m = int(round(border_shoulder_w))
+            if coded_width_m < 1:
+                continue
+            r.shoulder_code = (100 * coded_width_m
+                               + (r.shoulder_code % 100))
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: runway {ref}: .lin border "
+                f"strips declare {coded_width_m} m shoulders "
+                f"(strip width / 2) — handled by the coded-shoulder "
+                f"path.")
+
     # ── Runway shoulder widening (user 2026-05-23) ──────────────────
     # apt.dat row 100 field 4 encodes the runway shoulder as
     # ``100 * shoulder_width_m + surface_code`` (X-Plane 12 spec): when
@@ -1783,6 +1577,321 @@ def build_airport_pavement(icao: str, xplane_root: str,
         if _ext_widened_any:
             layout.runway_union = (unary_union(runway_polys)
                                    if runway_polys else None)
+
+    # ── Pavement-runway intersection points (per user 2026-05-05) ──
+    # RELOCATED POST-DSF (user ruling 2026-07-17: "segmentation
+    # contacts definitely need to run after we've processed the DSF or
+    # we could miss important things").  This block previously ran
+    # before the DSF sweep on ``apt_only_pav_polys`` — at packs that
+    # ship ALL their taxiway pavement as draped ``.pol`` (KBNA, KCLT)
+    # it collected ZERO exit contacts and the runways segmented on
+    # thresholds alone.  It now runs on the FULL pavement set (apt.dat
+    # ⊕ DSF ⊕ admitted border strips) AFTER every shoulder-widening
+    # pass, so contacts are measured against the final widened rect at
+    # the true paved connection points.  Two consequences of the new
+    # position: pavement polygons wholly INSIDE a runway's rect are
+    # skipped (a segmented-runway pack draws the runway itself as ~95
+    # short ``.pol`` pieces — their internal joints are not exit
+    # contacts), and the RUNWAY_SHOULDER_SEGMENT coded-budget
+    # extension is retired (the rect is already widened to the coded /
+    # border-derived shoulder edge before contacts are collected;
+    # extending the band again would double-reach past the shoulder
+    # and catch parallel taxiways).
+    # Walk each pavement polygon's exterior; collect
+    # the vertices that sit within ``INTERSECTION_PROX_M`` of a
+    # runway's 4-corner rect boundary AND project to a centerline
+    # parameter strictly between 0 and 1 (not at the runway ends).
+    # These t-values become segment seam corners during Phase 2's
+    # runway segmentation, so chain corners (= the runway-union
+    # exterior) align exactly with apt.dat-pavement boundaries.
+    # Without this, the junction-widening pass has to bridge the
+    # gap with boundary-trace waypoints — the alignment makes that
+    # unnecessary.  Per user direction: dedup intersections within
+    # 2 m centerline distance (a junction can span a 2 m gap
+    # without needing a node there).
+    #
+    # Per user 2026-05-11: tolerance widened from 0.5 m to 3.0 m so
+    # apt.dat pavement boundaries drawn slightly INSIDE the row-100
+    # runway rect (1-2 m offsets are common — SPJC's row-110 stops
+    # 1.75 m short of 16R/34L at the V1 throat) still register as
+    # runway intersection points.  Without this, the segmenter
+    # doesn't insert a seam corner at the chart-level pavement
+    # transition, and the downstream junction-widening pass can't
+    # share a vertex with the runway there — leaving a visible
+    # 1-2 m sliver gap between every taxi-junction and the runway
+    # boundary.  The runway segmenter projects each kept point onto
+    # the centerline and emits the seam corner there; the actual
+    # corner sits on the runway boundary (rect-perpendicular at
+    # half-width) regardless of how far the source pavement vertex
+    # was off-edge, so widening the tolerance just unlocks more
+    # near-runway pavement landmarks as segmentation breakpoints
+    # without distorting the segmenter's output geometry.
+    #
+    # Per user 2026-05-14: bumped 3.0 → 6.0 m to capture SPLP's
+    # north-end pavement corners drawn ~5 m INSIDE the runway
+    # rect.  At 3 m those corners were missed; the runway
+    # segmenter put no seam there, and the apron junction between
+    # the A stub and the runway had to span ~110 m of runway
+    # boundary (segment 25's full length) without a shared-vertex
+    # snap point — the junction's runway edge ran past the A-stub
+    # corner with no clean trapezoid shape.
+    #
+    # Per user 2026-05-17: budget = RUNWAY_SHOULDER_M (standard
+    # FAA shoulder allowance, ~7.6 m per side) + CHART_TOL_M.
+    # The runway rect from apt.dat row 100 covers only the
+    # published runway width; the actual paved area extends past
+    # this by the shoulder width on each side (SPJC's row 100
+    # declares shoulder surface code 27/28 for 16L/34R — shoulders
+    # are present but not given an explicit width in apt.dat).
+    # apt.dat row-110 boundary polygons that include the shoulder
+    # area sit up to ~RUNWAY_SHOULDER_M past the row-100 rect.
+    # Without this allowance the intersection collector misses
+    # SPJC's apt.dat boundary vertex at lat -12.036366 lon
+    # -77.107520 (11.3 m perpendicular from runway 16L rect — the
+    # shoulder edge), no runway seam fires at Lima's natural
+    # pavement termination, and Lima's end junction degenerates
+    # into a triangle.
+    RUNWAY_SHOULDER_M = 7.6
+    CHART_TOL_M = 4.4
+    INTERSECTION_PROX_M = RUNWAY_SHOULDER_M + CHART_TOL_M  # 12.0 m
+    # Dedup proportionally to PROX so multi-vertex clusters of a
+    # single pavement transition (row-110 boundaries drawn with 3-4
+    # vertices within a 3 m span at the runway edge) collapse to one
+    # seam corner instead of fragmenting the runway segment.
+    INTERSECTION_DEDUP_M = 5.0
+    pav_runway_intersections: dict = {}
+    for ridx, r in enumerate(apt.runways):
+        if ridx >= len(runway_polys):
+            continue
+        rect = runway_polys[ridx]
+        if rect is None or rect.is_empty:
+            continue
+        rect_boundary = rect.exterior
+        cl_ax, cl_ay = to_m(r.lon_a, r.lat_a)
+        cl_bx, cl_by = to_m(r.lon_b, r.lat_b)
+        cl_dx = cl_bx - cl_ax
+        cl_dy = cl_by - cl_ay
+        cl_L2 = cl_dx * cl_dx + cl_dy * cl_dy
+        if cl_L2 < 1.0:
+            continue
+        # Extend centerline endpoints by blast pads so ``t`` is
+        # computed in the blast-extended frame — matching both the
+        # rect_boundary (which includes blast pads, see
+        # ``_runway_rect_m``) and the segmenter's own phys_end_a/b
+        # parameterisation (which also absorbs blast pads).  Without
+        # this, a row-110 vertex sitting in the blast-pad zone (e.g.
+        # SPJC 16R V1 throat at 1.79 m off the runway boundary,
+        # ax≈−5 m in row-100 frame) lands at t<0 and gets dropped
+        # by ``end_skirt`` — the segmenter never sees it as a
+        # candidate breakpoint, so the sloped end-segment (which
+        # must stay 4-corner) can't split there to give the apron
+        # junction a shared snap node.
+        blast_a_m = r.blast_a_m or 0.0
+        blast_b_m = r.blast_b_m or 0.0
+        if blast_a_m > 0.0 or blast_b_m > 0.0:
+            row100_dist = math.sqrt(cl_L2)
+            ux = cl_dx / row100_dist
+            uy = cl_dy / row100_dist
+            cl_ax -= ux * blast_a_m
+            cl_ay -= uy * blast_a_m
+            cl_bx += ux * blast_b_m
+            cl_by += uy * blast_b_m
+            cl_dx = cl_bx - cl_ax
+            cl_dy = cl_by - cl_ay
+            cl_L2 = cl_dx * cl_dx + cl_dy * cl_dy
+        phys_dist = math.sqrt(cl_L2)
+        # Avoid the runway end zones — the segmenter handles those
+        # via thresholds + physical-end anchors and we don't want
+        # spurious end-zone seams.
+        end_skirt_t = 5.0 / phys_dist
+        intersections: List[Tuple[float, float]] = []
+        # Split the runway at each adjacent pavement shape's CONTACT with
+        # it — the NEAR and FAR edges of where the shape's boundary runs
+        # along / abuts / crosses the runway — NOT at every intermediate
+        # node (user 2026-05-23).  Intersect each pavement polygon's
+        # boundary with a narrow band around the runway boundary: each
+        # contiguous arc within the band is ONE contact (one abutting
+        # shape's run along the runway edge), so we cut only at the arc's
+        # two along-runway extremes and skip its interior nodes.  This
+        # makes a junction whose straight edge runs 100 m along the runway
+        # with no intermediate vertices ONE contact → ONE runway sub-rect,
+        # and — being PROXIMITY-based, not crossing-based — also catches a
+        # shape that comes right up to the runway edge without crossing
+        # it.  Blast pads / displaced thresholds are part of the runway
+        # rect and treated the same (contacts there cut too); only the
+        # CIFP threshold cut itself comes from the segmenter's anchored
+        # fractions.
+        # The generic FAA-allowance budget from the FINAL (widened)
+        # rect edge.  The former RUNWAY_SHOULDER_SEGMENT coded-budget
+        # extension (OMAA 20 m ⇒ reach 24.4 m from the UNWIDENED rect)
+        # is retired by the post-DSF relocation: every coded /
+        # border-derived shoulder has already widened the rect to the
+        # shoulder edge, so the generic band measured from that edge
+        # reaches the same physical connection points — and extending
+        # it again would double-reach past the shoulder into parallel
+        # taxiway pavement.
+        prox_m = INTERSECTION_PROX_M
+        try:
+            prox_band = rect_boundary.buffer(prox_m)
+        except _GEOM_EXC:
+            prox_band = None
+        if prox_band is not None:
+            for pav_poly in pav_polys:
+                # Quick reject + own-pavement skip: a polygon wholly
+                # inside the rect is runway pavement (segmented-piece
+                # packs), not an exit contact.
+                try:
+                    if pav_poly.distance(rect_boundary) > prox_m:
+                        continue
+                    if rect.contains(pav_poly):
+                        continue
+                except _GEOM_EXC:
+                    pass
+                try:
+                    near = pav_poly.boundary.intersection(prox_band)
+                except _GEOM_EXC:
+                    continue
+                if near.is_empty:
+                    continue
+                arcs = (list(near.geoms)
+                        if near.geom_type in ("MultiLineString",
+                                              "GeometryCollection",
+                                              "MultiPoint")
+                        else [near])
+                for arc in arcs:
+                    if arc.is_empty:
+                        continue
+                    if arc.geom_type == "Point":
+                        acoords = [(arc.x, arc.y)]
+                    elif arc.geom_type == "LineString":
+                        acoords = list(arc.coords)
+                    else:
+                        continue
+                    a_ts = [((px - cl_ax) * cl_dx
+                             + (py - cl_ay) * cl_dy) / cl_L2
+                            for px, py in acoords]
+                    # Cut at the contact arc's near + far edges only.
+                    for t in (min(a_ts), max(a_ts)):
+                        if t <= end_skirt_t or t >= 1.0 - end_skirt_t:
+                            continue
+                        intersections.append((t, cl_ax + t * cl_dx,
+                                              cl_ay + t * cl_dy))
+        # Per user (session 44): also break EVERY runway at its RUNWAY
+        # CROSSINGS — where another runway's pavement overlaps this
+        # one.  Without a seam there, a runway with no pavement-vertex
+        # breakpoints emits as ONE rect that runs un-split across the
+        # other runway, so ``_resolve_runway_crossings`` has no sub-rect
+        # boundary to isolate and the crossing never becomes a clean
+        # junction (CYXY 02/20).  Use RECT-OVERLAP, not centerline×
+        # centerline: at CYXY the short 02/20 crosses 14L/32R's pavement
+        # but 02/20's centerline ends before reaching 14L/32R's
+        # centerline, so a centerline-intersection test misses that
+        # crossing entirely.  Clip on BOTH sides of each crossing:
+        # project the overlap REGION onto this runway's centerline and
+        # add a seam at its ENTRY (t_lo) and EXIT (t_hi), so the crossing
+        # region becomes its own segment (the segmenter splits there, the
+        # two runways' crossing sub-rects overlap exactly, and
+        # ``_resolve_runway_crossings`` merges them into one clean
+        # crossing-junction; the apron can absorb a freed runway end —
+        # CYXY runway-02 end).  ``rect`` includes blast pads / displaced-
+        # threshold pavement, so crossings in those paved zones split too.
+        for r2idx in range(len(apt.runways)):
+            if r2idx == ridx or r2idx >= len(runway_polys):
+                continue
+            r2_rect = runway_polys[r2idx]
+            if r2_rect is None or r2_rect.is_empty:
+                continue
+            try:
+                ov = rect.intersection(r2_rect)
+            except _GEOM_EXC:
+                continue
+            if ov.is_empty or ov.area < 1.0:
+                continue
+            # Project every vertex of the overlap region onto this
+            # runway's centerline → t-range [t_lo, t_hi].
+            ov_polys = (list(ov.geoms)
+                        if ov.geom_type == "MultiPolygon" else [ov])
+            ov_ts: List[float] = []
+            for op in ov_polys:
+                if op.geom_type != "Polygon" or op.is_empty:
+                    continue
+                for ox, oy in op.exterior.coords:
+                    ov_ts.append(
+                        ((ox - cl_ax) * cl_dx
+                         + (oy - cl_ay) * cl_dy) / cl_L2)
+            if not ov_ts:
+                continue
+            for t in (min(ov_ts), max(ov_ts)):
+                if t <= end_skirt_t or t >= 1.0 - end_skirt_t:
+                    continue
+                # Seam point ON this runway's centerline at parameter t.
+                intersections.append((t, cl_ax + t * cl_dx,
+                                      cl_ay + t * cl_dy))
+        if not intersections:
+            continue
+        # Sort by centerline t and dedup.  Per user 2026-05-11: dedup
+        # by EUCLIDEAN distance between consecutive candidate points
+        # rather than centerline-t alone.  A row-110 boundary that
+        # approaches the runway with a slight angle puts multiple
+        # close-together apt.dat vertices on the runway edge —
+        # each at a slightly different axial position but only ~3 m
+        # apart in real space.  Centerline-t dedup keeps them all
+        # (their t values differ by ≥ dedup_t_gap); euclidean dedup
+        # merges them into a single seam corner, which is what the
+        # runway segmenter actually needs.  Without this, every
+        # close-together row-110 vertex becomes a runway-segment
+        # seam corner and the downstream junction polygon has to
+        # wrap around all of them (the cluster of -349/-351/-352
+        # corners on -10109's east edge that pinched -10182).
+        intersections.sort(key=lambda x: x[0])
+        dedup_m2 = INTERSECTION_DEDUP_M * INTERSECTION_DEDUP_M
+        # Per user 2026-05-14: also dedup by ALONG-AXIS distance.
+        # With INTERSECTION_PROX_M widened to 6 m we pick up
+        # opposite-side pavement vertices at the same chart-level
+        # runway transition (e.g. SPLP north end: an outside-edge
+        # vertex on the west boundary at one t and an inside-the-
+        # rect vertex on the east boundary at a t value only 4 m
+        # along the runway).  Euclidean dedup misses these (10 m
+        # apart across the runway), but they represent the SAME
+        # transition and should collapse to one seam.  Otherwise
+        # the runway segmenter inserts two adjacent seams ~4 m
+        # apart and the resulting micro-segment fails the grade
+        # check at the 23 % vertex-pair grade on its short edge.
+        INTERSECTION_DEDUP_ALONG_M = 5.0
+        deduped: List[Tuple[float, float, float]] = []
+        for t, px, py in intersections:
+            if deduped:
+                dpx = px - deduped[-1][1]
+                dpy = py - deduped[-1][2]
+                if dpx * dpx + dpy * dpy < dedup_m2:
+                    continue
+                dt_along_m = abs(t - deduped[-1][0]) * phys_dist
+                if dt_along_m < INTERSECTION_DEDUP_ALONG_M:
+                    continue
+            deduped.append((t, px, py))
+        # Convert intersection meter-coords back to lat/lon via the
+        # layout's m_to_ll (the segmenter consumes lat/lon).  Store
+        # under both designator orderings so the segmenter lookup
+        # finds them regardless of which key it tries.
+        ll_pts = [layout.m_to_ll(px, py) for _, px, py in deduped]
+        # Also store under the canonical (zero-padding-reconciled) pair
+        # so the segmenter — which iterates CIFP's zero-padded ``RW09``
+        # designators — matches regardless of whether THIS apt.dat
+        # zero-pads its single-digit runways (see
+        # ``runway_segments.canonical_runway_desig``).
+        from .pavement.runway_segments import canonical_runway_desig
+        ca = canonical_runway_desig(r.desig_a)
+        cb = canonical_runway_desig(r.desig_b)
+        for key in (
+                (r.desig_a, r.desig_b),
+                (r.desig_b, r.desig_a),
+                ("RW" + r.desig_a.lstrip("RW"),
+                 "RW" + r.desig_b.lstrip("RW")),
+                ("RW" + r.desig_b.lstrip("RW"),
+                 "RW" + r.desig_a.lstrip("RW")),
+                (ca, cb), (cb, ca)):
+            pav_runway_intersections[key] = list(ll_pts)
+    layout._pav_runway_intersections = pav_runway_intersections
 
     # Stash the pre-runway-subtraction pavement polygon list for
     # the apron-merged-runway detection in _compute_elevations.
@@ -4314,6 +4423,18 @@ def build_airport_pavement(icao: str, xplane_root: str,
                         f"{n_bridge_causeway} causeway, "
                         f"{n_bridge_pads_removed} building pad(s) "
                         f"removed.")
+                # Feature A stage (O4_OBJECT_TUNNEL_TERRAIN, spec section
+                # 3.3 + amendment A1, ruling R12): whole-body tunnel trench
+                # + rim collar, born pre-solve as first-class layout shapes
+                # from the SAME cached classification.  Gate off ⇒ no-op.
+                (n_tunnel_trench, n_tunnel_rim) = (
+                    object_terrain_assembly.build_tunnel_layout_shapes(
+                        layout, dem, tile_lat, tile_lon))
+                if n_tunnel_trench or n_tunnel_rim:
+                    UI.vprint(1,
+                        f"  [pav-builder] {icao}: object-tunnel layout "
+                        f"shapes — {n_tunnel_trench} trench floor, "
+                        f"{n_tunnel_rim} rim collar.")
                 n_bridge_deck_pins = insert_bridge_deck_end_pins(
                     layout, dem, tile_lat, tile_lon)
                 n_bridge_profile_pins = insert_bridge_profile_pins(
@@ -6600,6 +6721,32 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     f"pavement edges.")
         except _GEOM_EXC:
             pass
+
+    # ── LATE final grade projection (2026-07-17): the mid-pipeline
+    # ``final_grade_projection`` is no longer last — band/gap emission,
+    # tile cuts, conformance welds, crown completion and the densify
+    # passes above all reshape rings after it, and the law pairs of the
+    # TRULY final rings drift over their budgets (measured: SPJC 2 apron
+    # pairs 0.05/0.13 m over — a building-seat vs junction level the
+    # mid-graph could not satisfy but the post-insert graph can; HECA
+    # 5,822 projection-exit over-cap edges whose worst survivors emitted
+    # as the within-shape building class).  Re-run the projection on the
+    # final geometry: warm-seeded, so only violated neighbourhoods move.
+    # Post-band pavement moves are SAFE: at ``to_osm`` the authority
+    # consensus welds shared nodes at the PAVEMENT value (soft strips
+    # bend to it — the A2 doctrine), and band-interior values stay
+    # within the mid-edge/tear envelopes.  This call also re-freezes the
+    # lockstep ``pair_caps`` export at the last law build.
+    if compute_elevations and os.environ.get(
+            "O4_FINAL_PROJECTION_LATE", "1") == "1":
+        try:
+            from .elevation_per_surface.route_profile.solve import (
+                final_grade_projection as _late_fgp)
+            _late_fgp(layout, icao)
+        except _GEOM_EXC as _late_fgp_exc:
+            UI.vprint(1, f"  [pav-builder] WARN {icao}: late final "
+                         f"grade projection failed ({_late_fgp_exc!r}) "
+                         f"— mid-pipeline projection values kept.")
 
     return layout
 

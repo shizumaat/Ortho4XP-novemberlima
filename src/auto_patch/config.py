@@ -25,6 +25,14 @@ __all__ = [
     "DSF_OBJECT_FOOTPRINT_HEIGHT_M",
     "DSF_OBJECT_ELEVATED_BASE_M",
     "DSF_OBJECT_MAX_FOOTPRINT_AREA_M2",
+    "DSF_OBJECT_BAKE_MAX_GROUND_SPAN_M",
+    "DSF_OBJECT_PAVEMENT",
+    "DSF_OBJECT_PAVEMENT_MAX_LAYER_OFFSET",
+    "DSF_OBJECT_PAVEMENT_MIN_PATCH_M2",
+    "DSF_OBJECT_CONNECTOR_PREFILTER",
+    "DSF_OBJECT_CONNECTOR_SPAN_M",
+    "DSF_OBJECT_CONNECTOR_MAX_FILL",
+    "DSF_OBJECT_MAX_STRUCTURE_SPAN_M",
     "DSF_OBJECT_MIN_BUILDING_HEIGHT_M",
     "DSF_OBJECT_PAD_FLAG_SPAN_M",
     "DSF_OBJECT_FOOT_ANCHOR",
@@ -60,6 +68,11 @@ __all__ = [
     "NECK_ABSORB_FRAC",
     "NECK_RELATIVE",
     "ROLE_GRADE_LIMITS",
+    "FLATNESS_CERTIFICATE_RATE_FACTOR",
+    "FLAT_CERTIFICATE_COVERAGE",
+    "FLAT_AIRPORT_FAST_PATH",
+    "RECT_CROSS_FLATNESS_TOLERANCE_M",
+    "BUILDING_SEAT_FLATNESS_TOLERANCE_M",
     "TAXI_MAX_GRADE",
     "APRON_MAX_GRADE",
     "BUILDING_FRONTAGE_MAX_GRADE",
@@ -92,12 +105,18 @@ __all__ = [
     "SKIP_TUNNEL_RAMPS_NEAR_ROADS",
     "TUNNEL_ADJACENT_ROAD_DIST_M",
     "TUNNEL_FORK_THROAT",
+    "TUNNEL_DEM_CUT_MIN_DROP_M",
+    "TUNNEL_DEM_CUT_WINDOW_M",
+    "TUNNEL_MOUTH_PLATE_LENGTH_M",
+    "TUNNEL_MOUTH_WINDOW_M",
+    "TUNNEL_ROOF_PLATE_MAX_LENGTH_M",
     "GROUNDSIDE_MAX_GRADE",
     "RUNWAY_VERTICAL_CURVE_K_M",
     "RUNWAY_MAX_GRADE_CHANGE_PER_M",
     "RUNWAY_DEM_FOLLOW_BAND_M",
     "GRADE_VISIBILITY_BUFFER_M",
     "ELEV_ROUNDING_NOISE_M",
+    "SLOPED_QUAD_ROUNDING_NOISE_M",
     "EMIT_QUANTIZATION_MARGIN_M",
     "ROUTE_FIELD_MODEL",
     "ROUTE_FIELD_LOCAL_WINDOW_M",
@@ -171,6 +190,8 @@ __all__ = [
     "runway_end_approach_class",
     "RUNWAY_END_SKIRT_ENABLED",
     "OBJECT_BRIDGE_TERRAIN",
+    "OBJECT_TUNNEL_TERRAIN",
+    "TUNNEL_FLOOR_BELOW_OBJECT_DECK_M",
     "BRIDGE_ROAD_CLEARANCE_M",
     "BRIDGE_ROAD_CLEARANCE_MINIMUM_M",
     "BRIDGE_CORRIDOR_DEPRESSED_LENGTH_M",
@@ -724,6 +745,30 @@ TUNNEL_RAMP_MAX_GRADE = 0.040   # navigable ramp grade for tunnel portals (user 
 # ramps (SPJC's user-approved tunnels are kept; all 6 LMML tunnels skip).
 SKIP_TUNNEL_RAMPS_NEAR_ROADS = True
 TUNNEL_ADJACENT_ROAD_DIST_M = 15.0
+# DEM-CUT PORTALS (user 2026-07-17, EGGW): what a tunnel portal needs
+# from the patch DEPENDS ON THE MESH.  With a high-resolution lidar
+# elevation inset the digital terrain model is bare-earth: the
+# approach ramps to the portal are already carved essentially
+# correctly in the DEM, and a bare-earth model also removes the
+# taxiway structure ABOVE the tunnel — leaving an open trench through
+# the covered bore.  When the DEM near a portal already descends at
+# least ``TUNNEL_DEM_CUT_MIN_DROP_M`` below the airport surface, the
+# emitter therefore stops synthesising ramps (a 4 %-law linear ramp
+# would FIGHT the real, often steeper, lidar cut) and instead emits
+# only: the portal face cap at airport grade, a short mouth plate at
+# the DEM's own road grade (``TUNNEL_MOUTH_PLATE_LENGTH_M``) so the
+# face transition stays crisp, and flat ROOF plates at airport grade
+# over the covered bore between the portal face and the airside
+# pavement (up to ``TUNNEL_ROOF_PLATE_MAX_LENGTH_M`` per portal) —
+# filling the bare-earth trench that the pavement grading does not
+# reach.  Coarse-DEM airports (no descent at the portal) keep the
+# synthetic-ramp behaviour byte-identically.  ``O4_TUNNEL_DEM_CUT=0``
+# disables the mode.
+TUNNEL_DEM_CUT_MIN_DROP_M = 3.0
+TUNNEL_DEM_CUT_WINDOW_M = 60.0
+TUNNEL_MOUTH_PLATE_LENGTH_M = 6.0
+TUNNEL_MOUTH_WINDOW_M = 30.0
+TUNNEL_ROOF_PLATE_MAX_LENGTH_M = 120.0
 # IMPLIED CROSSING TUNNELS (user 2026-07-04): a PUBLIC through-road or a
 # railway that crosses taxiway/runway pavement cannot do so at grade —
 # assume a tunnel under the pavement even when OSM carries no tunnel
@@ -797,6 +842,25 @@ RUNWAY_DEM_FOLLOW_BAND_M = 0.0
 #     violations, 2026-07-03).
 GRADE_VISIBILITY_BUFFER_M = 1.0
 ELEV_ROUNDING_NOISE_M = 0.03
+# Coarse-emit sibling of ``ELEV_ROUNDING_NOISE_M`` for SLOPED-QUAD shapes
+# (2026-07-17).  A tilted 4-corner way is emitted as ``altitude_high`` /
+# ``altitude_low`` quantized to 0.1 m (``bridges.py`` ``_emit_tunnel_portals``
+# grade_safety_margin) — 10x coarser than the 0.01-m per-node ``alt_abs`` grid.
+# A within-shape pair spanning the high and low corners of such a quad (or a
+# per-node shape welded to one) therefore carries up to a full 0.1-m emit step
+# on top of the solved field, which the 0.03-m per-node envelope cannot absorb:
+# short tunnel_ramp / bridge-portal pairs solved to their 3.5-4 % plan grade
+# then read a few hundredths over cap purely from the coarse round (SPJC
+# tunnel_ramp #499-502: 4.1-4.2 % vs the 4 % cap).  The SAME 0.1-m envelope is
+# reused for JUNCTION-family ring edges (``check_grade._pair_quant_noise_m``):
+# junction rings are rebuilt by the conformance / planarization / weld pass
+# (T-vertex + unshared-corner inserts, epsilon-wedge welds), which displaces a
+# short ring edge by up to a decimetre — the same magnitude — so a short
+# junction edge reads over its 1.5 % cap from weld displacement, not a real
+# grade defect (SPLP junction #68: 6 cm over 0.85 m).  Sized like the
+# runway-end-skirt reader's 0.1-m sloped-quad tolerance
+# (``_check_runway_end_skirt_edges``), NOT a per-airport fudge.
+SLOPED_QUAD_ROUNDING_NOISE_M = 0.1
 # ── Emit-quantization grade margin (2026-07-04) ──────────────────────────
 # ``to_osm`` emits elevations rounded to 0.01 m (2-decimal), so each endpoint
 # moves up to ±0.005 m and a pair's |Δelev| can grow by up to 0.01 m — ONE
@@ -996,6 +1060,64 @@ ROLE_GRADE_LIMITS = {
     "bridge_trench":      None,
     "bridge_causeway":    None,
 }
+
+# ── FLAT-AIRPORT FAST PATH — certificate constants ──────────────────────
+# (docs/specs/flat-airport-fast-path-spec.md §2.5, §3.2).  Single source of
+# truth for every flatness-certificate rate/tolerance, sitting next to
+# ROLE_GRADE_LIMITS because the certificate budgets are derived from those
+# same role caps.  See ``solver_primitives._certify_flat_shape`` /
+# ``_certify_flat_rect`` and ``building_feasibility.building_feasible_levels``.
+#
+# The RATE FACTOR is the fraction of a role's tightest applicable grade
+# budget a certificate is allowed to consume; the remaining slack funds the
+# movement tolerance (``lazy_move_tolerance``) so harmonic smoothing cannot
+# void the certificate (the 2026-07-05 "certificates all expanded" lesson).
+# 0.6 is the value the existing apron/junction lazy tier already uses
+# (previously the in-line ``flat_safety_factor = 0.6`` in
+# ``_build_shape_constraints``); hoisted here so rects, seats and the
+# existing apron/junction path all read ONE number.
+FLATNESS_CERTIFICATE_RATE_FACTOR = 0.6
+
+# Coverage gate (spec §3.2 ``O4_FLAT_CERTIFICATE_COVERAGE``): extends the
+# 2026-07-05 apron/junction lazy tier to taxi rects and building seats.
+# Default ON; ``O4_FLAT_CERTIFICATE_COVERAGE=0`` reverts every extended class
+# to its eager path (the env-gate A/B inertness harness, spec §4.1).
+FLAT_CERTIFICATE_COVERAGE = (
+    _os_early.environ.get("O4_FLAT_CERTIFICATE_COVERAGE", "1") == "1")
+
+# Whole-airport fast path (spec §3.3 ``O4_FLAT_AIRPORT_FAST_PATH``, Tier 2).
+# When a ``FlatAirportCertificate`` holds — every soft shape certifies under
+# the Tier-0/1 machinery, every runway's along-axis DEM relief fits the runway
+# profile budgets at ``FLATNESS_CERTIFICATE_RATE_FACTOR`` margin, and no
+# bridge / tunnel / crossing-terrain / object-pad subsystem claimed geometry —
+# the solve's reach bands, spine profile, body fill and feasibility iteration
+# collapse: every soft node takes its DEM seed value.  Default ON;
+# ``O4_FLAT_AIRPORT_FAST_PATH=0`` forces the normal solve for every airport
+# (the env-gate A/B inertness harness, spec §4.1).
+FLAT_AIRPORT_FAST_PATH = (
+    _os_early.environ.get("O4_FLAT_AIRPORT_FAST_PATH", "1") == "1")
+
+# Taxi-rect CROSS-section flatness reserve (m): a rect's two flat-cross
+# (cap≈0) edges want their endpoints EQUAL, so a rect certifies its
+# cross-section as already-flat only when the DEM relief across it is within
+# this reserve (the flat-cross tolerance plus the smoothing reserve, spec
+# §3.2).  Set to the validator's emit-rounding noise (``ELEV_ROUNDING_NOISE_M``
+# = 0.03 m) scaled up modestly so a genuinely flat runway/taxiway
+# cross-section certifies while any real cross-fall refuses — fail toward
+# correctness.
+RECT_CROSS_FLATNESS_TOLERANCE_M = 0.10
+
+# Building-SEAT flatness tolerance (m): a building pad is emitted FLAT at one
+# level (owner ruling — buildings are flat).  A seat certifies — and skips
+# its per-building reach-band frontage construction, taking its DEM MEAN as
+# the seated level — only when the DEM relief over the whole footprint is
+# within this tolerance (the seat is flat by inspection).  Grounded in the
+# post-solve pad-host re-level trigger (``PAD_HOST_LEVEL_TRIGGER_M`` = 0.5 m,
+# "a normally-seated pad agrees to ≤ 0.14 m; a genuine pit/hump is metres"):
+# 0.6 · 0.5 = 0.30 m keeps a certified seat's DEM-mean within the trigger of
+# every footprint point, so seating flat at the mean introduces no step the
+# host arbitration would flag.  NOT a grade rate (spec §2.4).
+BUILDING_SEAT_FLATNESS_TOLERANCE_M = 0.30
 
 # Phase-1 emit-suppression toggles (kept from the pre-refactor
 # baseline; iteration aids that remain useful).
@@ -1515,10 +1637,124 @@ DSF_OBJECT_ELEVATED_BASE_M = float(
     _os.environ.get("O4_DSF_OBJECT_ELEVATED_BASE_M", "0.5"))
 
 # Skip-and-report a footprint larger than this rather than laying a flat
-# pad across half an airfield.  0 disables the cap.  KCLT's terminal
-# complex is 112,230 square metres — spec section 2.3.
+# pad across half an airfield.  KCLT's terminal complex is 112,230 square
+# metres — spec section 2.3.  0 disables the cap.
+#
+# BACKSTOP DEFAULT 100,000 m² (defect 2026-07-17, UK payware co-baked
+# airports): the connector pre-filter and the structure span gate stop
+# fences/roads/slabs from chaining real buildings into one field-spanning
+# mega-pad, but this area cap is the final net that keeps any residual
+# giant hull out of the building pool (its hull would otherwise CANNIBALISE
+# the real building pads it overlaps — EGGW dropped from 39 real DSF
+# buildings to 10 as two mega-hulls swallowed them).  100,000 keeps EGGW's
+# legitimate largest concourse (measured well under this — see the defect
+# probe) with generous margin while dropping the airport-sized hulls.
 DSF_OBJECT_MAX_FOOTPRINT_AREA_M2 = float(
-    _os.environ.get("O4_DSF_OBJECT_MAX_FOOTPRINT_AREA_M2", "0"))
+    _os.environ.get("O4_DSF_OBJECT_MAX_FOOTPRINT_AREA_M2", "100000"))
+
+# ── DSF OBJECT PAVEMENT (user 2026-07-17, HECA Tai Models) ──
+# Ground-paint packs draw base pavement as DRAPED-ONLY ``.obj`` files —
+# one placement carrying the whole airport's geometry for one texture
+# (HECA ``Airport/ground/asphalt.obj``: 31k draped vertices, zero solid
+# triangles).  Such objects never enter the building path (no solid
+# geometry) and never entered the pavement union either, so
+# adjacent-ground bands marched through what the sim shows as
+# mid-taxiway asphalt.  When ON, ``dsf_reader.read_dsf_object_pavements``
+# admits an object as PAVEMENT when it is draped-only AND declares
+# ``ATTR_layer_group_draped`` in group runways/taxiways at an offset no
+# greater than DSF_OBJECT_PAVEMENT_MAX_LAYER_OFFSET — the base-pavement
+# draw layer; markings, taxi lines, and gate signs sit in group
+# ``markings`` or at higher offsets (HECA survey 2026-07-17: base
+# asphalt/concrete all at ``runways 1``, every decal at ``markings *``
+# or ``runways 2..5``) — AND carries no decorative name token.  The
+# draped triangles are unioned into pavement patches (all disjoint
+# patches kept, holes honoured) that join the DSF pavement sweep under
+# the SAME distance/boundary/overlay gates as ``.pol`` pavement, marked
+# third-party.  DEFAULT ON (owner 2026-07-18, for in-sim testing).
+# HECA A/B (law-true, axes sidecar): +4.05 km2 real ground-paint
+# pavement, inert at every non-HECA fixture pack; within-shape 30→3
+# (fixes 27/30 standing terminal-frontage flags); residuals = 3 skirt
+# + 6 tears + 3 cross + 55 mid-edge (junction/skirt lawfully meeting
+# low terrain beside the preserved runway datum) + ~311 perimeter
+# retaining walls awaiting the owner's in-sim verdict.  The one
+# genuine regression this coverage exposed — MID final-projection
+# writeback aliasing re-stamping the runway blast-pad corner — is
+# FIXED (runway profile preserve now unconditional in
+# ``final_grade_projection``).  O4_DSF_OBJECT_PAVEMENT=0 restores the
+# prior behaviour.
+DSF_OBJECT_PAVEMENT = (
+    _os.environ.get("O4_DSF_OBJECT_PAVEMENT", "1") == "1")
+DSF_OBJECT_PAVEMENT_MAX_LAYER_OFFSET = int(
+    _os.environ.get("O4_DSF_OBJECT_PAVEMENT_MAX_LAYER_OFFSET", "1"))
+# Patches below this metric area are dropped — texture-page unions shed
+# sliver fragments (isolated decal quads, seam slivers) that would bloat
+# the pavement pool with noise.
+DSF_OBJECT_PAVEMENT_MIN_PATCH_M2 = float(
+    _os.environ.get("O4_DSF_OBJECT_PAVEMENT_MIN_PATCH_M2", "20"))
+
+# ── CONNECTOR pre-filter (defect 2026-07-17, UK payware co-baked airports) ──
+# A scenery pack that bakes a whole airport as many ``.obj`` files sharing
+# one anchor includes CONNECTOR meshes — perimeter fences, road/rail
+# networks, whole-complex ground slabs — whose base geometry touches
+# (within DSF_OBJECT_CONTACT_EPSILON_M) every real building.  Left in the
+# pool they chain all the buildings into one connected structure whose
+# convex hull fills the field, burying the real buildings and the
+# below-grade tunnels (EGGW building1 = 2,814,841 m²; EGLL T5 = 537,939 m²;
+# EGLL's Airport/Tunnel/8.obj + 8a.obj were pooled into the T2_3 pad).
+# A resource is a CONNECTOR — excluded from building pooling/partitioning
+# BEFORE weld/contact so it cannot chain components — only when BOTH its
+# footprint span (max bbox side of its solid geometry) exceeds
+# DSF_OBJECT_CONNECTOR_SPAN_M AND its hull-fill ratio (horizontal
+# solid-triangle area ÷ convex-hull area) is below DSF_OBJECT_CONNECTOR_MAX_FILL.
+# A large but FILLED footprint (a real mega-terminal) fails the fill test
+# and is kept.  See ``object_anchor.is_connector_resource``.  The 300 m
+# span floor sits far above any single building or the ~50 m KBNA gantry
+# (the multi-foot re-anchor's motivating structure), which must never be
+# caught.  Lower the span at your own risk — nothing below ~150 m without
+# an owner ruling.
+#
+# DEFAULT OFF (defect 2026-07-17, verification finding — owner ruling
+# pending): a PER-OBJECT span+fill test cannot separate a true bridging
+# connector from a co-baked building part.  UK payware packs (EGGW/EGLL)
+# bake the whole airport as many texture-page ``.obj`` files that each
+# span the field with near-zero horizontal fill (walls are vertical, so
+# their footprint projection is ~0), so the pre-filter excludes the real
+# building geometry: EGGW dropped from 39 → 6 DSF buildings, EGLL 216 →
+# 128, both with the pre-filter on.  The STRUCTURE span gate
+# (DSF_OBJECT_MAX_STRUCTURE_SPAN_M) is the sound per-STRUCTURE equivalent
+# — it drops the field-spanning CHAINED structure regardless of which
+# object bridged it, leaving the real buildings (separate components)
+# intact — and with the area backstop it meets the whole acceptance on
+# its own.  Set O4_DSF_OBJECT_CONNECTOR_PREFILTER=1 to evaluate the
+# per-object pre-filter.
+DSF_OBJECT_CONNECTOR_PREFILTER = (
+    _os.environ.get("O4_DSF_OBJECT_CONNECTOR_PREFILTER", "0") == "1")
+DSF_OBJECT_CONNECTOR_SPAN_M = float(
+    _os.environ.get("O4_DSF_OBJECT_CONNECTOR_SPAN_M", "300"))
+DSF_OBJECT_CONNECTOR_MAX_FILL = float(
+    _os.environ.get("O4_DSF_OBJECT_CONNECTOR_MAX_FILL", "0.20"))
+
+# ── Structure span gate (same defect) ──  A partitioned structure whose
+# footprint-ring span (max bbox side) exceeds this is not a building-pad
+# seed — skipped-and-reported through the same path as the area cap.  0
+# disables it (the ``MAX_``-cap convention shared with the area backstop).
+#
+# DEFAULT OFF (0) (defect 2026-07-17, verification finding — owner ruling
+# pending): at 500 m this gate ALSO removes a real terminal whose convex
+# hull is inflated past the threshold — SPJC's ``terminal.obj`` +
+# ``terminal_banner.obj`` span 560 m (the banner sign sits far from the
+# terminal), so a 500 m gate dropped the terminal pad and opened 15 grade
+# steps at SPJC (a clean airport otherwise).  The AREA BACKSTOP alone
+# removes every airport-sized mega hull (all ≫ 100,000 m²: EGGW 2.0 M /
+# 1.5 M, EGLL 537 k / 368 k / 355 k, HECA 1.9 M, SPJC LIMANUEVA 371 k) and
+# keeps every real terminal, so it meets the whole acceptance on its own
+# and leaves SPJC's grades at zero.  The span gate only helps against a
+# residual SUB-backstop long/thin field-spanner (HECA has a 45,803 m² /
+# 601 m one) — but it cannot tell that from a real 560 m terminal by span
+# alone.  Set O4_DSF_OBJECT_MAX_STRUCTURE_SPAN_M=500 (or higher, to clear
+# real terminals) to evaluate it.
+DSF_OBJECT_MAX_STRUCTURE_SPAN_M = float(
+    _os.environ.get("O4_DSF_OBJECT_MAX_STRUCTURE_SPAN_M", "0"))
 
 # (amendment A3) A baked structure whose ground elevation span across its
 # ground-touching parts exceeds this is still baked with the best single
@@ -1526,6 +1762,22 @@ DSF_OBJECT_MAX_FOOTPRINT_AREA_M2 = float(
 # and a Phase-1 building pad is the actual fix (spec section 7.3).
 DSF_OBJECT_PAD_FLAG_SPAN_M = float(
     _os.environ.get("O4_DSF_OBJECT_PAD_FLAG_SPAN_M", "2"))
+
+# A structure whose terrain variation under its ground-contact parts
+# exceeds this cannot be seated by one rigid vertical offset — one end
+# floats or sinks by more than the seating tolerance no matter where the
+# single offset lands.  Such structures stay at their AUTHORED elevations
+# (their real buildings are carried by Phase-1 pads instead, where the
+# terrain meets each building).  This is the per-STRUCTURE guard that
+# stops a co-baked payware pack's connector chain (perimeter fences,
+# parked-car texture fields) from dragging a whole airport-scale contact
+# component to one wrong offset — the EGGW UK2000 pack chained 55 and 44
+# real buildings into components spanning 38.2 m and 26.3 m of terrain,
+# each of which a single rigid offset floated by tens of metres.  Distinct
+# from DSF_OBJECT_PAD_FLAG_SPAN_M, which only FLAGS a still-baked
+# structure; past this larger limit the structure is not baked at all.
+DSF_OBJECT_BAKE_MAX_GROUND_SPAN_M = float(
+    _os.environ.get("O4_DSF_OBJECT_BAKE_MAX_GROUND_SPAN_M", "3.0"))
 
 # ── Multi-ground-cluster (foot) re-anchor ─────────────────────────────
 # An author-BAKED vertical offset (the KBNA water-treatment stairs carry
@@ -1600,6 +1852,38 @@ DSF_OBJECT_FOOT_PAD_MARGIN_M = float(
 # build (shoulder strips carried only by DSF pavement fall into
 # apron residue along the runway).
 RUNWAY_SHOULDER_EXTENT = _os.environ.get("O4_SHOULDER_EXTENT", "1") == "1"
+
+# (2026-07-17, KBNA 13/31) BORDER-STRIP-DERIVED runway shoulders.
+# Construction style: the runway ships as exact-runway-width draped
+# ``.pol`` pieces PLUS a wide draped ``.lin`` border traced along the
+# runway's own outline — the border's outer half IS the author's
+# shoulder, so the strip's declared width states the shoulder width
+# EXACTLY (``width / 2`` per side; KBNA 13/31: 24 m border ⇒ 12 m
+# shoulder).  When enough border arc-length runs on a runway edge, that
+# per-side width wins and the runway SKIPS the extent walk below
+# entirely: on a border-styled runway a side with no border evidence
+# has NO shoulder (abutting taxiway pavement stays taxiway — the
+# wide-biased extent clamp used to eat its ``max_w`` 15 m of taxiway
+# pavement and shred the junctions along KBNA 13/31).
+# ``O4_RUNWAY_BORDER_SHOULDER=0`` restores the extent-only behaviour.
+RUNWAY_BORDER_SHOULDER = _os.environ.get(
+    "O4_RUNWAY_BORDER_SHOULDER", "1") == "1"
+# A border sample counts as "on the runway edge" within this
+# perpendicular tolerance (matches _BORDER_WRAP_EDGE_TOL_M — the strip
+# path traces the ``.pol`` outline, which sits within chart tolerance
+# of the apt.dat rect edge).
+RUNWAY_BORDER_SHOULDER_EDGE_TOL_M = 3.0
+# Arc-length sampling step along each strip path.
+RUNWAY_BORDER_SHOULDER_SAMPLE_STEP_M = 5.0
+# A single strip must put at least this much arc-length on the edge to
+# count as evidence (filters taxiway borders that merely cross the
+# runway at exits).
+RUNWAY_BORDER_SHOULDER_MIN_STRIP_COVER_M = 40.0
+# A side qualifies when its strips jointly cover at least this much of
+# the runway edge (KBNA 13/31 left: 1,485 m of 3,364; the right side's
+# lone 160 m fragment stays unqualified — taxiway complexes abut there
+# and the runway must not eat them).
+RUNWAY_BORDER_SHOULDER_MIN_SIDE_COVER_M = 300.0
 
 # (2026-06-17) RUNWAY-SHOULDER SEGMENTATION REACH — docs/runway_
 # shoulder_detection.md.  The runway-segmentation breakpoint collector
@@ -2012,6 +2296,27 @@ ADJACENT_GROUND_LAW_ENABLED = (
 OBJECT_BRIDGE_TERRAIN = (
     _os.environ.get("O4_OBJECT_BRIDGE_TERRAIN", "1") == "1")
 
+# Feature A — object-derived tunnel terrain (docs/object_terrain_features_
+# spec.md section 3.3 + amendment A1, ruling R12).  DEFAULT ON (user
+# 2026-07-18, for in-sim testing at EGLL/CYYZ after the oracle audit).
+# Trench depth authority = THE OBJECT'S OWN GEOMETRY (user ruling
+# 2026-07-18: never the author's custom mesh, which served only as the
+# validation oracle).  With O4_OBJECT_TUNNEL_TERRAIN=0 no tunnel-trench
+# shape is born and the emitted patch is byte-identical to the
+# pre-feature build.  Independent of the bridge gate above so either
+# family can be exercised alone.
+OBJECT_TUNNEL_TERRAIN = (
+    _os.environ.get("O4_OBJECT_TUNNEL_TERRAIN", "1") == "1")
+
+# Amendment A1: the tunnel-trench mesh floor sits this far (m) BELOW the
+# OBJ8 road deck the object renders.  The deck carries the visible road;
+# the mesh only stays safely beneath it (author-mesh dissection section 2.4
+# point 3 — the author floors ~1.0 m below the deck at integer-quantised
+# precision; 0.5 m satisfies the same strictly-below contract at finer
+# precision).  Single source read by ``grade_law.tunnel_trench_floor_
+# elevation_m`` (the emitter and any future validator, in lockstep).
+TUNNEL_FLOOR_BELOW_OBJECT_DECK_M = 0.5
+
 # Vertical clearance (m) the ``grade_law.bridge_crossing_floor`` law adds
 # above a road surface for a TERRAIN/PROFILE_CARRIED span that must RISE
 # (the EDDF class, where WE choose the vertical split — spec section 3.2).
@@ -2123,6 +2428,31 @@ TUNNEL_PORTAL_CROWN_COLLAR_M = 10.0
 # roof.  O4_TUNNEL_PORTAL_CROWN=0 restores the single road-grade plate.
 TUNNEL_PORTAL_CROWN = (
     _os.environ.get("O4_TUNNEL_PORTAL_CROWN", "1") == "1")
+
+# (user ruling 2026-07-17) THE PORTAL OBJECT IS THE TERRAIN AUTHORITY:
+# the portal's large flat top surface (below its safety-wall parapet)
+# is the divider between the below-grade road and the at-grade back
+# terrain, and it sits close to level with the adjacent taxiway.  Two
+# consequences:
+# * PRE-SOLVE, the crown plate seats no lower than the object's roof
+#   plane (``mouth_floor + deck_top`` — the cosmetic classifier's
+#   dominant elevated plane already excludes small-area parapet caps).
+#   The smoothed DEM stays only as an UPWARD override (a genuinely
+#   buried hillside portal keeps the higher terrain).  KBNA
+#   Murfreesboro west: DEM said 171.2 where the object roof is 176.8 —
+#   the collar sat at road level and the portal-mouth backside was
+#   visible from the runway.
+# * POST-SOLVE, crown and collar RISE (never fall) to the surrounding
+#   solved airside level where that is higher (raise pass in
+#   ``bridges.raise_portal_terrain_to_airside``, called from
+#   finalize after the solve).  KBNA Murfreesboro east: airside
+#   junctions at 176.4-178.5 over a 173.15 object roof.
+# ``O4_TUNNEL_PORTAL_AIRSIDE_RAISE=0`` disables the post-solve raise.
+TUNNEL_PORTAL_AIRSIDE_RAISE = (
+    _os.environ.get("O4_TUNNEL_PORTAL_AIRSIDE_RAISE", "1") == "1")
+# Radius around a crown/collar vertex within which solved airside ring
+# vertices define the local airside level (median of samples).
+TUNNEL_PORTAL_AIRSIDE_SAMPLE_RADIUS_M = 80.0
 
 # (user ruling 2026-07-14) Adjacent-ground bands and surface-clearance
 # cuts are masked OUT of every crossing Feature B owns (corridor deck
@@ -2814,6 +3144,28 @@ MIN_GRADE_NETWORK = _os.environ.get("O4_MIN_GRADE_NETWORK", "0") == "1"
 BUILDING_FULL_FRONTAGE_AREA_M2 = 2000.0
 BUILDING_FULL_FRONTAGE = _os.environ.get(
     "O4_BUILDING_FULL_FRONTAGE", "1") == "1"
+
+# (2026-07-17, KBNA SE lot) AIRSIDE-SERVED gate significance: a building
+# pad counts as airside-served (and takes the reach-band floor clamp)
+# only when the airside pavement COMPONENT it touches is at least this
+# large.  KBNA building23 (26 m²) touched an ISOLATED 66 m² apron scrap
+# and inherited the runway reach floor — 11.6 m above its own ground and
+# 4.7 m above the groundside pavement 7 m away.  An isolated scrap that
+# small serves no aircraft; the pad it touches is groundside furniture
+# and must seat at local ground.  Scale mirrors the sub-2000 m² "small
+# apron" convention (pipeline apron demotion note, user 2026-06-30).
+BUILDING_AIRSIDE_CONTACT_MIN_COMPONENT_M2 = 2000.0
+
+# (2026-07-17) DETACHED building pads (touching NO qualifying airside
+# pavement) are HARD-PINNED flat at their footprint DEM (median over
+# ring + centroid samples) for the whole solve.  Without the pin their
+# ring nodes are free field nodes: the route-profile blend paints them
+# with the surrounding airside level (KBNA SE lot: pads emitted at
+# 170-172 over 158-167 ground — flat plateaus 6-11 m above the DEM and
+# the abutting groundside).  ``O4_DETACHED_PAD_DEM_PIN=0`` restores the
+# free-field behaviour.
+DETACHED_PAD_DEM_PIN = _os.environ.get(
+    "O4_DETACHED_PAD_DEM_PIN", "1") == "1"
 # THE single building↔spine REACH corridor (user 2026-06-29): the max apron span
 # over which a building reaches a taxi spine, gated by a VISIBLE on-pavement chord
 # (no grass / one continuous apron) — the visibility gate, not the distance, is

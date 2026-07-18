@@ -45,6 +45,7 @@ from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import nearest_points, unary_union
 from shapely.strtree import STRtree
 
+from ..geom_safe import min_rotated_rect
 from .pav_skeleton import build_pavement_skeleton, _polygons
 
 # ── standards constants ──────────────────────────────────────────────────────
@@ -176,7 +177,7 @@ def _runway_axes(runway_union):
         return axes
     for poly in _polygons(runway_union):
         try:
-            mrr = poly.minimum_rotated_rectangle
+            mrr = min_rotated_rect(poly)
             cs = np.asarray(mrr.exterior.coords)
         except Exception:
             continue

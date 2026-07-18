@@ -75,6 +75,7 @@ from .layout import (
     PavementLayout,
     R_EARTH,
     ROLE_APRON,
+    ROLE_BUILDING,
     ROLE_CROSS_CONNECTOR,
     ROLE_GRADED_STRIP,
     ROLE_JUNCTION,
@@ -863,6 +864,101 @@ def _declaw_short_needle_runs(piece_ring, alts, tol, max_run=2,
                 out[(start + k) % n] = round(flank_mean, 1)
             break
     return out
+
+
+def _heal_band_tears(ring, alts, weld, tear_max, min_jump,
+                     wall_max=CLEARANCE_STATION_STEP_M):
+    """Collapse SUB-METRE near-vertical ring edges a band clip/cap leaves
+    behind — the TEAR sentinel class (``check_grade._check_adjacent_ground
+    _edges``): a ring edge shorter than ``tear_max`` whose two endpoints'
+    altitudes differ by more than ``min_jump``.
+
+    SECOND class (``wall_max``, 2026-07-17): a WELD-ADJACENT WALL edge —
+    one endpoint on the pavement weld row, the other a zone vertex, edge
+    shorter than a station step (``wall_max``) with a jump exceeding both
+    ``min_jump`` and the edge length (grade > 100 %).  No corridor slope
+    reaches 100 %; the zone value is a resampler / solved-store escape
+    riding raw DEM against the pavement row (CYXY apron #677: weld 706.4
+    vs zone 712.7 over 4.0 m).  The sub-metre sentinel misses it at emit,
+    but any conformance insert splitting the edge mints a flagged
+    sub-metre segment.  Weld-adjacent ONLY: a fill band's outer row
+    lawfully rides raw DEM, so two NON-weld vertices across a real
+    terrain cliff are never collapsed.
+
+    Cause: the ``difference()`` clips and the band END caps can pinch a
+    band's INNER (pavement weld) row to within a metre of its OUTER
+    (terrain) row while each keeps its own lawful value, minting a
+    near-vertical face no lateral corridor slope produces (the lateral law
+    tops out at ~5 %, so a >1 m step over <1 m is impossible by
+    construction; it is always a clip residue / pinch, never a graded
+    row).  The DEM-aware corridor validator accepts the WIDE band edges
+    that ride terrain up a hillside, so the ONLY unlawful thing here is the
+    sub-metre pinch edge — remove it geometrically.
+
+    Resolution: drop ONE endpoint of each flagged edge, preferring to
+    keep a weld vertex (its position is ON the pavement boundary and its
+    value is the pavement weld value the conformance pass welds to —
+    never move it).  Between two OUTER vertices (a clip-minted
+    near-duplicate) drop the bigger spike.  Iterated to a fixed point so
+    a collapse that exposes a fresh short edge is healed too.  Returns
+    the healed open ring + aligned altitudes (input objects returned
+    unchanged when nothing collapses).  NOTE: both classes key on the
+    VALUE jump, so the healed footprint is value-dependent — the
+    construct-move footprint-equality acceptance neutralizes this heal
+    (see ``test_emit_admission_footprints_equal_gate_off``)."""
+    n = len(ring)
+    if n < 4:
+        return ring, alts
+    keep = [True] * n
+    changed = True
+    guard = 0
+    while changed and guard < 2 * n:
+        guard += 1
+        changed = False
+        idxs = [i for i in range(n) if keep[i]]
+        m = len(idxs)
+        if m <= 3:
+            break
+        for a in range(m):
+            i = idxs[a]
+            j = idxs[(a + 1) % m]
+            ax, ay = ring[i]
+            bx, by = ring[j]
+            d = math.hypot(bx - ax, by - ay)
+            de = abs(float(alts[i]) - float(alts[j]))
+            wi, wj = bool(weld[i]), bool(weld[j])
+            is_tear = (d < tear_max and de > min_jump)
+            # Weld-adjacent wall edge (see docstring): exactly one weld
+            # end, station-scale length, grade over 100 %.
+            is_wall = (wall_max is not None and (wi != wj)
+                       and d < wall_max and de > min_jump and de > d)
+            if not (is_tear or is_wall):
+                continue
+            if wi and not wj:
+                drop = j
+            elif wj and not wi:
+                drop = i
+            elif not wi and not wj:
+                # Two outer vertices: drop the spike (the one whose value
+                # deviates more from its OTHER ring neighbour).
+                pi = idxs[(a - 1) % m]
+                nj = idxs[(a + 2) % m]
+                dev_i = abs(float(alts[i]) - float(alts[pi]))
+                dev_j = abs(float(alts[j]) - float(alts[nj]))
+                drop = i if dev_i >= dev_j else j
+            else:
+                # Two weld vertices sub-metre apart at a >1 m step is a
+                # pavement-side discontinuity, not a band pinch — leave it
+                # (moving a weld vertex would unweld the pavement seam).
+                continue
+            keep[drop] = False
+            changed = True
+            break
+    if all(keep):
+        return ring, alts
+    new_ring = [ring[i] for i in range(n) if keep[i]]
+    new_alts = [alts[i] for i in range(n) if keep[i]]
+    return new_ring, new_alts
 
 
 def _ring_edge_reference(coords, ring_alts):
@@ -2036,6 +2132,29 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
             groundside_block = unary_union(_gs_polys).buffer(1.0)
         except _GEOM_EXC:
             groundside_block = None
+    # BUILDING STANDOFF block (2026-07-17): a building footprint sits at
+    # its PAD altitude — often metres below the terrain the band rides
+    # (a building in a graded pit).  The exact ``static_union`` clip makes
+    # the band abut the building edge and share its corners, so the
+    # ``to_osm`` nid-weld + authority-consensus stamps the pad value onto
+    # a single band corner while its terrain neighbours stay high — a
+    # sub-metre near-vertical TEAR (CYXY building1: 705.5 pad welded into
+    # a 714.6 band edge, 9 m over 0.9 m).  A building is a DESIGNED SPLIT,
+    # not a weld partner (the same ruling ``_WELD_DONOR_ROLES`` encodes:
+    # bands never adopt a building/pad/terminal value), so the band stands
+    # 1 m off the footprint — the tunnel-ramp / groundside standoff pattern
+    # — and the pad corner never lands in a band vertex's canonical bucket.
+    # A 1 m raw-DEM groove at the building base renders harmlessly (the
+    # building occupies it).
+    _bld_polys = [s.polygon for s in layout.shapes
+                  if s.role == ROLE_BUILDING
+                  and s.polygon is not None and not s.polygon.is_empty]
+    building_block = None
+    if _bld_polys:
+        try:
+            building_block = unary_union(_bld_polys).buffer(_PAVEMENT_GAP_M)
+        except _GEOM_EXC:
+            building_block = None
     # Tunnel-ramp STANDOFF block (scope B): 1 m around the tunnel mouth
     # pieces, so a strip stands off the steep mouth-ramp floor exactly like
     # a building.  Built here (before ``_emit_apron_walls`` adds its own
@@ -2045,11 +2164,11 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
     tunnel_ramp_block = (_tunnel_ramp_standoff_block(layout)
                          if _TUNNEL_STANDOFF else None)
     static_union = None
+    _static_polys = [s.polygon for s in layout.shapes
+                     if s.polygon is not None and not s.polygon.is_empty
+                     and s.role != "groundside_pavement"]
     try:
-        static_union = unary_union(
-            [s.polygon for s in layout.shapes
-             if s.polygon is not None and not s.polygon.is_empty
-             and s.role != "groundside_pavement"])
+        static_union = unary_union(_static_polys)
     except _GEOM_EXC:
         static_union = None
     if static_union is None or static_union.is_empty:
@@ -2232,9 +2351,11 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
     # a DESIGNED split (deck cliff / wall / standoff), not a weld.
     from .layout import (ROLE_RUNWAY_CLEARANCE as _R_RWCL,
                          ROLE_TAXIWAY_CLEARANCE as _R_TWCL)
-    _WELD_DONOR_ROLES = frozenset(
-        _RUNWAY_ROLES + _TAXIWAY_ROLES + _APRON_ROLES
-        + (_R_RWCL, _R_TWCL))
+    # THE single donor-role source lives in layout.py (WELD_DONOR_ROLES,
+    # 2026-07-17) — shared with to_osm's strip-adoption consensus so the
+    # static-edge weld and the emit consensus can never disagree on who
+    # may donate a value to a soft strip.
+    from .layout import WELD_DONOR_ROLES as _WELD_DONOR_ROLES
 
     def _static_edge_weld_alt(x, y):
         if _static_ext_tree is None:
@@ -2317,6 +2438,18 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
     # second node 1.71 m below the junction's — an unmerged-node cliff
     # (CYXY 60.6971601,-135.0592654, junction #111).
     authority_value_keys: set[tuple[int, int]] = set()
+    # DONOR-GATED (2026-07-17, the WELD_DONOR_ROLES ruling applied to
+    # this registry — the third foreign-value writer alongside the
+    # static-edge weld and to_osm's strip adoption): unconditional
+    # adoption is reserved for keys registered by a WELD_DONOR_ROLES
+    # shape (runway/taxi/apron/clearance families).  A designed split
+    # (service road, building pad, terminal, groundside, bridge plate)
+    # is an authority for its OWN nodes but never donates: a band clip
+    # vertex landing on its ring corner keeps the band's lawful value —
+    # the value step renders as the designed wall (measured CYXY strip
+    # #518: service-road 709.5 spliced into a 705.7 band edge = 3.9 m
+    # over 1.3 m, collapsing to a 0-length in-ring tear at emit).
+    donor_value_keys: set[tuple[int, int]] = set()
     # EMITTED-VERTEX POSITION weld (chain identity, site-2 fix 2026-07-10):
     # a later band trimmed against an earlier band's union by the exact
     # ``difference()`` clip is cut along the earlier band's EDGE, so GEOS
@@ -2396,6 +2529,78 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
             emitted_vertex_cells.setdefault(
                 _weld_cell(vx, vy), []).append((vx, vy, va))
 
+    # PRIOR-BAND FOOTPRINT INDEX (robust deconflict, 2026-07-17): a coarse
+    # bbox-cell bucket of every band polygon emitted so far, so each new
+    # piece can subtract the FEW earlier bands it actually meets one at a
+    # time (robust) instead of trusting the giant accumulated union's
+    # ``difference`` (which GEOS silently no-ops once the union is large —
+    # the band∩band overlap source).  Keyed by 32 m cells over each band's
+    # bounding box.
+    _PRIOR_BAND_CELL_M = 32.0
+    _prior_band_index: dict[tuple[int, int], list] = {}
+
+    def _band_cells(bounds):
+        x0, y0, x1, y1 = bounds
+        cx0 = int(math.floor(x0 / _PRIOR_BAND_CELL_M))
+        cy0 = int(math.floor(y0 / _PRIOR_BAND_CELL_M))
+        cx1 = int(math.floor(x1 / _PRIOR_BAND_CELL_M))
+        cy1 = int(math.floor(y1 / _PRIOR_BAND_CELL_M))
+        for cx in range(cx0, cx1 + 1):
+            for cy in range(cy0, cy1 + 1):
+                yield (cx, cy)
+
+    def _register_prior_band(band_poly):
+        try:
+            b = band_poly.bounds
+        except _GEOM_EXC:
+            return
+        for cell in _band_cells(b):
+            _prior_band_index.setdefault(cell, []).append(band_poly)
+
+    def _nearby_prior_bands(poly):
+        try:
+            cells = set(_band_cells(poly.bounds))
+        except _GEOM_EXC:
+            return []
+        seen: set[int] = set()
+        out = []
+        for cell in cells:
+            for bp in _prior_band_index.get(cell, ()):
+                if id(bp) not in seen:
+                    seen.add(id(bp))
+                    out.append(bp)
+        return out
+
+    # STATIC-FOOTPRINT INDEX (same robustness class as the band index):
+    # ``poly.difference(static_union)`` above shares the GEOS overlay
+    # no-op failure once ``static_union`` is large, so a band can survive
+    # lapping a foreign pavement / junction by a sliver (CYXY: 0.14 m² over
+    # a service_junction).  Index the individual static footprints so the
+    # deconflict can re-subtract the few the piece actually meets (robust).
+    _static_poly_index: dict[tuple[int, int], list] = {}
+    for _sp in _static_polys:
+        if _sp is None or _sp.is_empty or _sp.geom_type != "Polygon":
+            continue
+        try:
+            for _cell in _band_cells(_sp.bounds):
+                _static_poly_index.setdefault(_cell, []).append(_sp)
+        except _GEOM_EXC:
+            continue
+
+    def _nearby_static_polys(poly):
+        try:
+            cells = set(_band_cells(poly.bounds))
+        except _GEOM_EXC:
+            return []
+        seen: set[int] = set()
+        out = []
+        for cell in cells:
+            for sp in _static_poly_index.get(cell, ()):
+                if id(sp) not in seen:
+                    seen.add(id(sp))
+                    out.append(sp)
+        return out
+
     # WELD-VALUE PRELOAD (user ruling 2026-07-09): every EXISTING shape's
     # ring vertices register their exact solved values first, so a band
     # vertex landing on a pavement / skirt / strip vertex ADOPTS that
@@ -2413,6 +2618,7 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
             continue
         na = s.node_altitudes
         s_is_authority = (s.role or "") not in _SOFT_ROLES
+        s_is_donor = (s.role or "") in _WELD_DONOR_ROLES
         for i, (vx, vy) in enumerate(existing_coords):
             if na and i < len(na) and na[i] is not None:
                 value = float(na[i])
@@ -2426,6 +2632,16 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                 # earlier soft registration.
                 vertex_value_registry[k] = value
                 authority_value_keys.add(k)
+                if s_is_donor:
+                    donor_value_keys.add(k)
+            elif (s_is_authority and s_is_donor
+                    and k not in donor_value_keys):
+                # A DONOR authority (pavement the band welds to)
+                # outranks an earlier non-donor authority at a shared
+                # seam corner — the band must adopt the pavement side
+                # of the seam, not the designed split's.
+                vertex_value_registry[k] = value
+                donor_value_keys.add(k)
             elif k not in vertex_value_registry:
                 vertex_value_registry[k] = value
 
@@ -2643,6 +2859,12 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                         # Buffered, NOT exact: strips never abut
                         # groundside (user ruling 2026-07-09).
                         poly = poly.difference(groundside_block)
+                    if (building_block is not None
+                            and not building_block.is_empty):
+                        # Buffered standoff: a strip never welds onto a
+                        # building's pad value (designed split, tear source
+                        # — see building_block).
+                        poly = poly.difference(building_block)
                     if (tunnel_ramp_block is not None
                             and not tunnel_ramp_block.is_empty):
                         # Buffered standoff (scope B): a strip stands 1 m
@@ -2668,6 +2890,35 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                         poly = poly.difference(current_shape_union)
                     if boundary is not None and not boundary.is_empty:
                         poly = poly.intersection(boundary)
+                    # ROBUST DECONFLICT (2026-07-17): the accumulated
+                    # ``previous_shapes_union`` grows into a large multipart
+                    # whose ``difference`` intermittently returns the input
+                    # UNCHANGED under GEOS overlay robustness failure — the
+                    # clip above silently no-ops and the band laps a sibling
+                    # (CYXY: 139 m² of #567 over #367, both valid, yet
+                    # ``poly.difference(prev_union)`` removed nothing while
+                    # differencing the single sibling removed it cleanly).
+                    # Re-subtract the individual EARLIER band footprints poly
+                    # actually meets (small, robust operands) so no band∩band
+                    # overlap survives regardless of the union's robustness.
+                    if not poly.is_empty and _prior_band_index:
+                        for _pb in _nearby_prior_bands(poly):
+                            try:
+                                if poly.intersects(_pb):
+                                    poly = poly.difference(_pb)
+                            except _GEOM_EXC:
+                                continue
+                            if poly.is_empty:
+                                break
+                    if not poly.is_empty and _static_poly_index:
+                        for _sp in _nearby_static_polys(poly):
+                            try:
+                                if poly.intersects(_sp):
+                                    poly = poly.difference(_sp)
+                            except _GEOM_EXC:
+                                continue
+                            if poly.is_empty:
+                                break
                     if poly.is_empty:
                         if _ADJACENT_DEBUG and raw_area:
                             b = Polygon(ring).bounds
@@ -2789,9 +3040,16 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                         # adopted step), while keeping our own value emits
                         # a deliberate wall of two separate nodes — the
                         # emitter's node-split convention, no wedge.
+                        # Unconditional adoption is DONOR-gated (see
+                        # ``donor_value_keys``): a non-donor authority
+                        # key (service road / building / terminal /
+                        # groundside corner) only welds when the values
+                        # already agree — otherwise the band keeps its
+                        # own lawful value and the step renders as the
+                        # designed wall.
                         adopted = [
                             (k in vertex_value_registry
-                             and (k in authority_value_keys
+                             and (k in donor_value_keys
                                   or abs(vertex_value_registry[k] - o)
                                   <= VERTEX_ALT_MERGE_TOL_M))
                             for k, o in zip(keys, own)]
@@ -2831,6 +3089,109 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                                     vertex_value_registry[k] = own[j]
                             elif k not in vertex_value_registry:
                                 vertex_value_registry[k] = alts[j]
+                        # TEAR HEAL (2026-07-17): collapse any sub-metre
+                        # near-vertical ring edge the clips / band cap left
+                        # — a pinch where the inner (pavement weld) row and
+                        # the outer (terrain) row come within a metre while
+                        # carrying their lawful >1 m step (the DEM-free TEAR
+                        # sentinel class; no lateral corridor slope makes
+                        # it).  Keep weld vertices (pavement seam), drop the
+                        # pinched outer / spike vertex, then rebuild simple.
+                        healed_ring, healed_alts = _heal_band_tears(
+                            piece_ring, alts, weld,
+                            0.2 * CLEARANCE_STATION_STEP_M, 1.0,
+                            wall_max=CLEARANCE_STATION_STEP_M)
+                        if healed_ring is not piece_ring:
+                            if len(healed_ring) < 3:
+                                continue
+                            try:
+                                healed_poly = Polygon(
+                                    healed_ring + [healed_ring[0]])
+                                if not healed_poly.is_valid:
+                                    healed_poly = healed_poly.buffer(0)
+                                if (healed_poly.is_empty
+                                        or healed_poly.geom_type
+                                        != "Polygon"):
+                                    continue
+                                # RE-DECONFLICT (2026-07-17): dropping a
+                                # concave pinch vertex reconnects the
+                                # ring across it, and the new closing
+                                # edge can swing INTO an earlier band /
+                                # static footprint the pre-heal clip had
+                                # already deconflicted (measured CYXY:
+                                # 0.22 m² band∩band re-minted by the
+                                # heal).  Re-subtract the few nearby
+                                # operands (robust, per-piece).
+                                _redeconflicted = False
+                                for _hp in (_nearby_prior_bands(
+                                                healed_poly)
+                                            + _nearby_static_polys(
+                                                healed_poly)):
+                                    try:
+                                        if healed_poly.intersects(_hp):
+                                            healed_poly = \
+                                                healed_poly.difference(_hp)
+                                            _redeconflicted = True
+                                    except _GEOM_EXC:
+                                        continue
+                                    if healed_poly.is_empty:
+                                        break
+                                if (healed_poly.is_empty
+                                        or healed_poly.area < 1e-6):
+                                    continue
+                                if healed_poly.geom_type != "Polygon":
+                                    _hparts = [g for g in getattr(
+                                        healed_poly, "geoms", [])
+                                        if g.geom_type == "Polygon"]
+                                    if not _hparts:
+                                        continue
+                                    healed_poly = max(
+                                        _hparts, key=lambda g: g.area)
+                            except _GEOM_EXC:
+                                continue
+                            rebuilt = _open_coords(healed_poly)
+                            if len(rebuilt) < 3:
+                                continue
+                            if _redeconflicted:
+                                # A difference() can keep the vertex
+                                # COUNT while shifting vertices (a
+                                # positional ``alts = healed_alts``
+                                # copy then misaligns — measured SPJC:
+                                # a 34.0 spike onto a 32.9 row = a
+                                # fresh 1.1 m in-band tear), and its
+                                # minted intersection vertices have no
+                                # healed partner at all.  Identity-
+                                # gated remap: an unchanged vertex
+                                # (within 1 cm) keeps its own healed
+                                # value; a minted vertex takes the
+                                # band's OWN lawful valuation.
+                                _remapped = []
+                                for _vx, _vy in rebuilt:
+                                    _bestv = None
+                                    _bestd = 1e9
+                                    for _hi, (_hx, _hy) in enumerate(
+                                            healed_ring):
+                                        _hd = math.hypot(_hx - _vx,
+                                                         _hy - _vy)
+                                        if _hd < _bestd:
+                                            _bestd = _hd
+                                            _bestv = healed_alts[_hi]
+                                    if _bestd > 0.01 or _bestv is None:
+                                        _bestv = resample_alt(
+                                            _vx, _vy, kind)[0]
+                                    _remapped.append(
+                                        round(float(_bestv), 1))
+                                alts = _remapped
+                            elif len(rebuilt) == len(healed_ring):
+                                alts = healed_alts
+                            else:
+                                # buffer(0) reshaped the ring — remap by
+                                # nearest so alts stay aligned.
+                                alts = [round(float(_nearest_alt(
+                                    healed_ring, healed_alts, vx, vy)), 1)
+                                    for vx, vy in rebuilt]
+                            piece_ring = rebuilt
+                            simple = healed_poly
                         shape = BuiltShape(
                             polygon=simple, role=ROLE_GRADED_STRIP,
                             ref=_ADJACENT_REF,
@@ -2842,6 +3203,9 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                         # so LATER bands weld their clip seams onto this
                         # corner only where the values also agree.
                         _register_emitted_vertices(piece_ring, alts)
+                        # Register the footprint for the robust per-piece
+                        # deconflict of later bands (see _prior_band_index).
+                        _register_prior_band(simple)
                         try:
                             current_shape_union = (
                                 simple if current_shape_union is None

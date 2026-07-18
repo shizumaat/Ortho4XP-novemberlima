@@ -71,14 +71,20 @@ from .layout import (
 from .pavement.vertices import _snap_polygon_vertices_to_rect_corners
 from .pavement.runways import _sample_runway_segment_elev
 from .elevation import _resample_node_altitudes_nn, _sample_dem
+from .geom_safe import min_rotated_rect
 from . import config as _CFG
 from . import dsf_road_network
 from .config import (
     IMPLIED_CROSSING_TUNNELS,
     SKIP_TUNNEL_RAMPS_NEAR_ROADS,
     TUNNEL_ADJACENT_ROAD_DIST_M,
+    TUNNEL_DEM_CUT_MIN_DROP_M,
+    TUNNEL_DEM_CUT_WINDOW_M,
     TUNNEL_FORK_THROAT,
     TUNNEL_LOW_CONNECTOR_MAX_OPEN_GAP_M,
+    TUNNEL_MOUTH_PLATE_LENGTH_M,
+    TUNNEL_MOUTH_WINDOW_M,
+    TUNNEL_ROOF_PLATE_MAX_LENGTH_M,
 )
 
 # Feature B (object-derived bridge terrain, docs/object_terrain_features_
@@ -227,6 +233,12 @@ def _carriageway_width_from_tags(highway_type: str | None,
 # The result is ALWAYS capped at the mouth-face width (never wider than
 # the object it emerges from).
 PORTAL_RAMP_SHOULDER_MARGIN_M = 2.0
+# Planning-grade headroom under TUNNEL_RAMP_MAX_GRADE for the legacy
+# tunnel ramp chains: absorbs the 0.1 m altitude rounding on short
+# quads (a 9 m segment could otherwise round up to ~4.4 % when the
+# design grade is exactly 4 %).  Shared by the walk-truncation sizing
+# and the effective-space grade clamp in ``_emit_chain``.
+TUNNEL_RAMP_GRADE_SAFETY_MARGIN = 0.005
 # A big-road highway way within this distance of the portal footprint is
 # the road the outward ramp follows; the draped/OSM centrelines the
 # corridor walks carry no tags, so the mapped width is re-associated to
@@ -358,6 +370,11 @@ HW_TUNNEL_TYPES = {
     "motorway", "trunk", "primary", "secondary",
     "tertiary", "motorway_link", "trunk_link",
     "primary_link", "residential", "service",
+    # ``unclassified`` is the standard OSM class for minor public
+    # roads (user 2026-07-17, EGGW: the airside service-road tunnel
+    # under the taxiway is ``highway=unclassified tunnel=yes`` and
+    # was invisible while ``service``/``residential`` qualified).
+    "unclassified",
 }
 # Rail tunnels qualify too (user 2026-06-12, KPHL: a combined
 # road+rail tunnel passes under the hill past the RWY 26
@@ -1254,9 +1271,10 @@ def _gather_portal_walks(
     # Collect portal data: (portal_node_id, tunnel_wid, walk_pts,
     # hw_type, apt_elev_at_portal, dem_at_far_end, is_new_candidate,
     # carriageway_width_m — from the way's own ``width=`` / ``lanes=``
-    # tags when mapped, else the per-type table).
-    portal_data: list[tuple[str, str, list[tuple[float, float]],
-                              str, float, float, bool, float]] = []
+    # tags when mapped, else the per-type table, dem_cut_detected,
+    # mouth_grade_m, bore_inward_pts, deck_reference_m — the last four
+    # feed the DEM-cut light-touch mode, see TUNNEL_DEM_CUT_MIN_DROP_M).
+    portal_data: list[tuple] = []
     # Rail tunnel lines, for the TWIN-corridor pairing below (user
     # 2026-07-04, KCLT: two parallel ``railway=rail`` tracks are one
     # double-track corridor — one wide bore, not two overlapping ones).
@@ -1472,10 +1490,174 @@ def _gather_portal_walks(
             max_drop = plan_grade * grade_ok_at
             if (far_dem - elev_low) > max_drop:
                 far_dem = elev_low + max_drop
+            # ── DEM-CUT DETECTION (user 2026-07-17, EGGW) ─────────
+            # With a lidar elevation inset the bare-earth DEM already
+            # carries the descending approach cut; when it does, the
+            # cluster emit switches to the light-touch mode (face cap
+            # + short mouth plate + roof cover, NO synthetic ramps or
+            # wall chains — user: "we don't want a tunnel ramp
+            # running around the entire parking garage").
+            #
+            # The signal is LOCAL RELIEF ACROSS THE ROAD — the trench
+            # floor on the walk versus the deck BESIDE it at the same
+            # station — never an absolute drop against ``apt_elev``:
+            # ★``_airport_elevation_at`` falls back to the DEM at the
+            # portal point when no boundary node is near (mid-field
+            # tunnels), which samples the trench floor itself and
+            # reads "no drop"; ★an absolute test against surrounding
+            # ground also false-fires on any hillside bore whose DEM
+            # legitimately has NO cut (KPHL class) and which still
+            # needs the synthetic ramp.  ``mouth_grade`` = the DEM's
+            # own road grade near the face (minimum inside the mouth
+            # window — minimum, not first-sample, because smoothing
+            # mixes the face pixels with the deck above).
+            # ``deck_reference`` = the highest cross-road sample near
+            # the portal: the grade the face cap and roof cover hold.
+            # Fields ride at the END of the portal tuple (indices
+            # 8-11) so every existing positional consumer (≤ 7) is
+            # untouched.
+            def _dem_at_local(px: float, py: float) -> float | None:
+                try:
+                    _plat, _plon = meters_to_lat_lon(px, py)
+                    _value = _sample_dem(
+                        dem, tile_lat, tile_lon, _plat, _plon)
+                except _GEOM_EXC:
+                    return None
+                return None if _value is None else float(_value)
+
+            _half_road = 0.5 * way_carriage_w
+            _mouth_min: float | None = None
+            _deck_reference: float | None = None
+            _trench_depths: list[float] = []
+            _cum2 = 0.0
+            for i in range(len(walk)):
+                if i > 0:
+                    _cum2 += math.hypot(
+                        walk[i][0] - walk[i - 1][0],
+                        walk[i][1] - walk[i - 1][1])
+                if _cum2 > TUNNEL_DEM_CUT_WINDOW_M:
+                    break
+                if i + 1 < len(walk):
+                    _sdx = walk[i + 1][0] - walk[i][0]
+                    _sdy = walk[i + 1][1] - walk[i][1]
+                else:
+                    _sdx = walk[i][0] - walk[i - 1][0]
+                    _sdy = walk[i][1] - walk[i - 1][1]
+                _slen = math.hypot(_sdx, _sdy) or 1.0
+                _perp = (-_sdy / _slen, _sdx / _slen)
+                _centre = _dem_at_local(*walk[i])
+                if _centre is None:
+                    continue
+                _side_best: float | None = None
+                for _offset in (_half_road + 6.0, _half_road + 15.0):
+                    for _sign in (+1.0, -1.0):
+                        _side = _dem_at_local(
+                            walk[i][0] + _perp[0] * _offset * _sign,
+                            walk[i][1] + _perp[1] * _offset * _sign)
+                        if _side is not None and (
+                                _side_best is None
+                                or _side > _side_best):
+                            _side_best = _side
+                if _side_best is not None:
+                    _trench_depths.append(_side_best - _centre)
+                    if _cum2 <= TUNNEL_MOUTH_WINDOW_M and (
+                            _deck_reference is None
+                            or _side_best > _deck_reference):
+                        _deck_reference = _side_best
+                if _cum2 <= TUNNEL_MOUTH_WINDOW_M and (
+                        _mouth_min is None or _centre < _mouth_min):
+                    _mouth_min = _centre
+            _median_depth: float | None = None
+            if _trench_depths:
+                _sorted_depths = sorted(_trench_depths)
+                _median_depth = _sorted_depths[
+                    len(_sorted_depths) // 2]
+            cut_detected = (
+                os.environ.get("O4_TUNNEL_DEM_CUT", "1") == "1"
+                and _median_depth is not None
+                and len(_trench_depths) >= 2
+                and _median_depth >= TUNNEL_DEM_CUT_MIN_DROP_M)
+            if os.environ.get("O4_TUNNEL_DEBUG") == "1":
+                print(f"    [tunnel-dem-probe] way {tw_id} portal "
+                      f"({walk[0][0]:.0f},{walk[0][1]:.0f}): "
+                      f"apt_elev={apt_elev:.2f} "
+                      f"median_cross_road_depth={_median_depth} "
+                      f"deck_reference={_deck_reference} "
+                      f"mouth_min={_mouth_min} "
+                      f"cut_detected={cut_detected}")
+            mouth_grade = (_mouth_min if _mouth_min is not None
+                           else apt_elev - tunnel_depth_m)
+            # Bore polyline INWARD from this portal (for the roof
+            # plates over the covered body), truncated at the bore
+            # MIDPOINT — each end covers its own half with its own
+            # local deck reference (★a full-bore plate from one end
+            # lands the PARTNER cluster's head inside this cluster's
+            # exclusion zone and silently drops it — measured EGGW
+            # v4: "inside an emitted portal's exclusion zone" at the
+            # south-west mouth) — and at the roof plate cap.
+            _inward_refs = (t_nrefs if portal_idx == 0
+                            else list(reversed(t_nrefs)))
+            _bore_pts = [nodes_m[_nref] for _nref in _inward_refs
+                         if _nref in nodes_m]
+            _bore_length = sum(
+                math.hypot(_bore_pts[i + 1][0] - _bore_pts[i][0],
+                           _bore_pts[i + 1][1] - _bore_pts[i][1])
+                for i in range(len(_bore_pts) - 1))
+            _roof_limit = min(TUNNEL_ROOF_PLATE_MAX_LENGTH_M,
+                              0.5 * _bore_length + 0.5)
+            inward_pts: list[tuple[float, float]] = []
+            _cum3 = 0.0
+            for _pt in _bore_pts:
+                if inward_pts:
+                    _segment = math.hypot(
+                        _pt[0] - inward_pts[-1][0],
+                        _pt[1] - inward_pts[-1][1])
+                    if _cum3 + _segment > _roof_limit:
+                        _fraction = ((_roof_limit - _cum3) / _segment
+                                     if _segment > 1e-9 else 0.0)
+                        inward_pts.append((
+                            inward_pts[-1][0]
+                            + (_pt[0] - inward_pts[-1][0]) * _fraction,
+                            inward_pts[-1][1]
+                            + (_pt[1] - inward_pts[-1][1]) * _fraction))
+                        break
+                    _cum3 += _segment
+                inward_pts.append(_pt)
+            # Deck grade at the INNER (pavement-side) end of the roof
+            # cover — the highest cross-bore sample there.  The roof
+            # plate GRADES from this at its inner end down to the
+            # face-local ``deck_reference`` at the mouth (user
+            # 2026-07-17: "a clean wall that grades the terrain from
+            # the taxiway flat over to the tunnel portal") — a flat
+            # plate at the face grade left a ~3 m scarp against the
+            # taxiway edge (measured EGGW v5: 154.8 plate against
+            # 157.6 pavement).
+            _inner_deck: float | None = None
+            if len(inward_pts) >= 2:
+                _idx = inward_pts[-1][0] - inward_pts[-2][0]
+                _idy = inward_pts[-1][1] - inward_pts[-2][1]
+                _ilen = math.hypot(_idx, _idy) or 1.0
+                _iperp = (-_idy / _ilen, _idx / _ilen)
+                for _offset in (_half_road + 6.0, _half_road + 15.0):
+                    for _sign in (+1.0, -1.0):
+                        _side = _dem_at_local(
+                            inward_pts[-1][0]
+                            + _iperp[0] * _offset * _sign,
+                            inward_pts[-1][1]
+                            + _iperp[1] * _offset * _sign)
+                        if _side is not None and (
+                                _inner_deck is None
+                                or _side > _inner_deck):
+                            _inner_deck = _side
             portal_data.append(
                 (portal_nid, tw_id, walk, hw,
                  float(apt_elev), float(far_dem), _is_new_cand,
-                 float(way_carriage_w)))
+                 float(way_carriage_w), bool(cut_detected),
+                 float(mouth_grade), inward_pts,
+                 (float(_deck_reference)
+                  if _deck_reference is not None else None),
+                 (float(_inner_deck)
+                  if _inner_deck is not None else None)))
     if _n_adj_skip:
         try:
             UI.vprint(1,
@@ -1578,7 +1760,8 @@ def _emit_portal_cluster(
         layout: "PavementLayout", exclusion_zones: list,
         carriageway_width_m: float, tunnel_depth_m: float,
         wall_gap_m: float, retaining_wall_width_m: float,
-        half_wall_w: float, dem_at) -> int:
+        half_wall_w: float, dem_at,
+        airside_gate_union=None) -> int:
     """Emit one portal cluster's cap + arm walls + ramp chain
     (plus fork throat / perimeter wall band when gated on).
     Appends the emitted footprints to ``exclusion_zones``.
@@ -1588,8 +1771,10 @@ def _emit_portal_cluster(
     # location.  Use the first portal's walk as the canonical
     # arm path; combine widths for divided highways.
     head = portal_data[cl[0]]
+    # Slice, never destructure whole: the portal tuple grew DEM-cut
+    # fields at indices 8-10 (2026-07-17) and may grow again.
     (portal_nid, _wid_unused, walk_pts, hw_type, apt_elev,
-     far_dem, _head_new, head_carriage_w) = head
+     far_dem, _head_new, head_carriage_w) = head[:8]
     _cl_all_new = all(portal_data[k][6] for k in cl)
     if len(walk_pts) < 2:
         return 0
@@ -1758,6 +1943,242 @@ def _emit_portal_cluster(
                c0[1] - first_dir[1] * retaining_wall_width_m)
     c1_back = (c1[0] - first_dir[0] * retaining_wall_width_m,
                c1[1] - first_dir[1] * retaining_wall_width_m)
+    # ── DEM-CUT MODE (user 2026-07-17, EGGW): the mesh already has
+    # the ramps.  When every member's walk found the approach cut
+    # already carved in the DEM (lidar bare-earth inset), synthetic
+    # ramps/walls/throat would fight the real — often steeper —
+    # lidar profile, so emit only the pieces the bare-earth model
+    # CANNOT supply: the portal face cap at airport grade (seats a
+    # portal object whose anchor sits on the face at DECK grade), a
+    # short mouth plate at the DEM's own road grade (keeps the face
+    # wall crisp instead of a Triangle smear), and flat roof plates
+    # at airport grade over the covered bore between the face and
+    # the airside pavement (a bare-earth model strips the structure
+    # above the bore, leaving an open trench that pavement grading
+    # alone does not fill).
+    if all(len(portal_data[k]) > 11 and portal_data[k][8]
+           for k in cl):
+        emitted_any = False
+        # The grade the face cap holds: the measured cross-road deck
+        # beside the trench (index 11) — never ``apt_elev``, whose
+        # mid-field fallback samples the trench floor itself.
+        deck_grade = max(
+            (portal_data[k][11] for k in cl
+             if portal_data[k][11] is not None),
+            default=apt_elev)
+        mouth_grade = min(
+            (portal_data[k][9] for k in cl
+             if portal_data[k][9] is not None),
+            default=apt_elev - tunnel_depth_m)
+        # 1) GRADED roof cover per member, emitted FIRST: a chain of
+        #    quads along each carriageway's own bore from ITS mapped
+        #    face to the airside pavement edge (upstream truncation at
+        #    the bore midpoint keeps it off the partner's half), every
+        #    corner carrying its own ABSOLUTE altitude (user
+        #    2026-07-17: per-corner values — the sloped high/low rect
+        #    encoding is 4-corner-fragile).  Corner altitudes lerp
+        #    from face-top grade to the pavement-seam deck.  Quads
+        #    share corners only with each other at equal values, so
+        #    node-bucket sharing stays value-consistent (★arbitrary
+        #    difference polygons instead LOSE per-node values to
+        #    foreign ways' buckets — measured EGGW v6).
+        roof_polygons: list = []
+        for k in cl:
+            bore_pts = portal_data[k][10]
+            if not bore_pts or len(bore_pts) < 2:
+                continue
+            face_deck = (portal_data[k][11]
+                         if portal_data[k][11] is not None
+                         else deck_grade)
+            inner_deck = (portal_data[k][12]
+                          if len(portal_data[k]) > 12
+                          and portal_data[k][12] is not None
+                          else face_deck)
+            try:
+                bore_line = LineString(bore_pts)
+                clear_line = bore_line
+                if airside_gate_union is not None:
+                    clipped = bore_line.difference(airside_gate_union)
+                    pieces = [g for g in getattr(
+                        clipped, "geoms", [clipped])
+                        if g.geom_type == "LineString"
+                        and g.length > 1.0]
+                    # Only the piece CONTAINING the face end is the
+                    # roof strip; when the pavement reaches (almost)
+                    # to the face there is nothing to cover — never
+                    # fall back to a beyond-pavement piece (★measured
+                    # EGGW v9: nearest-piece selection wandered to a
+                    # mid-body segment INSIDE the crossing and graded
+                    # quads over the taxiway).
+                    face_point = Point(bore_pts[0])
+                    containing = [g for g in pieces
+                                  if g.distance(face_point) < 1.0]
+                    if containing:
+                        clear_line = containing[0]
+                    else:
+                        continue
+            except _GEOM_EXC:
+                continue
+            clear_length = clear_line.length
+            if clear_length < 2.0:
+                continue
+            # Refine the inner deck at the strip's actual far end
+            # (the pavement seam) when the DEM offers a sample there.
+            try:
+                far_point = clear_line.interpolate(clear_length)
+                near_point = clear_line.interpolate(
+                    max(0.0, clear_length - 5.0))
+                _fdx = far_point.x - near_point.x
+                _fdy = far_point.y - near_point.y
+                _flen = math.hypot(_fdx, _fdy) or 1.0
+                _fperp = (-_fdy / _flen, _fdx / _flen)
+                half_member = 0.5 * portal_data[k][7]
+                for _offset in (half_member + 6.0, half_member + 15.0):
+                    for _sign in (+1.0, -1.0):
+                        _side = dem_at(
+                            far_point.x + _fperp[0] * _offset * _sign,
+                            far_point.y + _fperp[1] * _offset * _sign)
+                        if _side is not None and _side > inner_deck:
+                            inner_deck = float(_side)
+            except _GEOM_EXC:
+                pass
+            half_roof = 0.5 * portal_data[k][7] + wall_gap_m
+            target_quad_m = 12.0
+            quad_count = max(1, math.ceil(clear_length / target_quad_m))
+            for quad_index in range(quad_count):
+                s_low = clear_length * quad_index / quad_count
+                s_high = clear_length * (quad_index + 1) / quad_count
+                try:
+                    p_low = clear_line.interpolate(s_low)
+                    p_high = clear_line.interpolate(s_high)
+                except _GEOM_EXC:
+                    continue
+                _qdx = p_high.x - p_low.x
+                _qdy = p_high.y - p_low.y
+                _qlen = math.hypot(_qdx, _qdy)
+                if _qlen < 0.5:
+                    continue
+                _qperp = (-_qdy / _qlen, _qdx / _qlen)
+                elevation_low = round(
+                    face_deck + (inner_deck - face_deck)
+                    * (s_low / clear_length), 2)
+                elevation_high = round(
+                    face_deck + (inner_deck - face_deck)
+                    * (s_high / clear_length), 2)
+                corners = [
+                    (p_high.x + _qperp[0] * half_roof,
+                     p_high.y + _qperp[1] * half_roof),
+                    (p_low.x + _qperp[0] * half_roof,
+                     p_low.y + _qperp[1] * half_roof),
+                    (p_low.x - _qperp[0] * half_roof,
+                     p_low.y - _qperp[1] * half_roof),
+                    (p_high.x - _qperp[0] * half_roof,
+                     p_high.y - _qperp[1] * half_roof),
+                ]
+                try:
+                    quad = Polygon(corners)
+                    if not quad.is_valid or quad.is_empty \
+                            or quad.area < 2.0:
+                        continue
+                except _GEOM_EXC:
+                    continue
+                # 4-corner high/low encoding (corners 0,3 = high /
+                # 1,2 = low).  ★Per-corner ``node_altitudes`` on
+                # these post-solve quads measurably LOSES most values
+                # between emission and the written patch (EGGW v9:
+                # ways shipped with alt_abs on 2 of 6 nodes and the
+                # strip collapsed toward the trench) — mechanism not
+                # yet root-caused; until it is, the high/low pair is
+                # the encoding that demonstrably reaches the mesh.
+                if abs(elevation_high - elevation_low) >= 0.1:
+                    layout.shapes.append(BuiltShape(
+                        polygon=quad,
+                        role=ROLE_RETAINING_WALL,
+                        ref="tunnel_roof",
+                        altitude_high=elevation_high,
+                        altitude_low=elevation_low))
+                else:
+                    layout.shapes.append(BuiltShape(
+                        polygon=quad,
+                        role=ROLE_RETAINING_WALL,
+                        ref="tunnel_roof",
+                        altitude=round(0.5 * (
+                            elevation_high + elevation_low), 2)))
+                roof_polygons.append(quad)
+                exclusion_zones.append(quad)
+                emitted_any = True
+        try:
+            roof_union = (unary_union(roof_polygons)
+                          if roof_polygons else None)
+        except _GEOM_EXC:
+            roof_union = None
+        # 2) Face cap: a flat bar at the deck grade across the
+        #    combined carriageways at the cluster face line.  Overlap
+        #    with the roof cover is at the SAME grade — benign.
+        try:
+            cap_poly = Polygon([c0, c1, c1_back, c0_back])
+            if not cap_poly.is_valid:
+                cap_poly = cap_poly.buffer(0)
+            if (cap_poly.geom_type == "Polygon"
+                    and not cap_poly.is_empty):
+                layout.shapes.append(BuiltShape(
+                    polygon=cap_poly,
+                    role=ROLE_RETAINING_WALL,
+                    ref="tunnel_cap",
+                    altitude=round(deck_grade, 1)))
+                exclusion_zones.append(cap_poly)
+                emitted_any = True
+        except _GEOM_EXC:
+            pass
+        # 3) Mouth plate at the DEM's own road grade, MINUS the roof
+        #    cover: with staggered twin-carriageway mapped ends the
+        #    cluster-wide rect crosses the more-recessed member's
+        #    bore, where the roof (real structure at deck grade) must
+        #    win (measured EGGW v7: 28.7 m² of road-grade plate under
+        #    the partner's roof).  A flat plate tolerates any ring
+        #    shape, so the difference result ships as-is.
+        try:
+            _mouth_near = wall_gap_m
+            _mouth_far = wall_gap_m + TUNNEL_MOUTH_PLATE_LENGTH_M
+            _mc = cap_centre
+            _m0 = (_mc[0] + first_dir[0] * _mouth_near,
+                   _mc[1] + first_dir[1] * _mouth_near)
+            _m1 = (_mc[0] + first_dir[0] * _mouth_far,
+                   _mc[1] + first_dir[1] * _mouth_far)
+            mouth_geometry = Polygon([
+                (_m0[0] + first_perp[0] * combined_half,
+                 _m0[1] + first_perp[1] * combined_half),
+                (_m1[0] + first_perp[0] * combined_half,
+                 _m1[1] + first_perp[1] * combined_half),
+                (_m1[0] - first_perp[0] * combined_half,
+                 _m1[1] - first_perp[1] * combined_half),
+                (_m0[0] - first_perp[0] * combined_half,
+                 _m0[1] - first_perp[1] * combined_half),
+            ])
+            if not mouth_geometry.is_valid:
+                mouth_geometry = mouth_geometry.buffer(0)
+            if roof_union is not None and not mouth_geometry.is_empty:
+                mouth_geometry = mouth_geometry.difference(roof_union)
+            for part in getattr(
+                    mouth_geometry, "geoms", [mouth_geometry]):
+                if (part.geom_type != "Polygon" or part.is_empty
+                        or part.area < 1.0):
+                    continue
+                layout.shapes.append(BuiltShape(
+                    polygon=part,
+                    role=ROLE_TUNNEL_RAMP,
+                    ref="tunnel_mouth",
+                    altitude=round(mouth_grade, 2)))
+                exclusion_zones.append(part)
+                emitted_any = True
+        except _GEOM_EXC:
+            pass
+        if os.environ.get("O4_TUNNEL_DEBUG") == "1":
+            print(f"    [tunnel-dem-cut] cluster at "
+                  f"({walk_pts[0][0]:.0f},{walk_pts[0][1]:.0f}): "
+                  f"cap+roof@{deck_grade:.1f}, mouth@{mouth_grade:.1f}, "
+                  f"no synthetic ramps (DEM cut present)")
+        return 1 if emitted_any else 0
     # Gate ON folds the cap into the continuous perimeter wall band
     # (which wraps the portal end too); gate OFF keeps the separate
     # flat cap.
@@ -1893,6 +2314,26 @@ def _emit_portal_cluster(
         effective_total = effective_cums[-1]
         if effective_total < 1.0:
             return
+        # EFFECTIVE-SPACE GRADE CLAMP (2026-07-17, SPJC #499/#500/#502):
+        # the walk TRUNCATION sizes the chain on CENTERLINE length
+        # (drop / plan_grade), but elevations lerp over the EFFECTIVE
+        # (min-edge) length — on a curving chain the miter-shortened
+        # edges shrink Σeffective 15-20 % below the centerline sum, so
+        # every quad edge realized drop/Σeffective = plan × (Σcenter /
+        # Σeffective) = 4.13-4.21 % against the 4 % ramp law (the
+        # 0.5 pp safety margin only covers rounding).  Clamp the
+        # chain-top elevation so the effective-space grade never
+        # exceeds the plan grade; the ramp top then sits slightly
+        # below the outside DEM — the same accepted "subtle terrain
+        # dip" trade the walk gatherer already makes when the roadway
+        # is too short (its far_dem cap).
+        if e_hi_c > e_lo_c:
+            plan_grade_local = max(
+                float(_CFG.TUNNEL_RAMP_MAX_GRADE)
+                - TUNNEL_RAMP_GRADE_SAFETY_MARGIN, 1e-3)
+            maximum_effective_drop = plan_grade_local * effective_total
+            if (e_hi_c - e_lo_c) > maximum_effective_drop:
+                e_hi_c = e_lo_c + maximum_effective_drop
 
         for i in range(n_c - 1):
             p_a = chain_pts[i]
@@ -3127,8 +3568,8 @@ def _emit_tunnel_portals(
     # 0.005 to leave headroom for the 0.1 m altitude rounding —
     # without it, short segments (e.g. 9 m) could round up to
     # ~4.4 % when the design grade is exactly 4 %.
-    grade_safety_margin = 0.005
-    plan_grade = max(max_ramp_grade - grade_safety_margin, 1e-3)
+    plan_grade = max(
+        max_ramp_grade - TUNNEL_RAMP_GRADE_SAFETY_MARGIN, 1e-3)
     # A surface gap between two bores shorter than a full down+up ramp
     # pair cannot reach DEM and return — the bores MERGE across it (the
     # road stays below grade the whole way), so this threshold stays
@@ -3318,7 +3759,8 @@ def _emit_tunnel_portals(
         n_emitted += _emit_portal_cluster(
             cl, portal_data, nodes_m, layout, exclusion_zones,
             carriageway_width_m, tunnel_depth_m, wall_gap_m,
-            retaining_wall_width_m, half_wall_w, _dem_at)
+            retaining_wall_width_m, half_wall_w, _dem_at,
+            airside_gate_union=_airside_gate_u)
     _emit_low_corridor_connectors(
         layout, _low_corridors, exclusion_zones,
         _airside_gate_u, _airport_elevation_at, _dem_at,
@@ -3918,6 +4360,77 @@ def _bridge_is_road_carried(bridge, layout, to_meters):
     return True
 
 
+def _ambiguous_span_promoted_by_routes(bridge, layout, to_meters):
+    """Dead-band AMBIGUOUS rescue (user 2026-07-17, KBNA Taxiway-L).
+
+    The contract classifier's coverage dead band exists because partial
+    mid-deck pavement coverage cannot say whether pavement drapes across
+    (terrain-carried) or is cut at the abutments (deck-carried).  The
+    KBNA border-line pavement feature (2026-07-16) pushed Taxiway-L's
+    mid-deck coverage from ~0 to 0.20 — its wide ``.lin`` taxiway
+    border runs across the deck — flipping the span from DECK_CARRIED
+    to AMBIGUOUS and silently refusing the whole corridor treatment
+    (trench, causeway, pins, approaches: the user-visible "underpass
+    trench missing").
+
+    The apt.dat ROUTING GRAPH is the truth about what drives over a
+    deck (the ``_bridge_is_road_carried`` doctrine, tiers 1+2: raw
+    1202/1206 routing rows, then qualified centerlines — NEVER the
+    pavement-proximity tier, because nearby draped pavement is exactly
+    what created the ambiguity).  A dead-band AMBIGUOUS span with a
+    genuine hard deck and a taxi/truck route crossing it is a taxi
+    bridge: promote to the corridor set.  High-coverage AMBIGUOUS
+    (the flat-deck-with-draped-pavement contradiction) stays refused
+    per ruling R5.
+    """
+    from .object_terrain_features import (
+        BRIDGE_CONTRACT_PAVEMENT_COVERAGE_DECK_CARRIED_MAX,
+        BRIDGE_CONTRACT_PAVEMENT_COVERAGE_TERRAIN_CARRIED_MIN,
+        CONTRACT_EVIDENCE_PAVEMENT_COVERAGE,
+        DECK_HARDNESS_HARD_DECK,
+    )
+    if layout is None or to_meters is None:
+        return False
+    if bridge.deck_hardness != DECK_HARDNESS_HARD_DECK:
+        return False
+    if bridge.contract_evidence != CONTRACT_EVIDENCE_PAVEMENT_COVERAGE:
+        return False
+    coverage = bridge.pavement_coverage_fraction
+    if coverage is None:
+        return False
+    if not (BRIDGE_CONTRACT_PAVEMENT_COVERAGE_DECK_CARRIED_MAX
+            < float(coverage)
+            < BRIDGE_CONTRACT_PAVEMENT_COVERAGE_TERRAIN_CARRIED_MIN):
+        return False
+    footprint = _bridge_footprint_meters(bridge, to_meters)
+    if footprint is None:
+        return False
+    try:
+        reach_band = footprint.buffer(
+            float(_CFG.BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M))
+    except _GEOM_EXC:
+        return False
+    for line in getattr(
+            layout, _OBJECT_BRIDGE_ROUTE_LINES_ATTRIBUTE, None) or []:
+        if line is None or line.is_empty:
+            continue
+        try:
+            if line.intersects(reach_band):
+                return True
+        except _GEOM_EXC:
+            continue
+    for centerline in getattr(layout, "apt_taxi_centerlines", None) or []:
+        line = getattr(centerline, "line", None)
+        if line is None or line.is_empty:
+            continue
+        try:
+            if line.intersects(reach_band):
+                return True
+        except _GEOM_EXC:
+            continue
+    return False
+
+
 def _detect_tunnel_portal_pairs(layout, dem, tile_lat, tile_lon):
     """Pair classified structures that are the two PORTALS of one buried
     tunnel (user ruling 2026-07-10, the KBNA runway-02C class) and cache
@@ -3969,7 +4482,46 @@ def _detect_tunnel_portal_pairs(layout, dem, tile_lat, tile_lon):
         if footprint is None:
             continue
         candidates.append((bridge, footprint))
-    if len(candidates) < 2:
+    # Portal-FACE candidates (user 2026-07-17, EGGW class): bare soft
+    # face quads hanging below grade, recognized by the classifier as
+    # ``portal_faces``.  They pair only with EACH OTHER (a face and a
+    # cosmetic deck are different physical modelling conventions), and
+    # only where OpenStreetMap does NOT map the bore — a mapped
+    # ``tunnel=yes`` way between the faces means the OSM machinery
+    # (which knows the true road alignment and its DEM cut) owns the
+    # crossing, and the faces are corroboration, not a second emitter.
+    face_candidates = []
+    _mapped_tunnel_lines_m: list = []
+    for face in getattr(classification, "portal_faces", None) or []:
+        try:
+            ring = [
+                to_meters(lon, lat) for lon, lat in
+                face.face_polygon_longitude_latitude.exterior.coords]
+            footprint = Polygon(ring)
+            if not footprint.is_valid:
+                footprint = footprint.buffer(0)
+            if footprint.geom_type != "Polygon" or footprint.is_empty:
+                continue
+        except _GEOM_EXC:
+            continue
+        face_candidates.append((face, footprint))
+    if face_candidates:
+        try:
+            nodes_r, ways_r, _big_ids, _ntags = (
+                _load_tunnel_road_network(layout))
+            for _wid, _nrefs, _tags in ways_r:
+                if _tags.get("tunnel") not in TUNNEL_VALUES:
+                    continue
+                _pts = []
+                for _nref in _nrefs:
+                    if _nref in nodes_r:
+                        _lat, _lon = nodes_r[_nref]
+                        _pts.append(to_meters(_lon, _lat))
+                if len(_pts) >= 2:
+                    _mapped_tunnel_lines_m.append(LineString(_pts))
+        except _GEOM_EXC:
+            _mapped_tunnel_lines_m = []
+    if len(candidates) < 2 and len(face_candidates) < 2:
         return pairs
 
     def _dem_at_meters(x, y):
@@ -4003,12 +4555,17 @@ def _detect_tunnel_portal_pairs(layout, dem, tile_lat, tile_lon):
             distance += 5.0
         return min(samples) if samples else None
 
+    all_candidates = (
+        [(bridge, footprint, False) for bridge, footprint in candidates]
+        + [(face, footprint, True) for face, footprint in face_candidates])
     used: set[int] = set()
-    for i, (bridge_i, footprint_i) in enumerate(candidates):
+    for i, (bridge_i, footprint_i, is_face_i) in enumerate(all_candidates):
         if id(bridge_i) in used:
             continue
-        for bridge_j, footprint_j in candidates[i + 1:]:
+        for bridge_j, footprint_j, is_face_j in all_candidates[i + 1:]:
             if id(bridge_j) in used:
+                continue
+            if is_face_i != is_face_j:
                 continue
             centroid_i = footprint_i.centroid
             centroid_j = footprint_j.centroid
@@ -4022,17 +4579,45 @@ def _detect_tunnel_portal_pairs(layout, dem, tile_lat, tile_lon):
             segment_bearing = math.degrees(math.atan2(east, north)) % 180.0
             tolerance = float(
                 _CFG.TUNNEL_PORTAL_PAIR_HEADING_TOLERANCE_DEGREES)
-            aligned = True
-            for bridge in (bridge_i, bridge_j):
-                heading = float(bridge.heading_degrees or 0.0) % 180.0
-                delta = abs(heading - segment_bearing)
-                if delta > 90.0:
-                    delta = 180.0 - delta
-                if delta > tolerance:
-                    aligned = False
-                    break
-            if not aligned:
-                continue
+            if is_face_i:
+                # Face pairs: a portal face parallels the STRUCTURE it
+                # passes under, not the road's perpendicular (EGGW: the
+                # taxiway crosses the road at ~58°), so test (a) the
+                # two faces are mutually parallel — two ends of one
+                # structure — and (b) the connecting segment genuinely
+                # CROSSES the faces (never runs along them: side-by-
+                # side faces of neighbouring structures fail here).
+                line_i = float(getattr(
+                    bridge_i, "face_line_bearing_degrees", 0.0)) % 180.0
+                line_j = float(getattr(
+                    bridge_j, "face_line_bearing_degrees", 0.0)) % 180.0
+                parallel_delta = abs(line_i - line_j)
+                if parallel_delta > 90.0:
+                    parallel_delta = 180.0 - parallel_delta
+                # Mean face line, wraparound-safe (5° and 175° must
+                # average near 0, not 90).
+                adjusted_j = line_j
+                if abs(line_j - line_i) > 90.0:
+                    adjusted_j += 180.0 if line_j < line_i else -180.0
+                mean_line = (0.5 * (line_i + adjusted_j)) % 180.0
+                crossing_delta = abs(segment_bearing - mean_line)
+                if crossing_delta > 90.0:
+                    crossing_delta = 180.0 - crossing_delta
+                if parallel_delta > tolerance \
+                        or crossing_delta < tolerance:
+                    continue
+            else:
+                aligned = True
+                for bridge in (bridge_i, bridge_j):
+                    heading = float(bridge.heading_degrees or 0.0) % 180.0
+                    delta = abs(heading - segment_bearing)
+                    if delta > 90.0:
+                        delta = 180.0 - delta
+                    if delta > tolerance:
+                        aligned = False
+                        break
+                if not aligned:
+                    continue
             unit_x = east / spacing
             unit_y = north / spacing
             mouth_i = _mouth_floor(footprint_i, -unit_x, -unit_y)
@@ -4092,6 +4677,31 @@ def _detect_tunnel_portal_pairs(layout, dem, tile_lat, tile_lon):
                     + float(_CFG.TUNNEL_PORTAL_PAIR_BURIED_MARGIN_M))
             if not buried:
                 continue
+            if is_face_i and _mapped_tunnel_lines_m:
+                # OSM owns a mapped bore between the faces: the tunnel
+                # machinery (true road alignment + DEM cut) emits the
+                # crossing; the face pair is corroboration only.
+                try:
+                    connecting = LineString([
+                        (centroid_i.x, centroid_i.y),
+                        (centroid_j.x, centroid_j.y),
+                    ]).buffer(20.0)
+                    if any(line.intersects(connecting)
+                           for line in _mapped_tunnel_lines_m):
+                        used.add(id(bridge_i))
+                        used.add(id(bridge_j))
+                        UI.vprint(
+                            1,
+                            "   [object-tunnel] portal-face pair "
+                            f"({spacing:.0f} m apart) corroborates a "
+                            "MAPPED OSM tunnel — OSM machinery owns "
+                            "the crossing: "
+                            f"{bridge_i.object_resources} + "
+                            f"{bridge_j.object_resources}",
+                        )
+                        break
+                except _GEOM_EXC:
+                    pass
             pairs.append({
                 "portals": (
                     {"bridge": bridge_i, "footprint": footprint_i,
@@ -4102,6 +4712,7 @@ def _detect_tunnel_portal_pairs(layout, dem, tile_lat, tile_lon):
                      "mouth_floor_m": mouth_j},
                 ),
                 "spacing_m": spacing,
+                "is_face": bool(is_face_i),
             })
             used.add(id(bridge_i))
             used.add(id(bridge_j))
@@ -4189,7 +4800,18 @@ def _partition_bridges_for_corridors(classification, layout=None):
         elif bridge.contract in (TERRAIN_CARRIED, PROFILE_CARRIED):
             suppress.append(bridge)
         elif bridge.contract == AMBIGUOUS:
-            refused.append(bridge)
+            if _ambiguous_span_promoted_by_routes(
+                    bridge, layout, to_meters):
+                corridor.append(bridge)
+                UI.vprint(
+                    1,
+                    "   [object-bridge] dead-band AMBIGUOUS span "
+                    "promoted to corridor (taxi/truck route crosses "
+                    "the hard deck; partial coverage is draped "
+                    f"decoration): {bridge.object_resources}",
+                )
+            else:
+                refused.append(bridge)
     return corridor, suppress, refused, road_carried, tunnel_portals
 
 
@@ -4822,7 +5444,7 @@ def _emit_object_sourced_bridge_corridors(
         try:
             deck_box = _bridge_deck_box_meters(bridge, layout)
             if deck_box is not None and not deck_box.is_empty:
-                rotated_rectangle = deck_box.minimum_rotated_rectangle
+                rotated_rectangle = min_rotated_rect(deck_box)
                 corners = list(rotated_rectangle.exterior.coords)
                 if len(corners) >= 3:
                     edge_a = math.hypot(
@@ -5133,7 +5755,7 @@ def _corridor_plate_exit_edge(layout, footprint, start_xy, half_width):
         return None
     try:
         rectangle_corners = list(
-            plate.minimum_rotated_rectangle.exterior.coords)[:4]
+            min_rotated_rect(plate).exterior.coords)[:4]
     except _GEOM_EXC:
         return None
     if len(rectangle_corners) < 4:
@@ -5593,6 +6215,50 @@ def _record_pin(layout, x, y, value):
         pin_values = {}
         setattr(layout, "_object_bridge_pin_values", pin_values)
     pin_values[vertex_bucket(float(x), float(y))] = float(value)
+
+
+def born_flat_solver_plate(layout, polygon, role, ref, elevation,
+                           record_pins: bool = True) -> int:
+    """Append a densified flat plate (≈5 m vertex spacing) with per-vertex
+    ``node_altitudes`` at ``elevation``; when ``record_pins`` is true (the
+    default) also register EVERY ring vertex as a hard solver pin
+    (``_record_pin`` → ``layout._object_bridge_pin_values``).
+
+    THE shared birth primitive for object-derived terrain plates (ruling
+    R12).  With ``record_pins`` the plate is a FIRST-CLASS solver graph
+    member (its role is in the solver's PAVEMENT_ROLES): ``_seed_elevations``
+    pins it exactly like a deck-end pin and protects it via the seam-pin
+    index, the solve grades the neighbouring pavement to meet it, the
+    writeback is the identity, and ``to_osm`` ships it per-node ``alt_abs``.
+    Feature B's bridge trench and causeway birth this way.
+
+    Feature A's tunnel trench passes ``record_pins=False``: it is
+    OFF-PAVEMENT terrain (the airside pavement is subtracted from the body
+    before birth, ruling R2), so it must NOT pin — and its role is NOT in
+    PAVEMENT_ROLES — leaving it out of the pavement solve entirely.  It
+    still ships per-node ``alt_abs`` (the flat-by-law encoding the mesh step
+    consumes) and wins the LAW-tier weld at any shared vertex.  Returns the
+    ring vertex count (0 on degenerate input)."""
+    if (polygon is None or polygon.is_empty
+            or polygon.geom_type != "Polygon"):
+        return 0
+    try:
+        dense = polygon.segmentize(5.0)
+    except (AttributeError, _GEOM_EXC):
+        dense = polygon
+    ring = list(dense.exterior.coords)
+    if len(ring) < 4:
+        return 0
+    vertex_count = len(ring) - 1 if ring[0] == ring[-1] else len(ring)
+    if record_pins:
+        for x, y in ring[:vertex_count]:
+            _record_pin(layout, x, y, elevation)
+    layout.shapes.append(BuiltShape(
+        polygon=dense,
+        role=role,
+        ref=ref,
+        node_altitudes=[round(float(elevation), 2)] * (vertex_count + 1)))
+    return vertex_count
 
 
 def _pin_shape_vertices_on_line(layout, shape_index, line, pin_value,
@@ -6155,32 +6821,9 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             return None
 
     def _born_flat(polygon, role, ref, elevation):
-        """Append a densified flat plate with per-vertex law values.
-
-        User directive (round 8): the plate is a FIRST-CLASS SOLVER
-        GRAPH MEMBER — its role is in the solver's PAVEMENT_ROLES, and
-        EVERY ring vertex is registered as a hard pin at the law value
-        (``_record_pin`` → ``layout._object_bridge_pin_values``), so
-        ``_seed_elevations`` pins it exactly like a deck-end pin and
-        protects it via the seam-pin index; the solve grades the
-        neighbouring pavement to meet it, the writeback is the
-        identity, and to_osm ships it per-node ``alt_abs`` (the one
-        encoding the mesh step demonstrably consumes)."""
-        try:
-            dense = polygon.segmentize(5.0)
-        except (AttributeError, _GEOM_EXC):
-            dense = polygon
-        ring = list(dense.exterior.coords)
-        vertex_count = len(ring) - 1 if ring[0] == ring[-1] else len(ring)
-        for x, y in ring[:vertex_count]:
-            _record_pin(layout, x, y, elevation)
-        layout.shapes.append(BuiltShape(
-            polygon=dense,
-            role=role,
-            ref=ref,
-            node_altitudes=[round(float(elevation), 2)]
-            * (vertex_count + 1)))
-        return vertex_count
+        """Bind :func:`born_flat_solver_plate` to this layout (the shared
+        R12 flat-plate birth primitive; see its docstring)."""
+        return born_flat_solver_plate(layout, polygon, role, ref, elevation)
 
     def _born_graded(polygon, role, ref, altitude_at):
         """Like :func:`_born_flat`, but every ring vertex takes its OWN
@@ -6293,6 +6936,13 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             # ROAD-GRADE plate must COVER the anchor point, or the
             # object seats on whatever solves beside it (a crown plate
             # under the anchor would LIFT the object by the deck top).
+            # INVERTED for a portal-FACE pair (user 2026-07-17, EGGW
+            # class): the face geometry HANGS BELOW its origin, so the
+            # anchor must read DECK grade (the crown) — seating it on
+            # the road-grade mouth would sink the whole face by the
+            # face height.
+            _face_seated = bool(pair.get("is_face")) or bool(
+                getattr(portal["bridge"], "face_hangs_below", False))
             try:
                 anchor_longitude, anchor_latitude = (
                     portal["bridge"].anchor_longitude_latitude
@@ -6300,7 +6950,30 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                 anchor_point = Point(
                     to_meters(anchor_longitude, anchor_latitude)
                 )
-                if (not mouth_geometry.covers(anchor_point)
+                if _face_seated:
+                    if footprint.distance(anchor_point) <= 30.0:
+                        anchor_disk = anchor_point.buffer(5.0)
+                        mouth_geometry = mouth_geometry.difference(
+                            anchor_disk)
+                        if mouth_geometry.geom_type != "Polygon":
+                            mouth_geometry = max(
+                                (part for part in getattr(
+                                    mouth_geometry, "geoms", [])
+                                 if part.geom_type == "Polygon"),
+                                key=lambda part: part.area,
+                                default=None)
+                        if crown_geometry is not None:
+                            crown_geometry = unary_union(
+                                [crown_geometry, anchor_disk])
+                            if crown_geometry.geom_type != "Polygon":
+                                crown_geometry = (
+                                    crown_geometry.convex_hull)
+                        else:
+                            crown_geometry = anchor_disk
+                        if mouth_geometry is None \
+                                or mouth_geometry.is_empty:
+                            mouth_geometry = None
+                elif (not mouth_geometry.covers(anchor_point)
                         and footprint.distance(anchor_point) <= 30.0):
                     anchor_disk = anchor_point.buffer(5.0)
                     mouth_geometry = unary_union(
@@ -6324,12 +6997,18 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                             crown_geometry = None
             except (_GEOM_EXC, KeyError, TypeError):
                 pass
-            try:
-                vertex_count = _born_flat(
-                    mouth_geometry, ROLE_BRIDGE_TRENCH,
-                    "object_tunnel_portal_mouth", mouth_floor)
-            except _GEOM_EXC:
-                continue
+            if mouth_geometry is None or mouth_geometry.is_empty:
+                # Face-seated portal whose whole footprint became the
+                # crown (thin face footprints): road grade continues in
+                # the outward corridor; only the crown seat is emitted.
+                vertex_count = 0
+            else:
+                try:
+                    vertex_count = _born_flat(
+                        mouth_geometry, ROLE_BRIDGE_TRENCH,
+                        "object_tunnel_portal_mouth", mouth_floor)
+                except _GEOM_EXC:
+                    continue
             n_trench += 1
             UI.vprint(
                 1,
@@ -6413,11 +7092,26 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                 float(crown_target) if crown_target is not None
                 else (sum(disk_samples) / len(disk_samples)
                       if disk_samples else None))
+            # USER RULING 2026-07-17 — the OBJECT is the terrain
+            # authority: its flat roof plane (``mouth_floor +
+            # deck_top`` — the cosmetic classifier's dominant elevated
+            # plane, parapet caps excluded by area) is the divider
+            # between the below-grade road and the at-grade back
+            # terrain, so the crown seats NO LOWER than that plane.
+            # The DEM stays as an UPWARD override only (a hillside
+            # portal buried deeper keeps the higher terrain).  The
+            # former DEM-target seating left the Murfreesboro west
+            # crown at 171.2 where the object roof is 176.8 — the
+            # portal-mouth backside stood exposed toward the runway.
+            # (The 2026-07-14c "DEM, not mouth+deck_top" correction
+            # predates the mouth-floor fix; with today's mouth floors
+            # the roof plane no longer overshoots real ground.)
+            object_roof_elevation = mouth_floor + deck_top_metres
             if crown_ground is not None:
-                crown_elevation = min(
-                    max(crown_ground, mouth_floor - 8.0),
-                    mouth_floor + deck_top_metres,
-                )
+                crown_elevation = max(
+                    float(crown_ground), object_roof_elevation)
+            else:
+                crown_elevation = object_roof_elevation
             crown_centroid_lat, crown_centroid_lon = _meters_to_lat_lon(
                 crown_centroid.x, crown_centroid.y)
             UI.vprint(
@@ -6436,6 +7130,26 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                     "object_tunnel_portal_crown", crown_elevation)
             except _GEOM_EXC:
                 continue
+            # Portal terrain record (user ruling 2026-07-17): the
+            # post-solve raise pass (``raise_portal_terrain_to_airside``,
+            # called from finalize) lifts crown + collar to the
+            # surrounding SOLVED airside level — capture the shape
+            # references and blend parameters it needs.  Collar fields
+            # are filled in below once computed; a ``continue`` before
+            # then leaves a crown-only record, which the raise pass
+            # handles.
+            if not hasattr(layout, "portal_terrain_records"):
+                layout.portal_terrain_records = []
+            portal_terrain_record = {
+                "crown_shape": layout.shapes[-1],
+                "crown_geometry": crown_geometry,
+                "crown_elevation": crown_elevation,
+                "mouth_floor": mouth_floor,
+                "collar_reach": float(_CFG.TUNNEL_PORTAL_CROWN_COLLAR_M),
+                "collar_shapes": [],
+                "mouth_geometry": None,
+            }
+            layout.portal_terrain_records.append(portal_terrain_record)
             n_trench += 1
             UI.vprint(
                 1,
@@ -6657,6 +7371,27 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             face_half_width = (
                 (max(_face_lateral) - min(_face_lateral)) / 2.0
                 if _face_lateral else 0.0)
+            # Buried depth of the crown along the outward axis — bounds
+            # the mouth-side VALUE-ceiling zone below, so on a shallow
+            # portal the object-hidden back-face meeting stays at the
+            # crown (the ceiling zone never reaches it).
+            crown_depth_m = 0.0
+            try:
+                _crown_projections = [
+                    (vertex_x * outward_vector[0]
+                     + vertex_y * outward_vector[1])
+                    for vertex_x, vertex_y
+                    in crown_geometry.exterior.coords]
+                crown_depth_m = (max(_crown_projections)
+                                 - min(_crown_projections))
+            except _GEOM_EXC:
+                crown_depth_m = 0.0
+            # Complete the portal terrain record for the post-solve
+            # airside raise (its mouth feather guard reuses the same
+            # mouth plate geometry so the raise never rebuilds the
+            # road-side cliff the feather removed).
+            portal_terrain_record["mouth_geometry"] = plain_mouth_geometry
+            portal_terrain_record["crown_depth_m"] = crown_depth_m
 
             def _collar_alt(vertex_x, vertex_y,
                             _crown=crown_for_collar,
@@ -6665,9 +7400,7 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                             _ground_behind=ground_behind,
                             _reach=crown_reach,
                             _mouth_geometry=plain_mouth_geometry,
-                            _face_centroid=face_centroid,
-                            _face_perpendicular=face_perpendicular,
-                            _face_half_width=face_half_width):
+                            _crown_depth=crown_depth_m):
                 # The outer target is the ground the abutting
                 # adjacent_ground band will drop to — NOT the smoothed
                 # DEM AT the vertex.  Ortho4XP's airport-smoothed tile
@@ -6722,49 +7455,78 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                     max(float(ground_here), _mouth_floor - 12.0),
                     _crown_elevation,
                 )
-                # Fact 4 flank transition: a vertex laterally BEYOND the
-                # object's facade-hidden span that abuts the low mouth
-                # plate feathers its outer target down to the mouth floor
-                # (nearest the plate) and back up to the ground target
-                # (one reach away) — so the exposed flank steps onto the
-                # mouth by at most the per-reach grade, never a cliff.
-                # Vertices within the object span, or far from the mouth
-                # plate, are untouched (the object hides the former; the
-                # ground target already governs the latter).
-                lateral = (
-                    (vertex_x - _face_centroid.x) * _face_perpendicular[0]
-                    + (vertex_y - _face_centroid.y) * _face_perpendicular[1])
-                if abs(lateral) > _face_half_width + 1.0:
-                    try:
-                        distance_to_mouth = _mouth_geometry.distance(
-                            Point(vertex_x, vertex_y))
-                    except (_GEOM_EXC, AttributeError):
-                        distance_to_mouth = _reach
-                    if distance_to_mouth < _reach:
-                        mouth_blend = max(
-                            0.0, min(1.0, distance_to_mouth / _reach))
-                        outer_target = min(
-                            outer_target,
-                            (1.0 - mouth_blend) * _mouth_floor
-                            + mouth_blend * outer_target)
+                # Mouth transition — DISTANCE-BASED (2026-07-17,
+                # supersedes the round-8 lateral gate): ANY collar
+                # vertex within one reach of the low mouth plate
+                # feathers its outer target down to the mouth floor,
+                # UNLESS it hugs the crown's hidden face (distance to
+                # the crown polygon < 2 m — the object facade hides
+                # that by-design vertical meeting, and on a small
+                # portal the whole back band is within a reach of the
+                # mouth).  The old gate exempted the entire lateral
+                # facade span, which left the collar's side wrap at
+                # full crown height 0-2 m from the mouth plate — with
+                # the crown now floored at the object roof plane
+                # (mouth + deck_top) those seams measured 3.4-6.0 m
+                # steps (audit check 7, 33 vertices at both
+                # Murfreesboro portals).
                 try:
                     distance_to_crown = _crown.distance(
                         Point(vertex_x, vertex_y))
                 except (_GEOM_EXC, AttributeError):
                     distance_to_crown = _reach
+                try:
+                    distance_to_mouth = _mouth_geometry.distance(
+                        Point(vertex_x, vertex_y))
+                except (_GEOM_EXC, AttributeError):
+                    distance_to_mouth = _reach
+                if distance_to_crown >= 2.0 and distance_to_mouth < _reach:
+                    mouth_blend = max(
+                        0.0, min(1.0, distance_to_mouth / _reach))
+                    outer_target = min(
+                        outer_target,
+                        (1.0 - mouth_blend) * _mouth_floor
+                        + mouth_blend * outer_target)
                 blend = max(0.0, min(1.0, distance_to_crown / _reach))
-                return ((1.0 - blend) * _crown_elevation
-                        + blend * outer_target)
+                value = ((1.0 - blend) * _crown_elevation
+                         + blend * outer_target)
+                # SPLIT-LINE VALUE CEILING (2026-07-17): at the mouth
+                # plate's sides the collar hugs the CROWN's side edge
+                # (distance_to_crown ~ 0), so the crown term dominates
+                # the blend regardless of the outer-target feather and
+                # the collar met the low mouth plate at ~70 % of the
+                # crown height (audit: 3.2/4.7 m steps at both
+                # Murfreesboro portals).  Cap the VALUE itself: within
+                # the mouth zone a collar vertex may exceed the mouth
+                # floor by at most (distance_to_mouth / reach) x
+                # (crown - mouth) — zero step at the plate, full crown
+                # one reach away.  The zone is bounded below the
+                # crown's buried depth so a shallow portal's hidden
+                # back-face meeting (which IS within a reach of the
+                # mouth polygon) keeps the crown.
+                ceiling_zone = min(_reach, max(0.0, _crown_depth - 1.0))
+                if distance_to_mouth < ceiling_zone:
+                    ceiling = (_mouth_floor
+                               + (distance_to_mouth / _reach)
+                               * max(0.0, _crown_elevation - _mouth_floor))
+                    value = min(value, ceiling)
+                return value
 
             collar_vertex_count = 0
             emitted_collar_parts = 0
             for collar_part in collar_parts:
                 try:
-                    collar_vertex_count += _born_graded(
+                    part_vertex_count = _born_graded(
                         collar_part, ROLE_BRIDGE_TRENCH,
                         "object_tunnel_portal_collar", _collar_alt)
                 except _GEOM_EXC:
                     continue
+                if part_vertex_count > 0:
+                    # ``_born_graded`` appended the shape (a < 4-vertex
+                    # ring returns 0 without appending).
+                    portal_terrain_record["collar_shapes"].append(
+                        layout.shapes[-1])
+                collar_vertex_count += part_vertex_count
                 emitted_collar_parts += 1
             if not emitted_collar_parts:
                 continue
@@ -6809,7 +7571,7 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
         )
         if road_exit_corridor is not None:
             try:
-                rotated_rectangle = deck_box.minimum_rotated_rectangle
+                rotated_rectangle = min_rotated_rect(deck_box)
                 corners = list(rotated_rectangle.exterior.coords)
                 short_side = min(
                     math.hypot(corners[1][0] - corners[0][0],
@@ -7056,6 +7818,299 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                 f"profile value for {bridge.object_resources}",
             )
     return n_trench, n_causeway, pads_removed
+
+
+def raise_portal_terrain_to_airside(layout) -> int:
+    """POST-SOLVE raise of portal crown/collar terrain to the
+    surrounding solved AIRSIDE level (user ruling 2026-07-17: the
+    portal object's flat top sits close to level with the adjacent
+    taxiway — the back terrain must RISE to meet the airside where the
+    solved airside stands above the object-derived crown; it never
+    falls, so the DEM feather survives wherever airside is lower or
+    absent).
+
+    Called from ``finalize.emit_terrain_transition_features`` — after
+    the elevation solve (solved airside ring values exist), before
+    ``final_grade_projection`` and adjacent-ground band emission.
+    Every raised vertex re-records its solver pin (``_record_pin``)
+    so the downstream scoped projection re-pins the RAISED value
+    (post-writeback passes must re-pin every hard class).
+
+    Returns the number of vertices raised.
+    """
+    if not getattr(_CFG, "TUNNEL_PORTAL_AIRSIDE_RAISE", True):
+        return 0
+    records = getattr(layout, "portal_terrain_records", None)
+    if not records:
+        return 0
+    from .layout import corner_alts_from_high_low
+
+    radius = float(_CFG.TUNNEL_PORTAL_AIRSIDE_SAMPLE_RADIUS_M)
+    airside_roles = (
+        ROLE_RUNWAY, ROLE_JUNCTION, ROLE_APRON, ROLE_PRIMARY_PARALLEL,
+        ROLE_SECONDARY_PARALLEL, ROLE_STUB, ROLE_CROSS_CONNECTOR)
+    # Solved airside samples in a coarse grid (cell = radius, so a
+    # query only visits the 3x3 neighbourhood).
+    grid: dict = {}
+    for s in layout.shapes:
+        if (s.role not in airside_roles or s.polygon is None
+                or s.polygon.is_empty):
+            continue
+        try:
+            ring = list(s.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        node_values = getattr(s, "node_altitudes", None)
+        if node_values and len(node_values) >= len(ring) - 1:
+            values = list(node_values)
+        elif getattr(s, "altitude", None) is not None:
+            values = [float(s.altitude)] * len(ring)
+        elif (getattr(s, "altitude_high", None) is not None
+                and getattr(s, "altitude_low", None) is not None
+                and len(ring) in (4, 5)):
+            corner_values = corner_alts_from_high_low(
+                s.altitude_high, s.altitude_low)
+            values = corner_values + corner_values[:1]
+        else:
+            continue
+        for (x, y), value in zip(ring, values):
+            if value is None:
+                continue
+            key = (int(x // radius), int(y // radius))
+            grid.setdefault(key, []).append(
+                (float(x), float(y), float(value)))
+    if not grid:
+        return 0
+
+    def airside_samples(x, y):
+        """``(median, nearest_distance)`` of solved airside ring values
+        within ``radius`` of the point, or ``(None, None)``."""
+        key_x, key_y = int(x // radius), int(y // radius)
+        found = []
+        nearest_sq = None
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for (sx, sy, sv) in grid.get(
+                        (key_x + dx, key_y + dy), ()):
+                    d_sq = (sx - x) ** 2 + (sy - y) ** 2
+                    if d_sq <= radius * radius:
+                        found.append(sv)
+                        if nearest_sq is None or d_sq < nearest_sq:
+                            nearest_sq = d_sq
+        if not found:
+            return (None, None)
+        found.sort()
+        mid = len(found) // 2
+        median = (found[mid] if len(found) % 2
+                  else 0.5 * (found[mid - 1] + found[mid]))
+        return (median, math.sqrt(nearest_sq))
+
+    def airside_level(x, y):
+        return airside_samples(x, y)[0]
+
+    # RAMP-LAW CEILING (2026-07-17, preventive): raised collar/crown
+    # values CAN propagate into coincident tunnel-ramp quad corners at
+    # the to_osm per-node consensus (which merges shared coordinates
+    # toward the feature side), steepening an at-cap ramp past
+    # TUNNEL_RAMP_MAX_GRADE.  (The SPJC 4.13-4.21 % ramp violations
+    # that prompted this were measured to be LATENT in the legacy ramp
+    # emitter — present with the raise AND crown gated off — not
+    # raise-induced; the guard stays because the mechanism is real by
+    # construction.)  The raise yields to the ramp law:
+    # a raised value at a coordinate shared with a sloped ramp quad may
+    # not exceed the quad's far-end value + cap x quad length.  Index
+    # every sloped tunnel-ramp quad corner once per call.
+    from .layout import corner_alts_from_high_low as _corner_alts
+    ramp_cap = float(_CFG.TUNNEL_RAMP_MAX_GRADE)
+    ramp_corner_ceilings: dict = {}
+    for s in layout.shapes:
+        if (s.role != ROLE_TUNNEL_RAMP or s.polygon is None
+                or s.polygon.is_empty
+                or s.altitude_high is None or s.altitude_low is None):
+            continue
+        try:
+            ring = list(s.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        open_ring = ring[:-1] if ring and ring[0] == ring[-1] else ring
+        if len(open_ring) != 4:
+            continue
+        corner_values = _corner_alts(s.altitude_high, s.altitude_low)
+        # [H, L, L, H]: corners (0, 3) = high short edge, (1, 2) = low.
+        high_mid = (0.5 * (open_ring[0][0] + open_ring[3][0]),
+                    0.5 * (open_ring[0][1] + open_ring[3][1]))
+        low_mid = (0.5 * (open_ring[1][0] + open_ring[2][0]),
+                   0.5 * (open_ring[1][1] + open_ring[2][1]))
+        quad_length = math.hypot(high_mid[0] - low_mid[0],
+                                 high_mid[1] - low_mid[1])
+        if quad_length < 1.0:
+            continue
+        for corner_index, (cx, cy) in enumerate(open_ring):
+            far_value = (float(s.altitude_high)
+                         if corner_index in (1, 2)
+                         else float(s.altitude_low))
+            ceiling = far_value + ramp_cap * quad_length
+            key = (int(cx // SHARED_VERTEX_TOL_M),
+                   int(cy // SHARED_VERTEX_TOL_M))
+            ramp_corner_ceilings.setdefault(key, []).append(
+                (cx, cy, ceiling))
+
+    def ramp_law_ceiling(x, y):
+        """Tightest ramp-law ceiling among ramp corners within the
+        to_osm interning tolerance of the point, or None."""
+        key_x = int(x // SHARED_VERTEX_TOL_M)
+        key_y = int(y // SHARED_VERTEX_TOL_M)
+        tightest = None
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for (cx, cy, ceiling) in ramp_corner_ceilings.get(
+                        (key_x + dx, key_y + dy), ()):
+                    if (math.hypot(cx - x, cy - y)
+                            <= SHARED_VERTEX_TOL_M
+                            and (tightest is None
+                                 or ceiling < tightest)):
+                        tightest = ceiling
+        return tightest
+
+    n_raised = 0
+    for record in records:
+        crown_geometry = record.get("crown_geometry")
+        crown_elevation = float(record.get("crown_elevation") or 0.0)
+        reach = float(record.get("collar_reach") or 1.0)
+        if reach <= 1e-6:
+            reach = 1.0
+        raised_crown = crown_elevation
+        if crown_geometry is not None:
+            try:
+                level = airside_level(
+                    crown_geometry.centroid.x, crown_geometry.centroid.y)
+            except _GEOM_EXC:
+                level = None
+            if level is not None and level > crown_elevation + 0.05:
+                raised_crown = float(level)
+        crown_shape = record.get("crown_shape")
+        if (raised_crown > crown_elevation + 0.05
+                and crown_shape is not None
+                and crown_shape.polygon is not None
+                and getattr(crown_shape, "node_altitudes", None)):
+            try:
+                crown_ring = list(crown_shape.polygon.exterior.coords)
+            except _GEOM_EXC:
+                crown_ring = []
+            # A flat crown clamps as a whole to the tightest ramp-law
+            # ceiling among its ramp-coincident ring vertices (rare —
+            # ramps attach at the mouth side, the crown is the back
+            # half).
+            for (x, y) in crown_ring:
+                ceiling = ramp_law_ceiling(x, y)
+                if ceiling is not None and raised_crown > ceiling:
+                    raised_crown = max(crown_elevation, ceiling)
+            crown_shape.node_altitudes = (
+                [round(raised_crown, 2)]
+                * len(crown_shape.node_altitudes))
+            open_count = (len(crown_ring) - 1
+                          if crown_ring and crown_ring[0] == crown_ring[-1]
+                          else len(crown_ring))
+            for (x, y) in crown_ring[:open_count]:
+                _record_pin(layout, x, y, raised_crown)
+            n_raised += open_count
+            UI.vprint(1,
+                "   [object-tunnel] portal crown raised to airside "
+                f"level {raised_crown:.2f} m (was "
+                f"{crown_elevation:.2f} m)")
+
+        mouth_geometry = record.get("mouth_geometry")
+        mouth_floor = float(record.get("mouth_floor") or 0.0)
+        crown_depth = float(record.get("crown_depth_m") or 0.0)
+        ceiling_zone = min(reach, max(0.0, crown_depth - 1.0))
+        for collar_shape in record.get("collar_shapes") or ():
+            node_values = getattr(collar_shape, "node_altitudes", None)
+            if (collar_shape.polygon is None or not node_values):
+                continue
+            try:
+                ring = list(collar_shape.polygon.exterior.coords)
+            except _GEOM_EXC:
+                continue
+            if len(node_values) < len(ring):
+                continue
+            changed = False
+            new_values = list(node_values)
+            open_count = (len(ring) - 1
+                          if ring and ring[0] == ring[-1] else len(ring))
+            for i in range(open_count):
+                x, y = ring[i]
+                old_value = float(node_values[i])
+                try:
+                    distance_to_crown = (
+                        crown_geometry.distance(Point(x, y))
+                        if crown_geometry is not None else reach)
+                except (_GEOM_EXC, AttributeError):
+                    distance_to_crown = reach
+                # Mouth feather guard — DISTANCE-BASED, mirroring
+                # ``_collar_alt``: any vertex within one reach of the
+                # low mouth plate keeps its feathered value (raising
+                # it would rebuild the cliff onto the road), unless it
+                # hugs the crown's hidden face (the object facade
+                # hides that meeting by design).
+                distance_to_mouth = reach
+                if mouth_geometry is not None:
+                    try:
+                        distance_to_mouth = mouth_geometry.distance(
+                            Point(x, y))
+                    except (_GEOM_EXC, AttributeError):
+                        distance_to_mouth = reach
+                if distance_to_crown >= 2.0 and distance_to_mouth < reach:
+                    continue
+                blend = max(0.0, min(1.0, distance_to_crown / reach))
+                # DISTANCE-DECAYED rim target: the rim rises toward
+                # the airside median only in proportion to how close
+                # the nearest airside vertex actually is — a rim
+                # vertex 5 m from the abutting band takes ~the band
+                # level, one 70 m away keeps ~its DEM feather.  A flat
+                # airside-median target regardless of distance
+                # flattened the whole collar into a plateau wherever
+                # ANY airside vertex sat within the sample radius
+                # (measured in the raise unit probe).
+                outer_level, nearest_airside_m = airside_samples(x, y)
+                if outer_level is None:
+                    outer_target = old_value
+                else:
+                    weight = max(0.0, min(
+                        1.0, 1.0 - float(nearest_airside_m) / radius))
+                    outer_target = (weight * float(outer_level)
+                                    + (1.0 - weight) * old_value)
+                candidate = ((1.0 - blend) * raised_crown
+                             + blend * outer_target)
+                # Split-line value ceiling — mirrors ``_collar_alt``:
+                # within the mouth zone the raised value may exceed the
+                # mouth floor by at most the per-reach fraction of the
+                # (raised) crown height.
+                if distance_to_mouth < ceiling_zone:
+                    candidate = min(
+                        candidate,
+                        mouth_floor + (distance_to_mouth / reach)
+                        * max(0.0, raised_crown - mouth_floor))
+                # Ramp-law ceiling: the raise yields to an abutting
+                # sloped tunnel-ramp quad's grade cap (see the index
+                # above).
+                ramp_ceiling = ramp_law_ceiling(x, y)
+                if ramp_ceiling is not None:
+                    candidate = min(candidate, ramp_ceiling)
+                if candidate > old_value + 0.05:
+                    new_values[i] = round(candidate, 2)
+                    _record_pin(layout, x, y, float(new_values[i]))
+                    changed = True
+                    n_raised += 1
+            if changed:
+                if len(ring) > open_count:
+                    new_values[len(ring) - 1] = new_values[0]
+                collar_shape.node_altitudes = new_values
+    if n_raised:
+        UI.vprint(1,
+            f"   [object-tunnel] portal terrain airside raise: "
+            f"{n_raised} vertices lifted across "
+            f"{len(records)} portal(s).")
+    return n_raised
 
 
 def enforce_bridge_plate_exclusivity(layout) -> int:
@@ -7903,8 +8958,8 @@ def _emit_through_airport_depressed_roads(
     if not depressed_set:
         return (0, set())
 
-    grade_safety_margin = 0.005
-    plan_grade = max(max_ramp_grade - grade_safety_margin, 1e-3)
+    plan_grade = max(
+        max_ramp_grade - TUNNEL_RAMP_GRADE_SAFETY_MARGIN, 1e-3)
     arm_walk_max_m = max(arm_max_length_m, ramp_min_length_m,
                          depression_depth_m / plan_grade)
 

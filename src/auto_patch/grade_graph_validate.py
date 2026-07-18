@@ -16,7 +16,10 @@ import dataclasses as _dc
 import math
 
 from . import grade_graph as GG
-from .config import ELEV_ROUNDING_NOISE_M, taxi_grade_cap_for_letter
+from .config import (ELEV_ROUNDING_NOISE_M,
+                     SLOPED_QUAD_ROUNDING_NOISE_M as _SLOPED_QUAD_NOISE_M,
+                     taxi_grade_cap_for_letter)
+from .grade_law import pair_grade_budget_m
 
 
 from .grade_graph import _open_ring
@@ -58,6 +61,7 @@ def _iter_checked_pairs(layout):
     ctx = GG.build_context(layout)
 
     # apron / junction within-shape (body + spine).
+    _lockstep_bake = getattr(layout, "_lockstep_shape_bake", None) or {}
     for s in layout.shapes:
         if (s.role not in GG.SOFT_VISIBILITY_ROLES or s.polygon is None
                 or s.polygon.is_empty):
@@ -69,6 +73,26 @@ def _iter_checked_pairs(layout):
         elevs = _shape_elevs(s, nlen)
         if elevs is None:
             continue
+        # LOCKSTEP BAKE ADOPTION (2026-07-17): when the solver exported
+        # this shape's baked decomposition (``build_unified_graph``,
+        # ring-position space) and the ring is UNCHANGED, consume it
+        # verbatim — the validator then checks the exact allowances the
+        # solve enforced, and the two sides cannot drift (measured
+        # CYXY: 29/9,915 edges differed on re-bake).  A mutated ring
+        # (post-solve clip/weld) misses the guard and falls through to
+        # the fresh bake below.
+        baked = _lockstep_bake.get(id(s))
+        if baked is not None:
+            baked_role, baked_signature, baked_edges, baked_spine = baked
+            ring_signature = tuple(
+                (round(x, 6), round(y, 6)) for (x, y) in ring)
+            if baked_role == s.role and baked_signature == ring_signature:
+                for (a, b, cap) in baked_edges:
+                    if a < nlen and b < nlen:
+                        is_spine = (min(a, b), max(a, b)) in baked_spine
+                        yield (s.role, is_spine, ring[a], elevs[a],
+                               ring[b], elevs[b], cap)
+                continue
         gs = GG.GradeShape(role=s.role, ring=[(x, y) for (x, y) in ring],
                            keys=list(range(nlen)))
         # Activate the building-step exemption in INDEX key-space: ctx.building_keys
@@ -180,10 +204,17 @@ def within_violations(layout, noise=ELEV_ROUNDING_NOISE_M):
             continue
         de = abs((za - zb) - crown_pair_offset(_drop(xa, ya),
                                                _drop(xb, yb)))
-        # ``cap`` is a grade_law.Allowance; the per-pair budget is its anisotropic
-        # evaluation ``cL·Δs∥ + cT·Δs⊥`` (today Δs∥=d, Δs⊥=0 → cL·d).  The reported
-        # %-cap is the longitudinal cL (flat_cap while every rule is isotropic).
-        if de > cap.at(d, 0.0) + noise:
+        # Budget = grade_law.pair_grade_budget_m (max of the anisotropic
+        # bake and the flat cap × run — the ONE formula shared with
+        # tools/check_grade.py, 2026-07-17) plus this frame's
+        # quantization envelope: junction-family rings are the emit
+        # weld-hubs whose conformance inserts displace short edges up
+        # to a decimetre (SLOPED_QUAD_ROUNDING_NOISE_M), every other
+        # role keeps the per-node envelope (``noise``).
+        _pair_noise = (
+            _SLOPED_QUAD_NOISE_M
+            if role in ("junction", "service_junction") else noise)
+        if de > pair_grade_budget_m(cap, d) + _pair_noise:
             viol.append(((de / d) * 100.0, cap.flat_cap() * 100.0, d, role,
                          is_spine, 0.5 * (xa + xb), 0.5 * (ya + yb)))
     # The taxi spine also ANCHORS into the runway (one side is a runway-surface
@@ -562,6 +593,67 @@ def route_band_violations(layout, noise=ELEV_ROUNDING_NOISE_M, G=None):
         def _crown_at(_l, _x, _y):
             return 0.0
 
+    # RUNWAY-DATUM EXEMPTION (2026-07-17): a vertex ON the runway boundary
+    # carries the runway surface value — the taxi-join /
+    # runway-edge-contact rulings make the runway THE datum there (the
+    # solver seeds these nodes HARD from the runway ring:
+    # ``seed_rwy_seam``).  The reach band is the intersection of
+    # per-anchor reach intervals over the ANCHOR SET (centerline→runway
+    # joins), so a contact point ≥1 join-spacing away from any join reads
+    # a ceiling BELOW the runway surface itself and flags a value the
+    # solver was never allowed to move (measured SPJC 16L/34R: 4 hard
+    # ``seed_rwy_seam`` junction vertices + 1 vertex interpolated between
+    # them, 0.10-0.38 m out of band).  VALUE-GATED, like
+    # ``_reached_from_small_pad``: exempt only a vertex whose de-crowned
+    # value grades at cap from a nearby runway ring vertex's de-crowned
+    # value — the runway contact is a LOCAL anchor.  A vertex merely NEAR
+    # the runway with an off-value elevation stays flagged.  The band
+    # governs the network AWAY from the runway; mutual-anchor tension
+    # along the runway is the pinned/route-reach checks' domain.
+    from auto_patch.layout import ROLE_RUNWAY as _R_RWY
+    from auto_patch.layout import ROLE_RUNWAY_CROSSING as _R_RWX
+    from auto_patch.config import TAXI_MAX_GRADE as _RWD_CAP
+    _RWD_RADIUS_M = 15.0
+    _rwy_datum_pts: list = []
+    _rwy_datum_vals: list = []
+    for _s in layout.shapes:
+        if (_s.role not in (_R_RWY, _R_RWX) or _s.polygon is None
+                or _s.polygon.is_empty):
+            continue
+        _ring = _open_ring(list(_s.polygon.exterior.coords))
+        _els = _shape_elevs(_s, len(_ring))
+        if _els is None:
+            continue
+        for (_rx, _ry), _re in zip(_ring, _els):
+            if _re is None:
+                continue
+            _rwy_datum_pts.append((_rx, _ry))
+            _rwy_datum_vals.append(
+                float(_re) + _crown_at(layout, _rx, _ry))
+    _rwy_tree = None
+    if _rwy_datum_pts:
+        from shapely.strtree import STRtree as _RwyTree
+        from shapely.geometry import Point as _RwyPt
+        _rwy_tree = _RwyTree([_RwyPt(px, py)
+                              for (px, py) in _rwy_datum_pts])
+
+    def _grades_from_runway_datum(x, y, e):
+        if _rwy_tree is None:
+            return False
+        from shapely.geometry import Point as _RwyPt2
+        try:
+            hits = _rwy_tree.query_nearest(
+                _RwyPt2(x, y), max_distance=_RWD_RADIUS_M, all_matches=False)
+        except Exception:                                  # pragma: no cover
+            return False
+        for _hi in hits:
+            _px, _py = _rwy_datum_pts[int(_hi)]
+            _d = math.hypot(_px - x, _py - y)
+            if abs(e - _rwy_datum_vals[int(_hi)]) \
+                    <= _RWD_CAP * _d + noise:
+                return True
+        return False
+
     out = []
     seen = set()
     for s in layout.shapes:
@@ -589,6 +681,11 @@ def route_band_violations(layout, noise=ELEV_ROUNDING_NOISE_M, G=None):
             # else reachable from a local SMALL-building pad → fine (the apron
             # grades from the pad at the apron cap; the small-building rule).
             if _reached_from_small_pad(x, y, e):
+                continue
+            # runway-datum reach (see the exemption note above): the
+            # vertex grades at cap from a local runway contact — the
+            # runway is the datum there, never band-judged.
+            if _grades_from_runway_datum(x, y, e):
                 continue
             if lo > hi + noise:
                 # EMPTY band — no compliant elevation exists at this vertex

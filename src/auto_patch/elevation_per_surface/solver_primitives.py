@@ -34,7 +34,9 @@ from auto_patch.elevation import (
     APRON_MAX_GRADE, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
 from auto_patch.config import (
     taxi_grade_cap_for_letter, TAXI_MAX_GRADE_NARROW, JUNCTION_NARROW_GRADE,
-    CORRIDOR_SPINE_CHAINS)
+    CORRIDOR_SPINE_CHAINS,
+    FLATNESS_CERTIFICATE_RATE_FACTOR, FLAT_CERTIFICATE_COVERAGE,
+    RECT_CROSS_FLATNESS_TOLERANCE_M)
 from auto_patch.layout import (
     ROLE_APRON, ROLE_BOUNDARY, ROLE_BRIDGE_CAUSEWAY, ROLE_BRIDGE_TRENCH,
     ROLE_CROSS_CONNECTOR, ROLE_GRADED_STRIP, ROLE_JUNCTION,
@@ -836,6 +838,176 @@ def _certify_flat_shape(layout, shape, coords, dem, tile_lat, tile_lon,
     return ring_seed, minimum_body_distance
 
 
+# ── Flat-airport fast path — Tier 1 certificate extensions (spec §3.2) ───────
+# The per-airport certificate counter.  ``layout._flat_certificate_counts`` is a
+# ``{class: {"certified", "expanded", "refused", "candidate"}}`` tally printed
+# once per build (see ``_report_flat_certificate_counts``); every gate mutation
+# runs through this helper so a mis-firing gate is visible in the console and in
+# replays (spec §2.7 "no silent caps").
+_FLAT_CERTIFICATE_CLASSES = ("rect", "apron", "junction", "seat")
+
+
+def _flat_certificate_counter(layout):
+    """Return the per-airport certificate tally on ``layout`` (created once)."""
+    counts = getattr(layout, "_flat_certificate_counts", None)
+    if counts is None:
+        counts = {cls: {"certified": 0, "expanded": 0, "refused": 0,
+                        "candidate": 0}
+                  for cls in _FLAT_CERTIFICATE_CLASSES}
+        try:
+            layout._flat_certificate_counts = counts
+        except (AttributeError, TypeError):               # pragma: no cover
+            pass
+    return counts
+
+
+def _record_flat_certificate(layout, cls, outcome):
+    """Increment the ``outcome`` (certified / expanded / refused / candidate)
+    tally for shape ``cls``.  Silent no-op if the layout cannot carry state
+    (never worth failing a build over a counter)."""
+    try:
+        _flat_certificate_counter(layout)[cls][outcome] += 1
+    except (AttributeError, TypeError, KeyError):          # pragma: no cover
+        pass
+
+
+def _reset_flat_certificate_class(layout, cls):
+    """Zero one class's tally before a fresh constraint build re-counts it —
+    ``_build_shape_constraints`` runs several times per solve (construct,
+    solve passes, projection), so the LAST pass's numbers are the ones the
+    summary reports rather than an accumulation across passes."""
+    counts = _flat_certificate_counter(layout)
+    if cls in counts:
+        expanded = counts[cls]["expanded"]     # expansions accrue during solve
+        counts[cls] = {"certified": 0, "expanded": expanded,
+                       "refused": 0, "candidate": 0}
+
+
+def _report_flat_certificate_counts(layout, icao=""):
+    """Print the one per-airport certificate summary line (spec §2 item 7).
+
+    Reports certified / expanded / refused / candidate per shape class.
+    ``certified`` and ``refused`` reflect the most recent constraint build +
+    the building-seat pass; ``expanded`` is the running count of certificates
+    the solve later had to void (incremented by the lazy-expand thunks), so a
+    line printed before the solve shows 0 there — the tally on the layout keeps
+    climbing and is readable post-solve for anyone inspecting a replay."""
+    counts = getattr(layout, "_flat_certificate_counts", None)
+    if not counts:
+        return
+    parts = []
+    for cls in _FLAT_CERTIFICATE_CLASSES:
+        c = counts.get(cls)
+        if not c or not (c["certified"] or c["refused"] or c["candidate"]):
+            continue
+        parts.append(f"{cls} certified={c['certified']} "
+                     f"expanded={c['expanded']} refused={c['refused']} "
+                     f"of {c['candidate']} candidate(s)")
+    if not parts:
+        return
+    prefix = f"  [flat-certificate] {icao}: " if icao else "  [flat-certificate] "
+    print(prefix + "; ".join(parts))
+
+
+def _certify_flat_rect(layout, shape, coords, cross_positions, axial_positions,
+                       cap, dem, tile_lat, tile_lon, rate_factor):
+    """Flatness CERTIFICATE for a clean 4-corner taxi rect (spec §3.2).
+
+    A rect grades its two AXIAL (sloping) edges at ``cap · length`` and holds
+    its two CROSS (flat-end) edges at cap≈0.  It certifies when the airport-
+    smoothed DEM under it is provably flat enough that BOTH families are
+    already satisfied at the per-vertex DEM seed:
+
+      * every AXIAL edge's DEM relief is ≤ ``rate_factor · cap · length`` — the
+        same slack-aware bound the apron/junction tier uses, and
+      * every CROSS edge's DEM relief is ≤ ``RECT_CROSS_FLATNESS_TOLERANCE_M``
+        (the flat-cross tolerance plus the smoothing reserve — a real
+        cross-fall refuses), and
+      * a ~25 m DEM grid over the bounding box has no direction steeper than
+        ``rate_factor · cap`` (catches a mid-rect bump both corners miss — the
+        SAME grid discipline and refusal-on-any-gap rule as
+        ``_certify_flat_shape``).
+
+    Returns ``(ring_seed_by_vertex, minimum_axial_length)`` — the per-corner
+    DEM seed values (bit-identical to ``_seed_elevations``) plus the shortest
+    axial edge (sizes the movement tolerance) — or ``None`` (refuse → the rect
+    keeps its eager axial edges).  ``cross_positions`` / ``axial_positions``
+    are ``(corner_index_a, corner_index_b)`` / ``(a, b, length)`` tuples into
+    ``coords``; the caller has already labelled them by ``source_axis``
+    projection.  ANY sampling gap refuses — fail toward correctness."""
+    from auto_patch.elevation import _sample_dem
+
+    ring_seed = []
+    for (x, y) in coords:
+        try:
+            lat, lon = layout.m_to_ll(x, y)
+            value = _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+        except _GEOM_EXC:
+            return None
+        if value is None or value != value:
+            return None
+        ring_seed.append(float(value))
+
+    # CROSS (flat-end) edges: DEM relief within the flat-cross reserve.
+    for (a, b) in cross_positions:
+        if abs(ring_seed[a] - ring_seed[b]) > RECT_CROSS_FLATNESS_TOLERANCE_M:
+            return None
+
+    # AXIAL (sloping) edges: DEM relief within rate_factor of the axial budget.
+    axial_rate = rate_factor * cap
+    minimum_axial_length = float("inf")
+    for (a, b, length) in axial_positions:
+        if length < 1e-6:
+            continue
+        if abs(ring_seed[a] - ring_seed[b]) > axial_rate * length:
+            return None
+        if length < minimum_axial_length:
+            minimum_axial_length = length
+    if minimum_axial_length == float("inf"):
+        return None                    # no measurable axial span → refuse
+
+    # ~25 m DEM grid over the bounding box, every axis-neighbour gradient
+    # within the axial rate (mirrors _certify_flat_shape; refuse on any gap).
+    try:
+        min_x, min_y, max_x, max_y = shape.polygon.bounds
+    except _GEOM_EXC:
+        return None
+    width, height = max_x - min_x, max_y - min_y
+    steps_x = max(1, int(math.ceil(width / _FLAT_CERTIFICATE_GRID_M)))
+    steps_y = max(1, int(math.ceil(height / _FLAT_CERTIFICATE_GRID_M)))
+    if (steps_x + 1) * (steps_y + 1) > _FLAT_CERTIFICATE_MAX_SAMPLES:
+        return None
+    spacing_x = width / steps_x
+    spacing_y = height / steps_y
+    grid = []
+    for grid_row in range(steps_y + 1):
+        row_values = []
+        y = min_y + grid_row * spacing_y
+        for grid_col in range(steps_x + 1):
+            x = min_x + grid_col * spacing_x
+            try:
+                lat, lon = layout.m_to_ll(x, y)
+                value = _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+            except _GEOM_EXC:
+                return None
+            if value is None or value != value:
+                return None
+            row_values.append(float(value))
+        grid.append(row_values)
+    for grid_row in range(steps_y + 1):
+        for grid_col in range(steps_x + 1):
+            here = grid[grid_row][grid_col]
+            if grid_col < steps_x and spacing_x > 1e-6:
+                if abs(grid[grid_row][grid_col + 1] - here) \
+                        > axial_rate * spacing_x:
+                    return None
+            if grid_row < steps_y and spacing_y > 1e-6:
+                if abs(grid[grid_row + 1][grid_col] - here) \
+                        > axial_rate * spacing_y:
+                    return None
+    return ring_seed, minimum_axial_length
+
+
 def _build_shape_constraints(layout, bucket_to_idx, ctx=None, dem=None,
                              tile_lat=0, tile_lon=0, hard_nodes=None,
                              defer_shape_ids=None):
@@ -931,10 +1103,31 @@ def _build_shape_constraints(layout, bucket_to_idx, ctx=None, dem=None,
     # certifies at 0.6 · 1.5 % = 0.9 % — at KDFW the global 0.6 % threshold
     # sat below the field's local gradients and certified almost nothing.
     # 0.6 = safety factor; the validator's ELEV_ROUNDING_NOISE_M (0.03 m)
-    # absorbs emit rounding near the cap (see _certify_flat_shape).
-    flat_safety_factor = 0.6
+    # absorbs emit rounding near the cap (see _certify_flat_shape).  The 0.6 is
+    # now the single-source ``FLATNESS_CERTIFICATE_RATE_FACTOR`` in config.py
+    # (value unchanged) so rects, seats and this apron/junction path share ONE
+    # number (spec §2.5).
+    flat_safety_factor = FLATNESS_CERTIFICATE_RATE_FACTOR
     flat_certified_count = 0
     flat_candidate_count = 0
+    # Per-airport certificate tally (spec §2 item 7): a fresh constraint build
+    # re-counts each soft class, so zero the apron/junction/rect classes here
+    # (expansions accrued during any prior solve pass are preserved) and let the
+    # branches below record certified / refused / candidate.  ``seat`` is filled
+    # by ``building_feasibility.building_feasible_levels``.
+    if flat_lazy_enabled:
+        for _cert_cls in ("rect", "apron", "junction"):
+            _reset_flat_certificate_class(layout, _cert_cls)
+    # Taxi-rect certificate coverage (Tier 1, spec §3.2): active under the same
+    # DEM/hard-node preconditions as the apron/junction tier, gated by
+    # ``O4_FLAT_CERTIFICATE_COVERAGE`` (config default ON; read at call time so
+    # the A/B inertness harness / tests can toggle it in-process).  A certified
+    # rect keeps its flat-cross edges (cross coupling stays byte-identical) and
+    # defers its two AXIAL edges to a lazy thunk — the solve enforces them the
+    # moment a corner drifts.
+    rect_certificate_enabled = (
+        flat_lazy_enabled and FLAT_CERTIFICATE_COVERAGE
+        and _os.environ.get("O4_FLAT_CERTIFICATE_COVERAGE", "1") != "0")
     # Node indices on a clean sloping-rect PLANE (4-corner, altitude_high/low).
     # Used to grade a rect end-cap as a PLANAR EXTENSION of its parent rect
     # (O4_CAP_PLANAR): the cap's inner edge sits on these nodes.
@@ -1058,14 +1251,79 @@ def _build_shape_constraints(layout, bucket_to_idx, ctx=None, dem=None,
                 par = abs(ex * adx + ey * ady) / el if adx is not None else 0.0
                 scored.append((par, a, b, el))
             scored.sort()                # ascending: first 2 = flat, last 2 = axial
+            axial_edge_list: list[tuple[int, int, float]] = []
+            axial_positions: list[tuple[int, int, float]] = []
+            cross_positions: list[tuple[int, int]] = []
+            rect_edges_wellformed = True
             for n, (_par, a, b, el) in enumerate(scored):
                 if idx[a] is None or idx[b] is None or idx[a] == idx[b]:
+                    rect_edges_wellformed = False
                     continue
                 if n < 2:                # the two most-perpendicular = flat ends
                     edges.append((idx[a], idx[b], 0.0))
                     flat_pairs.append((idx[a], idx[b]))
+                    cross_positions.append((a, b))
                 else:                    # the two most-parallel = sloping edges
-                    edges.append((idx[a], idx[b], cap * el))
+                    axial_edge_list.append((idx[a], idx[b], cap * el))
+                    axial_positions.append((a, b, el))
+            # FLAT-RECT CERTIFICATE (Tier 1, spec §3.2): when the airport-
+            # smoothed DEM under the rect is provably flat, DEFER its two axial
+            # (sloping) edges — proven satisfied at the DEM seed — to a lazy
+            # thunk; the flat-cross edges above stay eager so the cross coupling
+            # is byte-identical.  ``feasibility_project`` re-enforces the axial
+            # edges the moment a corner drifts off its seed (expand → the exact
+            # eager edge set), so a mis-certified rect fails toward correctness.
+            rect_is_candidate = (
+                rect_certificate_enabled and rect_edges_wellformed
+                and len(axial_positions) == 2 and len(cross_positions) == 2
+                and not any(i in hard_nodes for i in nodes))
+            rect_certificate = None
+            if rect_is_candidate:
+                _record_flat_certificate(layout, "rect", "candidate")
+                try:
+                    rect_certificate = _certify_flat_rect(
+                        layout, s, coords, cross_positions, axial_positions,
+                        cap, dem, tile_lat, tile_lon, flat_safety_factor)
+                except _GEOM_EXC:
+                    rect_certificate = None
+            if rect_certificate is not None:
+                rect_seed_by_vertex, minimum_axial_length = rect_certificate
+                # Slack-aware movement tolerance: axial edges sit at
+                # ≤ rate_factor·cap·len, leaving (1−rate_factor)·cap·len of
+                # slack; two endpoints drifting ``tolerance`` each consume
+                # 2·tolerance, so tolerance = 0.2·cap·len_min keeps every axial
+                # edge inside its budget without expansion (the apron tier's
+                # rule, applied to the rect's own axial span).
+                rect_move_tolerance = min(
+                    0.02, max(1e-6, 0.2 * cap * minimum_axial_length))
+                _record_flat_certificate(layout, "rect", "certified")
+                rect_lazy_nodes: list[int] = []
+                rect_lazy_seeds: list[float] = []
+                seen_rect_nodes: set = set()
+                for vertex_position, node_index in enumerate(idx):
+                    if node_index is None or node_index in seen_rect_nodes:
+                        continue
+                    seen_rect_nodes.add(node_index)
+                    rect_lazy_nodes.append(node_index)
+                    rect_lazy_seeds.append(rect_seed_by_vertex[vertex_position])
+
+                def _expand_rect(_layout=layout,
+                                 _edges=list(axial_edge_list)):
+                    _record_flat_certificate(_layout, "rect", "expanded")
+                    return list(_edges)
+
+                lazy_extras = {
+                    "lazy_expand": _expand_rect,
+                    "lazy_nodes": rect_lazy_nodes,
+                    "lazy_seed": rect_lazy_seeds,
+                    "lazy_move_tolerance": rect_move_tolerance,
+                    "lazy_certified": True,
+                    "lazy_rect": True,
+                }
+            else:
+                if rect_is_candidate:
+                    _record_flat_certificate(layout, "rect", "refused")
+                edges.extend(axial_edge_list)
         elif (_cap_planar and getattr(s, "is_rect_cap", False)
               and len([i for i in idx if i in rect_plane_idx]) >= 2
               and len([i for i in idx
@@ -1113,8 +1371,10 @@ def _build_shape_constraints(layout, bucket_to_idx, ctx=None, dem=None,
             lazy_seed_by_vertex = None
             lazy_certificate = None
             shape_rate_full = APRON_MAX_GRADE
+            _cert_class = "apron" if s.role == ROLE_APRON else "junction"
             if flat_lazy_enabled:
                 flat_candidate_count += 1
+                _record_flat_certificate(layout, _cert_class, "candidate")
                 if not any(i in hard_nodes for i in nodes):
                     if (s.role != ROLE_APRON
                             and not any(i in _gg_ctx.building_keys
@@ -1126,6 +1386,8 @@ def _build_shape_constraints(layout, bucket_to_idx, ctx=None, dem=None,
                             flat_safety_factor * shape_rate_full)
                     except _GEOM_EXC:
                         lazy_certificate = None
+                if lazy_certificate is None:
+                    _record_flat_certificate(layout, _cert_class, "refused")
             if lazy_certificate is not None:
                 lazy_seed_by_vertex, minimum_body_distance = lazy_certificate
                 # Slack-aware movement tolerance: certified pairs sit at
@@ -1138,6 +1400,7 @@ def _build_shape_constraints(layout, bucket_to_idx, ctx=None, dem=None,
                     0.02, max(1e-6, 0.2 * shape_rate_full
                               * minimum_body_distance))
                 flat_certified_count += 1
+                _record_flat_certificate(layout, _cert_class, "certified")
                 edges.extend(_grade_graph_edges(s, coords, idx, _gg_ctx,
                                                 ring_only=True))
                 lazy_node_indices = []
@@ -1149,11 +1412,15 @@ def _build_shape_constraints(layout, bucket_to_idx, ctx=None, dem=None,
                     seen_node_indices.add(node_index)
                     lazy_node_indices.append(node_index)
                     lazy_node_seeds.append(lazy_seed_by_vertex[vertex_position])
+
+                def _expand_apron_junction(
+                        _shape=s, _coords=coords, _idx=idx, _law_ctx=_gg_ctx,
+                        _layout=layout, _cls=_cert_class):
+                    _record_flat_certificate(_layout, _cls, "expanded")
+                    return _grade_graph_edges(_shape, _coords, _idx, _law_ctx)
+
                 lazy_extras = {
-                    "lazy_expand": (lambda _shape=s, _coords=coords, _idx=idx,
-                                    _law_ctx=_gg_ctx:
-                                    _grade_graph_edges(_shape, _coords, _idx,
-                                                       _law_ctx)),
+                    "lazy_expand": _expand_apron_junction,
                     "lazy_nodes": lazy_node_indices,
                     "lazy_seed": lazy_node_seeds,
                     "lazy_move_tolerance": lazy_move_tolerance,
