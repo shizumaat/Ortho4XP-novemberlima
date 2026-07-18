@@ -339,7 +339,7 @@ def _discover_sibling_road_networks(
 # pre-screen, composed placement transform, bulk footprint unions) —
 # results are equivalent within float tolerance but must be rebuilt on
 # the new code path.
-_CLASSIFICATION_CACHE_VERSION = 6  # 6: tunnels carry solid_minimum_y_m
+_CLASSIFICATION_CACHE_VERSION = 7  # 7: tunnels carry solid_outline_footprint
 #    (flush-bottom trench floors).  5: face records grew bridge-shaped
 #    compatibility fields (deck_polygon/frame_origin) — older pickles
 #    lack them and crash pair consumers once face pairs own crossings.
@@ -920,7 +920,8 @@ def _tunnel_footprint_meters_parts(tunnel, to_meters) -> list:
 
     frame_parts = [
         footprint for footprint in (
-            tunnel.deck_footprint, tunnel.roof_footprint)
+            tunnel.deck_footprint, tunnel.roof_footprint,
+            getattr(tunnel, "solid_outline_footprint", None))
         if footprint is not None and not footprint.is_empty
     ]
     if not frame_parts:
@@ -1004,6 +1005,22 @@ def _split_annulus_to_simple_parts(geometry) -> list:
     return simple_parts
 
 
+# Flush-wall trench geometry (user screenshots 2026-07-18c).  Every gap
+# is above the ~0.5 m canonical node-interning bucket so the paired rows
+# survive as distinct nodes (the R2 node-split wall):
+# * the datum rim band starts this far OUTSIDE the body footprint — the
+#   wall spans band-inner (datum) → body edge (floor), so the batter
+#   leans outward and the floor reaches the shell wall flush;
+_TUNNEL_WALL_SETBACK_M = 0.6
+# * width of the flat datum band beyond the setback;
+_TUNNEL_RIM_BAND_WIDTH_M = 0.6
+# * where the body abuts airside pavement the wall top is the pavement
+#   edge itself and the floor stays this far from it (slightly over the
+#   setback: pavement edges carry arbitrary authored vertices, not our
+#   own offset curve).
+_TUNNEL_FLOOR_PAVEMENT_CLEARANCE_M = 0.7
+
+
 def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
     """Feature A (``O4_OBJECT_TUNNEL_TERRAIN``, spec section 3.3 + amendment
     A1, ruling R12): born pre-solve tunnel-trench terrain as FIRST-CLASS
@@ -1021,11 +1038,20 @@ def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
       ground over the body, and terrain left at grade there would z-fight
       the roof slab.  A flat floor pan is born at the law floor
       (``grade_law.tunnel_trench_floor_elevation_m`` = datum − body depth −
-      ``TUNNEL_FLOOR_BELOW_OBJECT_DECK_M``) inset ``_TRENCH_INSET_M``, and a
-      rim collar is born at the datum
-      (``grade_law.tunnel_trench_rim_elevation_m``) — the two coincident
-      rows a node-split (``_CAUSEWAY_INWARD_OVERLAP_M``) apart form the
-      near-vertical R2 wall.
+      ``TUNNEL_FLOOR_BELOW_OBJECT_DECK_M``), and a rim band is born at the
+      datum (``grade_law.tunnel_trench_rim_elevation_m``) — the two rows a
+      node-split apart form the near-vertical R2 wall.
+    * **FLUSH WALLS** (user screenshots 2026-07-18c): the floor pan covers
+      the body footprint TO ITS EDGE, and the datum rim band sits OUTSIDE
+      the body (``_TUNNEL_WALL_SETBACK_M`` .. + ``_TUNNEL_RIM_BAND_WIDTH_M``)
+      — so the unavoidable mesh batter (two node rows can never share an
+      x,y) leans OUTWARD from the shell and the terrain never pokes through
+      the object's own vertical walls.  The previous inside-the-body
+      collar + 1.2 m floor inset left the wall base protruding up to
+      1.2 m INTO the shell.  Where the body abuts airside pavement the
+      wall top is the pavement edge itself (the outward band yields to
+      every already-born shape) and only there the floor keeps a
+      ``_TUNNEL_FLOOR_PAVEMENT_CLEARANCE_M`` bucket-safe clearance.
     * **PAVEMENT WINS** (rulings R2/R8): the airside pavement union is
       subtracted from the body before birth and the yielded area is logged.
 
@@ -1052,8 +1078,6 @@ def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
     from .bridges import (
         _local_meter_projections,
         _BRIDGE_PIN_ROLES,
-        _TRENCH_INSET_M,
-        _CAUSEWAY_INWARD_OVERLAP_M,
         born_flat_solver_plate,
     )
     from .elevation import _sample_dem
@@ -1078,6 +1102,30 @@ def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
         )
     except Exception:
         pavement_union = None
+    # Ground already owned by ANY earlier-born shape: the outward rim band
+    # must never re-grade it (its nodes then serve as the wall-top row).
+    # Kept as (bounds, polygon) entries and bbox-filtered per body — a
+    # whole-layout unary_union costs seconds at an EGLL-sized airport
+    # (HARD-LAW budget) and only the shapes beside each trench matter.
+    owned_entries = [
+        (shape.polygon.bounds, shape.polygon) for shape in layout.shapes
+        if shape.polygon is not None and not shape.polygon.is_empty
+    ]
+
+    def _owned_near(bounds):
+        minimum_x, minimum_y, maximum_x, maximum_y = bounds
+        candidates = [
+            polygon for (bounds_x0, bounds_y0, bounds_x1, bounds_y1), polygon
+            in owned_entries
+            if bounds_x0 <= maximum_x and bounds_x1 >= minimum_x
+            and bounds_y0 <= maximum_y and bounds_y1 >= minimum_y
+        ]
+        if not candidates:
+            return None
+        try:
+            return unary_union(candidates)
+        except Exception:
+            return None
 
     floor_plate_count = 0
     rim_plate_count = 0
@@ -1131,65 +1179,106 @@ def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
 
         yielded_area = 0.0
         for body in body_parts:
-            trench_region = body
             if pavement_union is not None:
                 try:
                     kept = body.intersection(pavement_union)
                     if not kept.is_empty:
                         yielded_area += kept.area
-                    trench_region = body.difference(pavement_union)
                 except Exception:
-                    trench_region = body
-            region_parts = (
-                list(trench_region.geoms)
-                if trench_region.geom_type == "MultiPolygon"
-                else [trench_region]
+                    pass
+            # FLUSH WALLS (user screenshots 2026-07-18c): the floor pan is
+            # the body footprint itself — its edge lands ON the shell's
+            # vertical wall plane, so the mesh batter (the one node-split
+            # gap two rows must keep) leans OUTWARD from the shell instead
+            # of poking through its base.  Mitre joins everywhere: round
+            # buffer arcs read as curved ridges against the straight
+            # object walls (the v19 collar lesson).
+            try:
+                floor_geometry = body
+                if pavement_union is not None:
+                    envelope = body.buffer(
+                        _TUNNEL_WALL_SETBACK_M + _TUNNEL_RIM_BAND_WIDTH_M
+                        + 1.0)
+                    pavement_near = pavement_union.intersection(envelope)
+                    if not pavement_near.is_empty:
+                        floor_geometry = body.difference(
+                            pavement_near.buffer(
+                                _TUNNEL_FLOOR_PAVEMENT_CLEARANCE_M,
+                                join_style=2, mitre_limit=2.0))
+                band_inner = body.buffer(
+                    _TUNNEL_WALL_SETBACK_M, join_style=2, mitre_limit=2.0)
+                band_geometry = body.buffer(
+                    _TUNNEL_WALL_SETBACK_M + _TUNNEL_RIM_BAND_WIDTH_M,
+                    join_style=2, mitre_limit=2.0).difference(band_inner)
+                band_bounds = band_geometry.bounds
+                owned_near = _owned_near((
+                    band_bounds[0] - 1.0, band_bounds[1] - 1.0,
+                    band_bounds[2] + 1.0, band_bounds[3] + 1.0))
+                if owned_near is not None and not owned_near.is_empty:
+                    # Yield the band to every already-born shape WITH a
+                    # setback margin: a band edge cut exactly on another
+                    # shape's boundary would bucket-share its nodes and
+                    # the datum-versus-solved first-writer race returns.
+                    band_geometry = band_geometry.difference(
+                        owned_near.buffer(
+                            _TUNNEL_WALL_SETBACK_M,
+                            join_style=2, mitre_limit=2.0))
+            except Exception:
+                continue
+            floor_parts = (
+                list(floor_geometry.geoms)
+                if floor_geometry.geom_type == "MultiPolygon"
+                else [floor_geometry]
             )
-            for region in region_parts:
-                if (region.geom_type != "Polygon" or region.is_empty
-                        or region.area < 4.0):
+            body_floor_born = 0
+            for floor_part in floor_parts:
+                if (floor_part.geom_type != "Polygon" or floor_part.is_empty
+                        or floor_part.area < 4.0):
                     continue
-                # Floor pan inset _TRENCH_INSET_M; rim collar band
-                # _CAUSEWAY_INWARD_OVERLAP_M wide at the datum — the same
-                # geometry the bridge trench/causeway pair uses, so the
-                # node-split wall gap is the identical
-                # (_TRENCH_INSET_M - _CAUSEWAY_INWARD_OVERLAP_M) metres,
-                # above the 0.5 m node-interning tolerance (ruling R2).
+                if born_flat_solver_plate(
+                        layout, floor_part, ROLE_TUNNEL_TRENCH,
+                        "object_tunnel_trench", floor_elevation,
+                        record_pins=False):
+                    body_floor_born += 1
+            if not body_floor_born:
+                # A body too thin/covered to seat any floor pan (the tiny
+                # negative-AGL shells, or fully pavement-yielded bodies) is
+                # left at grade rather than emitting a floorless rim ring —
+                # the rim is meaningless without a floor to wall down to.
+                continue
+            floor_plate_count += body_floor_born
+            for band_part in _split_annulus_to_simple_parts(band_geometry):
+                if band_part.area < 1.0:
+                    continue
+                # TERRAIN-TRUE rim (user screenshots 2026-07-18c, EGLL
+                # west end): the anchor's datum can sit metres off the
+                # ground AT the band — the Tunnel/6+7 placements anchor
+                # ~100 m from their geometry and the datum-flat rim
+                # stood ~5 m proud of the surrounding ground as a
+                # raised berm box.  The band's job is to pin the wall
+                # top AT the surrounding grade, so each part samples
+                # the DEM at its own centroid; the drape-law datum
+                # stays the fallback on nodata.  The FLOOR keeps the
+                # anchor datum — that is where the draped object's
+                # solids actually land (terrain(anchor) + offsets).
+                part_centroid = band_part.centroid
+                part_elevation = rim_elevation
                 try:
-                    floor_geometry = region.buffer(-_TRENCH_INSET_M)
-                    collar_geometry = region.difference(
-                        region.buffer(-_CAUSEWAY_INWARD_OVERLAP_M)
-                    )
+                    centroid_latitude, centroid_longitude = (
+                        _meters_to_lat_lon(
+                            part_centroid.x, part_centroid.y))
+                    sample = _sample_dem(
+                        dem, tile_lat, tile_lon,
+                        centroid_latitude, centroid_longitude)
+                    if sample is not None and sample == sample:
+                        part_elevation = float(sample)
                 except Exception:
-                    continue
-                floor_parts = (
-                    list(floor_geometry.geoms)
-                    if floor_geometry.geom_type == "MultiPolygon"
-                    else [floor_geometry]
-                )
-                region_floor_born = 0
-                for floor_part in floor_parts:
-                    if born_flat_solver_plate(
-                            layout, floor_part, ROLE_TUNNEL_TRENCH,
-                            "object_tunnel_trench", floor_elevation,
-                            record_pins=False):
-                        region_floor_born += 1
-                if not region_floor_born:
-                    # A body too thin to seat a floor pan at the trench
-                    # inset (the tiny negative-AGL shells) is left at grade
-                    # rather than emitting a floorless rim ring — the rim is
-                    # meaningless without a floor to wall down to.
-                    continue
-                floor_plate_count += region_floor_born
-                for collar_part in _split_annulus_to_simple_parts(
-                        collar_geometry):
-                    if collar_part.area < 1.0:
-                        continue
-                    if born_flat_solver_plate(
-                            layout, collar_part, ROLE_TUNNEL_TRENCH,
-                            "object_tunnel_rim", rim_elevation,
-                            record_pins=False):
-                        rim_plate_count += 1
+                    part_elevation = rim_elevation
+                if born_flat_solver_plate(
+                        layout, band_part, ROLE_TUNNEL_TRENCH,
+                        "object_tunnel_rim", part_elevation,
+                        record_pins=False):
+                    rim_plate_count += 1
 
         if yielded_area > 1.0:
             UI.vprint(

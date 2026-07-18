@@ -79,7 +79,7 @@ from typing import Iterable, NamedTuple, Sequence
 import numpy
 import shapely
 from shapely import affinity as shapely_affinity
-from shapely.geometry import Point, Polygon
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 from shapely.ops import unary_union
 
 from . import obj8_reader
@@ -516,6 +516,14 @@ class TunnelStructure:
     # at deck − 0.5 left the shell bottoms buried and ground poking
     # through the side walls (user 2026-07-18, in-sim).
     solid_minimum_y_m: float | None = None
+    # Plan outline of EVERY below-grade solid triangle (walls become
+    # thin slivers, sloped ramp skins project with real area).  The
+    # near-horizontal deck/roof unions under-represent wall-and-ramp
+    # shells — the EGLL west-end AGL pair classified 86/45 m2 of "deck"
+    # inside 25x19 / 18x16 m structures, so the trench cut a 10x3 m
+    # sliver and the rest of the shell stayed buried (user 2026-07-18c,
+    # in-sim).  The trench footprint unions this with deck and roof.
+    solid_outline_footprint: Polygon | MultiPolygon | None = None
 
 
 @dataclass(frozen=True)
@@ -1794,6 +1802,59 @@ def _is_tunnel_signature(
     return bool(_agl_tunnel_seed_resources(placements, frame))
 
 
+def _solid_outline_footprint(
+    triangles: Sequence[_FrameTriangle],
+) -> Polygon | MultiPolygon | None:
+    """Plan outline of every SOLID triangle reaching grade or below.
+
+    The near-horizontal deck/roof unions under-represent wall-and-ramp
+    shells: the EGLL west-end AGL pair (Tunnel/6+7) is built from
+    vertical walls and a sloped approach-ramp skin, so its "deck" came
+    to 45/86 m2 inside 18x16 / 25x19 m structures and the trench cut a
+    sliver (user 2026-07-18c, in-sim: object below grade, not fully cut
+    out).  Here EVERY solid triangle whose lowest effective corner
+    reaches grade projects to plan — sloped skins with their true area,
+    verticals as thin buffered slivers — the union is morphologically
+    closed and its exterior rings filled (a closed shell ring encloses
+    its floor plan).  Triangles entirely above grade (parapets, signs)
+    stay out so the outline remains a below-grade cut."""
+    pieces = []
+    for triangle in triangles:
+        if min(corner[1] for corner in triangle.corners) > 0.0:
+            continue
+        flat = [(corner[0], corner[2]) for corner in triangle.corners]
+        try:
+            polygon = Polygon(flat)
+            if not polygon.is_valid:
+                polygon = polygon.buffer(0)
+            if polygon.is_empty or polygon.area < 0.05:
+                polygon = LineString(
+                    list(flat) + [flat[0]]).buffer(0.05)
+            if not polygon.is_empty:
+                pieces.append(polygon)
+        except (ValueError, _GEOS_EXCEPTION):
+            continue
+    if not pieces:
+        return None
+    try:
+        union = unary_union(pieces)
+        closed = union.buffer(1.0).buffer(-1.0)
+        parts = (
+            closed.geoms if hasattr(closed, "geoms") else [closed]
+        )
+        filled = unary_union([
+            Polygon(part.exterior) for part in parts
+            if part.geom_type == "Polygon" and not part.is_empty
+        ])
+    except (ValueError, _GEOS_EXCEPTION):
+        return None
+    if filled.is_empty:
+        return None
+    if filled.geom_type not in ("Polygon", "MultiPolygon"):
+        return None
+    return filled
+
+
 def _classify_tunnel(
     placements: Sequence[ObjectPlacement],
     origin_latitude: float,
@@ -1891,6 +1952,7 @@ def _classify_tunnel(
         mouth_depth_samples=mouth_depth_samples,
         body_depth_m=body_depth_m,
         solid_minimum_y_m=solid_minimum_y_m,
+        solid_outline_footprint=_solid_outline_footprint(triangles),
     )
 
 

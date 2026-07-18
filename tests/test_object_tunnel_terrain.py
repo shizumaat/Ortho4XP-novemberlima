@@ -349,6 +349,110 @@ class TestPavementSubtraction:
 
 
 # ---------------------------------------------------------------------------
+# FLUSH WALLS (user screenshots 2026-07-18c)
+# ---------------------------------------------------------------------------
+
+class TestFlushWalls:
+    """The floor pan reaches the shell's own wall plane (the mesh batter
+    leans OUTWARD, never poking through the object base), the datum rim
+    band sits OUTSIDE the body, and only pavement-abutting edges keep a
+    bucket-safe floor clearance."""
+
+    def _built(self, *, with_pavement: bool = False):
+        layout = _FakeLayout()
+        pavement = None
+        if with_pavement:
+            polygon = Polygon([(40.0, -25.0), (60.0, -25.0),
+                               (60.0, 25.0), (40.0, 25.0)])
+            pavement = BuiltShape(polygon=polygon, role=ROLE_JUNCTION,
+                                  ref="TAXI")
+            layout.shapes.append(pavement)
+        setattr(
+            layout, assembly.CLASSIFICATION_ATTRIBUTE,
+            _Classification([_tunnel(body_depth_m=5.0)]),
+        )
+        assembly.build_tunnel_layout_shapes(
+            layout, _FakeDem(100.0), TILE_LATITUDE, TILE_LONGITUDE
+        )
+        return layout, pavement
+
+    def test_floor_covers_the_whole_body(self):
+        # The 100 x 30 m body is floored to its edge — the old 1.2 m inset
+        # left the terrain wall base protruding INTO the shell.
+        layout, _pavement = self._built()
+        floor_union = unary_union(
+            [p.polygon for p in _floor_plates(layout)])
+        assert floor_union.area == pytest.approx(3000.0, rel=0.01)
+
+    def test_rim_band_lies_outside_the_body(self):
+        layout, _pavement = self._built()
+        floor_union = unary_union(
+            [p.polygon for p in _floor_plates(layout)])
+        rim_union = unary_union([p.polygon for p in _rim_plates(layout)])
+        # No overlap with the floored body, and the wall gap between the
+        # two rows is the setback (node-split safe, near-vertical).
+        assert rim_union.intersection(floor_union).area < 1e-6
+        assert floor_union.distance(rim_union) == pytest.approx(
+            assembly._TUNNEL_WALL_SETBACK_M, abs=0.1)
+
+    def test_floor_keeps_clearance_from_pavement_only(self):
+        layout, pavement = self._built(with_pavement=True)
+        floor_union = unary_union(
+            [p.polygon for p in _floor_plates(layout)])
+        # Bucket-safe gap where the body abuts pavement...
+        assert floor_union.distance(pavement.polygon) >= (
+            assembly._TUNNEL_FLOOR_PAVEMENT_CLEARANCE_M - 0.05)
+        # ...while the free edges stay flush: the floor still reaches the
+        # body's outer boundary (y = ±15) away from the pavement band.
+        minimum_x, minimum_y, maximum_x, maximum_y = floor_union.bounds
+        assert minimum_y == pytest.approx(-15.0, abs=0.05)
+        assert maximum_y == pytest.approx(15.0, abs=0.05)
+
+    def test_rim_band_is_terrain_true_not_datum_flat(self):
+        # EGLL west end (user 2026-07-18c): Tunnel/6+7 anchor ~100 m from
+        # their geometry, so the datum-flat rim stood ~5 m proud of the
+        # surrounding ground as a raised berm box.  Each band part must
+        # sample the DEM at its own centroid; the floor keeps the anchor
+        # datum (that is where the draped object's solids land).
+        class _SlopedDem:
+            nodata = -32768
+
+            def alt(self, xy) -> float:
+                # ~0.3 m per metre of longitude away from the anchor.
+                offset_degrees = xy[0] - (ANCHOR_LONGITUDE - TILE_LONGITUDE)
+                metres = offset_degrees * 111320.0 * 0.62
+                return 100.0 + 0.3 * metres
+
+        layout = _FakeLayout()
+        setattr(
+            layout, assembly.CLASSIFICATION_ATTRIBUTE,
+            _Classification([_tunnel(body_depth_m=5.0)]),
+        )
+        assembly.build_tunnel_layout_shapes(
+            layout, _SlopedDem(), TILE_LATITUDE, TILE_LONGITUDE
+        )
+        rim_alts = {a for p in _rim_plates(layout) for a in p.node_altitudes}
+        # The 100 m-long body spans real slope: band parts track their own
+        # local ground, so the rim carries a RANGE of values, not one.
+        assert len(rim_alts) > 1
+        assert max(rim_alts) - min(rim_alts) > 3.0
+        # The floor still keys on the anchor datum.
+        floor_alts = {a for p in _floor_plates(layout)
+                      for a in p.node_altitudes}
+        assert all(a == pytest.approx(94.5, abs=0.3) for a in floor_alts)
+
+    def test_rim_band_yields_to_earlier_shapes_with_setback(self):
+        layout, pavement = self._built(with_pavement=True)
+        rim_union = unary_union([p.polygon for p in _rim_plates(layout)])
+        # The band never touches the pavement and stays a full setback off
+        # its boundary (a cut exactly on the edge would bucket-share the
+        # pavement's nodes and race datum against the solved grade).
+        assert rim_union.intersection(pavement.polygon).area < 1e-6
+        assert rim_union.distance(pavement.polygon) >= (
+            assembly._TUNNEL_WALL_SETBACK_M - 0.05)
+
+
+# ---------------------------------------------------------------------------
 # gate-off neutrality
 # ---------------------------------------------------------------------------
 
