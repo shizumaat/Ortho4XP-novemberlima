@@ -1,4 +1,37 @@
 # ══════════════════════════════════════════════════════════════════
+# 20260718 PER-VERTEX node_altitudes EMIT LOSS ROOT-CAUSED + FIXED
+# (session: emit-per-vertex; the EGGW +51-001 tunnel-plate collapse
+# measured 2026-07-17).  MECHANISM (all in layout.to_osm): the
+# nid-level final weld inserts partner-way nodes into a value-carrying
+# ring; a node whose first-writer way interned it WITHOUT an altitude
+# claim (no altitude model, or a misaligned node_altitudes list the
+# old ``len(elevs) >= len(coords)`` guard silently dropped — including
+# the value-keyed closing-repeat trim mis-cutting an OPEN [H,L,L,H]
+# list, H==H) has no consensus; ONE such node failed ``have_all`` and
+# the fallback had NO node_altitudes branch, so the whole way shipped
+# with alt_abs only on vertices OTHER ways claimed (EGGW roofs: 2-3 of
+# 6-7) and the mesh dropped the rest onto raw DEM.  The hi/lo 4-corner
+# form survived only via its own fallback branch.  FIXES (layout.py):
+# (1) closing-repeat trim keyed on LENGTH not value; (2) misalignment
+# warns LOUDLY instead of silently unvaluing the ring; (3) NEW
+# unclaimed-node backfill after the consensus pass — every unclaimed
+# node of a value-carrying way gets the ring-interpolated altitude
+# between its nearest claimed neighbours (never overrides a claim, so
+# law/authority/skirt tiers unaffected); (4) NEW node_altitudes
+# fallback branch (way-level tag when lengths still align, flat mean
+# otherwise); (5) invalid-repair _alt_for_nid indexing fixed (was
+# mis-aligned after needle removals).  Regression suite:
+# tests/test_emit_per_vertex_preservation.py (6 tests; 5 fail
+# pre-fix).  PER-CORNER node_altitudes ON TUNNEL PLATES IS NOW SAFE:
+# the _emit_portal_cluster DEM-cut roof branch (local tree, not yet
+# pushed) can drop its hi/lo workaround and emit
+# node_altitudes=[eh, el, el, eh, eh] per the owner's preference.
+# NOTE pre-existing flake seen while verifying: to_osm stamps a
+# second-resolution o4_provenance 'built' timestamp, so
+# test_to_osm_is_idempotent fails when its two emits straddle a
+# second boundary (loaded suite runs) — unrelated to this fix.
+# ══════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 # 20260716 CROSSING-TERRAIN-OWNERSHIP PHASE 1 BUILT (working tree,
 # session: crossing-zone; spec docs/specs/crossing-terrain-ownership.md
 # §4 Phase 1, owner-reviewed 2026-07-16).  ONE influence zone per

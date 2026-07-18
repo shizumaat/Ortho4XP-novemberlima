@@ -683,12 +683,34 @@ class PavementLayout:
             coords = list(ring_coords)
             elevs = list(ring_elevs) if ring_elevs is not None else None
             if coords and coords[0] == coords[-1]:
+                n_closed = len(coords)
                 coords = coords[:-1]
-                if elevs is not None and len(elevs) > 1 and elevs[0] == elevs[-1]:
+                # Closing-repeat trim keyed on LENGTH, not value: a
+                # closed elevation list has exactly one more entry than
+                # the open ring.  The old value test
+                # (``elevs[0] == elevs[-1]``) mis-trimmed an OPEN
+                # ``[H, L, L, H]`` quad list (H == H) down to 3 entries,
+                # and the misalignment guard below then dropped every
+                # per-vertex value of the shape.
+                if elevs is not None and len(elevs) == n_closed:
                     elevs = elevs[:-1]
             if len(coords) < 3:
                 return None, None
-            if elevs is not None and len(elevs) >= len(coords):
+            if elevs is not None and len(elevs) != len(coords):
+                # Ring / per-vertex-value desync: some pass changed the
+                # polygon without keeping ``node_altitudes`` aligned.
+                # The values cannot be re-attached to vertices here, so
+                # the ring is interned unvalued — but LOUDLY: unvalued
+                # vertices ship without ``alt_abs`` and the mesh drops
+                # them onto the raw DEM (the EGGW tunnel-plate collapse,
+                # 2026-07-17).  Fix the mutating pass, never this warn.
+                UI.vprint(1,
+                    f"  [pav-builder] WARN: node_altitudes misaligned "
+                    f"with ring ({len(elevs)} value(s) for "
+                    f"{len(coords)} open vertices) — per-vertex "
+                    f"altitudes dropped for this shape.")
+                elevs = None
+            if elevs is not None:
                 nids = [_intern(x, y, elevs[k])
                         for k, (x, y) in enumerate(coords)]
             else:
@@ -986,9 +1008,15 @@ class PavementLayout:
                                 for k, (la, lo) in enumerate(work_ring)}
                             _alt_for_nid = {}
                             if ext_elevs:
-                                for k in range(min(len(work_nids),
+                                # ``ext_nids`` ↔ ``ext_elevs`` are the
+                                # aligned pre-repair pairs; ``work_nids``
+                                # may have had needle vertices removed
+                                # above, so indexing ``ext_elevs`` by
+                                # ``work_nids`` position mis-assigns
+                                # every altitude past the first removal.
+                                for k in range(min(len(ext_nids) - 1,
                                                    len(ext_elevs))):
-                                    _alt_for_nid[work_nids[k]] = ext_elevs[k]
+                                    _alt_for_nid[ext_nids[k]] = ext_elevs[k]
                             _rep_open = list(_rep.exterior.coords)[:-1]
                             _mapped = []
                             for _lo, _la in _rep_open:   # (lon, lat)
@@ -1261,6 +1289,81 @@ class PavementLayout:
                     sum(chosen) / float(len(chosen)))
         self._skirt_consensus_tier_hits = (  # type: ignore[attr-defined]
             _skirt_tier_hits)
+
+        # ── Unclaimed-node backfill (per-vertex preservation,
+        # 2026-07-18) ────────────────────────────────────────────────
+        # The nid-level final weld can insert a node NO shape ever
+        # claimed an altitude for (its first-writer way interned it
+        # without a value) into a value-carrying ring.  One
+        # consensus-less node used to knock the ENTIRE way off the
+        # per-node emission path (``have_all`` in the tag-writing pass
+        # below), so a tunnel roof quad shipped with ``alt_abs`` on
+        # only the 2-3 vertices other ways happened to claim and the
+        # mesh dropped the rest onto raw DEM (EGGW +51-001,
+        # 2026-07-17).  Give every unclaimed node of a value-carrying
+        # way the ring-interpolated altitude between its nearest
+        # claimed neighbours — the value the host edge carried where
+        # the weld inserted the node.  A node ANY shape claimed keeps
+        # its consensus untouched (the fill never overrides a claim),
+        # so the law/authority/skirt tiers above are unaffected.
+        _n_backfilled = 0
+        for _si, _s, _enids, _sa, _sna in pending:
+            _has_values = (_sa is not None or _sna is not None
+                           or _s.altitude is not None
+                           or _s.node_altitudes is not None
+                           or (_s.altitude_high is not None
+                               and _s.altitude_low is not None))
+            if not _has_values:
+                continue
+            _open = _enids[:-1]
+            _m = len(_open)
+            if _m < 3:
+                continue
+            _missing = [k for k in range(_m)
+                        if node_id_to_consensus.get(_open[k]) is None]
+            if not _missing or len(_missing) == _m:
+                # Nothing to fill, or nothing to fill FROM (a fully
+                # unvalued ring — the misalignment warn above already
+                # fired; the tag-writing fallback handles it).
+                continue
+            for _k in _missing:
+                _nid = _open[_k]
+                if node_id_to_consensus.get(_nid) is not None:
+                    continue        # filled through an earlier way
+                _dists = [None, None]   # (backward, forward)
+                _vals = [None, None]
+                for _side, _sgn in ((0, -1), (1, +1)):
+                    _d = 0.0
+                    _xy = self.ll_to_m(*node_id_to_ll[_nid])
+                    for _step in range(1, _m):
+                        _n2 = _open[(_k + _sgn * _step) % _m]
+                        _xy2 = self.ll_to_m(*node_id_to_ll[_n2])
+                        _d += math.hypot(_xy2[0] - _xy[0],
+                                         _xy2[1] - _xy[1])
+                        _xy = _xy2
+                        _v2 = node_id_to_consensus.get(_n2)
+                        if _v2 is not None:
+                            _dists[_side] = _d
+                            _vals[_side] = _v2
+                            break
+                if _vals[0] is not None and _vals[1] is not None:
+                    _tot = (_dists[0] or 0.0) + (_dists[1] or 0.0)
+                    _fill = (_vals[0] if _tot <= 1e-9
+                             else _vals[0] + (_vals[1] - _vals[0])
+                             * ((_dists[0] or 0.0) / _tot))
+                elif _vals[0] is not None:
+                    _fill = _vals[0]
+                elif _vals[1] is not None:
+                    _fill = _vals[1]
+                else:
+                    continue
+                node_id_to_consensus[_nid] = _fill
+                _n_backfilled += 1
+        if _n_backfilled:
+            UI.vprint(1,
+                f"  [pav-builder] per-vertex backfill: interpolated "
+                f"{_n_backfilled} unclaimed welded node(s) so no "
+                f"value-carrying way loses its per-node emission.")
 
         def _corner_alt(nid: int) -> float | None:
             return node_id_to_consensus.get(nid)
@@ -1671,7 +1774,26 @@ class PavementLayout:
                 # No per-corner consensus available (no shape
                 # contributed altitudes to these nodes).  Fall
                 # back to the source shape's own tags.
-                if (s.altitude_high is not None
+                if shape_node_altitudes is not None:
+                    # A per-vertex shape whose ring lost its claims
+                    # (the misalignment warn / a fully-unvalued weld
+                    # partner).  This branch was MISSING until
+                    # 2026-07-18: the fall-through emitted NO altitude
+                    # tags at all, so the way's vertices dropped onto
+                    # raw DEM (EGGW tunnel plates).  Ship the way-level
+                    # ``node_altitudes`` tag when the values still
+                    # align with the final ring; else degrade to the
+                    # flat mean — constrained, if no longer sloped.
+                    _vals = [float(v) for v in shape_node_altitudes]
+                    if len(_vals) == n_open:        # open convention
+                        _vals = _vals + [_vals[0]]
+                    if len(_vals) == n_open + 1:
+                        tags["node_altitudes"] = ",".join(
+                            f"{v:.2f}" for v in _vals)
+                    elif _vals:
+                        tags["altitude"] = (
+                            f"{sum(_vals) / len(_vals):.2f}")
+                elif (s.altitude_high is not None
                         and s.altitude_low is not None):
                     # hi/lo emission RETIRED (user 2026-07-06): a
                     # 4-corner source rect carries its per-corner values
