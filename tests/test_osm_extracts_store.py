@@ -49,13 +49,20 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setattr(EXTRACTS, "extracts_enabled", lambda: True)
     EXTRACTS._leaf_regions.cache = None
     # Synthetic Geofabrik index: europe is a parent (excluded), portugal
-    # and spain are adjacent leaves meeting at lon -7.4.
+    # and spain are adjacent leaves meeting at lon -7.4.  iberia is an
+    # AGGREGATE that also passes the leaf test because nothing declares
+    # it as a parent — the real index does exactly this (every United
+    # States state's parent is north-america, so the 11 GB "us"
+    # aggregate reads as a leaf); it duplicates portugal + spain and
+    # additionally covers a southern band (lat 34-36 west of -7.4)
+    # that neither of them reaches.
     index = {
         "type": "FeatureCollection",
         "features": [
             _region_feature("europe", None, -12, 34, 5, 62),
             _region_feature("portugal", "europe", -10, 36, -7.4, 43),
             _region_feature("spain", "europe", -7.4, 35, 4, 44),
+            _region_feature("iberia", "europe", -10, 34, 4, 44),
         ],
     }
     os.makedirs(directory, exist_ok=True)
@@ -99,6 +106,33 @@ class TestCoveringRegions:
         os.remove(os.path.join(store, "index-v1.json"))
         EXTRACTS._leaf_regions.cache = None
         assert EXTRACTS.covering_regions((38, -9.5, 39, -8.5)) is None
+
+    def test_duplicate_aggregate_leaf_is_pruned(self, store):
+        # The border tile is fully served by portugal + spain; the
+        # iberia aggregate covering both must not be selected on top
+        # (the CYXY 2026-07-18 stall: "us" + "us-pacific" selected
+        # alongside "us/alaska").
+        regions = EXTRACTS.covering_regions((37, -8, 38, -7))
+        assert regions is not None
+        assert sorted(region_id for (region_id, _u) in regions) \
+            == ["portugal", "spain"]
+
+    def test_aggregate_kept_where_it_alone_covers(self, store):
+        # Only iberia reaches the lat 34-36 band west of lon -7.4, so
+        # pruning must keep it there — and drop the finer leaves it
+        # duplicates.
+        regions = EXTRACTS.covering_regions((35, -9, 36, -8))
+        assert regions is not None
+        assert [region_id for (region_id, _u) in regions] == ["iberia"]
+
+    def test_touching_neighbour_without_contribution_is_pruned(
+            self, store):
+        # The bbox's eastern edge sits exactly on the portugal/spain
+        # border: spain intersects it as a line, contributes no area,
+        # and must not drag a whole extra extract into every query.
+        regions = EXTRACTS.covering_regions((38, -8.4, 39, -7.4))
+        assert regions is not None
+        assert [region_id for (region_id, _u) in regions] == ["portugal"]
 
 
 class TestWantedList:

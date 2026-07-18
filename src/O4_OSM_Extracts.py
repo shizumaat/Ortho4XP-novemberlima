@@ -226,6 +226,16 @@ def _leaf_regions() -> Optional[list]:
         return None
 
 
+# Region-boundary tolerance for coverage tests, in degrees (~1 km):
+# Geofabrik region polygons are simplified and sea-buffered, so
+# adjacent regions' shared borders never coincide exactly.
+_COVERAGE_BUFFER_DEGREES = 0.01
+# A region whose unique contribution to the bbox is below this area
+# (degrees squared, float-dust scale) duplicates the other selected
+# regions and is pruned.
+_REDUNDANT_COVER_AREA = 1e-9
+
+
 def covering_regions(bounding_box) -> Optional[list]:
     """[(region_id, pbf_url)] of leaves covering the bbox, or ``None``.
 
@@ -233,6 +243,20 @@ def covering_regions(bounding_box) -> Optional[list]:
     means the tile is not extract-servable: no index yet, or the
     intersecting leaves do not jointly contain the bbox (open ocean,
     index gaps) — the caller keeps using Overpass.
+
+    The result is a MINIMAL cover, not every intersecting leaf: the
+    Geofabrik index declares each United States state's parent as
+    ``north-america`` rather than ``us``, so the aggregate ``us``
+    extract (11 GB) and the grouping extracts (``us-pacific``, ...)
+    pass the leaf test alongside the states that duplicate them (the
+    same pattern covers ``great-britain`` over the English counties).
+    Every selected region is read end-to-end on every query, so
+    redundant covers are pruned, largest first: a region is kept only
+    for bbox area no other kept region serves (a Whitehorse masks
+    query, 2026-07-18, selected yukon + north-admreg + us/alaska AND
+    the duplicate us + us-pacific — an eight-minute filtering stall
+    and a 12 GB download for data the us/alaska extract already
+    served).
     """
     leaves = _leaf_regions()
     if leaves is None:
@@ -250,8 +274,35 @@ def covering_regions(bounding_box) -> Optional[list]:
         ]
         if not intersecting:
             return None
+        # All coverage arithmetic happens inside the bbox neighbourhood,
+        # so clip once: region polygons carry whole coastlines the
+        # repeated buffer/difference calls below must not chew through.
+        bbox_neighbourhood = bbox_polygon.buffer(
+            2 * _COVERAGE_BUFFER_DEGREES)
+        clipped = {
+            region_id: region_geometry.intersection(bbox_neighbourhood)
+            for (region_id, _u, region_geometry) in intersecting
+        }
+        # Reverse-delete pruning, largest region first (geometry area is
+        # the proxy for extract size), so aggregates fall before the
+        # smaller regions that duplicate them.
+        intersecting.sort(
+            key=lambda entry: (-entry[2].area, entry[0]))
+        kept = list(intersecting)
+        for entry in intersecting:
+            if len(kept) == 1:
+                break
+            (region_id, _url, _geometry) = entry
+            others = unary_union([
+                clipped[other_id]
+                for (other_id, _u, _g) in kept if other_id != region_id
+            ])
+            unique = clipped[region_id].intersection(bbox_polygon) \
+                .difference(others.buffer(_COVERAGE_BUFFER_DEGREES))
+            if unique.area <= _REDUNDANT_COVER_AREA:
+                kept.remove(entry)
         union = unary_union(
-            [region_geometry for (_i, _u, region_geometry) in intersecting]
+            [clipped[region_id] for (region_id, _u, _g) in kept]
         )
         # Residue the leaves do not cover is OPEN OCEAN by construction
         # (Geofabrik regions jointly cover all land, with sea buffers),
@@ -260,11 +311,13 @@ def covering_regions(bounding_box) -> Optional[list]:
         # margined queries poke ~0.02 deg2 of Atlantic).  A LARGE
         # residue means a hole in the index (a region missing) — keep
         # the Overpass fallback there rather than silently losing data.
-        uncovered = bbox_polygon.difference(union.buffer(0.01))
+        uncovered = bbox_polygon.difference(
+            union.buffer(_COVERAGE_BUFFER_DEGREES))
         if uncovered.area > 0.10 * bbox_polygon.area:
             return None
-        return [(region_id, pbf_url) for (region_id, pbf_url, _g)
-                in intersecting]
+        return sorted(
+            (region_id, pbf_url) for (region_id, pbf_url, _g) in kept
+        )
     except Exception:
         return None
 
