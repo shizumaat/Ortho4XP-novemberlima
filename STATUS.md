@@ -230,9 +230,12 @@
 # inset stream MERGED to dev (8a42ba2: extract-first + DT fill +
 # package-footprint union + batched multi-box fetch; 140 tests).
 # check_build_time gate tool COMMITTED (55b2623; 27 tests).  Wave2c
-# (chromatic GS, ed50292, 14 tests) + wave3 (vectorized hole-router,
-# 423a53c, 22 tests) COMMITTED on their branches; agents died before
-# final A/Bs — lead running CYXY A/B pairs now; merge after verdicts.
+# (chromatic GS) + wave3 (vectorized hole-router) A/B-verified by
+# lead (2c counts-equal + zero steps; w3 BYTE-IDENTICAL) and MERGED
+# to dev (c2ecffa, d79c923; config append-conflict kept both blocks;
+# 72 tests green post-merge).  Orphaned tunnel-carve session edits
+# salvage-committed (bridges/config/test_portal_faces, 15 green).
+# Worktrees wave2c/wave3/inset are MERGED — prune when convenient.
 # ══════════════════════════════════════════════════════════════════
 # ★★★ HARD LAW 20260718 (CLAUDE.md item 6, dev 7489fc0): any code
 # that increases build times ⇒ Fable 5 whole-pipeline optimization
