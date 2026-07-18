@@ -2517,6 +2517,14 @@ def final_grade_projection(layout, icao: str = "", dem=None,
     # enforced (``_margined_budget``); nodes of shapes whose body pairs
     # are still lazy (never expanded ⇒ the projection proved them
     # untouched, so there is no sawtooth to re-fair there) are anchored.
+    # SNAPSHOT RECAPTURE input (2026-07-18): mirror the solve-side
+    # pre/post-fairing diff (the solve's ``_pre_fairing_elev`` block) —
+    # this fairing is the LAST pass before writeback, nothing re-enforces
+    # the pairs it perturbs, so the snapshot recaptured below must exclude
+    # the moved nodes from the "unchanged ⇒ already enforced" proof.
+    _scoped_projection_gate = (_os.environ.get(
+        "O4_SCOPED_FINAL_PROJECTION", "1") == "1")
+    _pre_fairing_elev = list(elev) if _scoped_projection_gate else None
     if _os.environ.get("O4_EDGE_FAIRING", "1") == "1":
         from auto_patch.config import TAXIWAY_MAX_GRADE_CHANGE_PER_M
         from .one_solve import (_build_adjacency, _emit_quantization_margin,
@@ -2537,6 +2545,14 @@ def final_grade_projection(layout, icao: str = "", dem=None,
                          hard | _lazy_guard_nodes | _tri_anchor_idx, None,
                          TAXIWAY_MAX_GRADE_CHANGE_PER_M,
                          law_adjacency=_law_adjacency)
+    # Fairing-moved canonical keys for the snapshot recapture below —
+    # computed BEFORE the crown transform back (both sides of the diff in
+    # the same z′ space, so only genuine fairing moves register).
+    _fairing_moved_keys = None
+    if _pre_fairing_elev is not None:
+        _fairing_moved_keys = {
+            key for key, i in b2i.items()
+            if elev[i] != _pre_fairing_elev[i]}
     _stage("fairing")
     # crown transform back: z = z′ − c (see the entry transform above).
     if _crown_of:
@@ -2551,6 +2567,29 @@ def final_grade_projection(layout, icao: str = "", dem=None,
         _rs.altitude_high = _ah
         _rs.altitude_low = _lo
     _stage("writeback")
+    # SNAPSHOT RECAPTURE (2026-07-18): the solve captures the scoped
+    # snapshot ONCE at its writeback, so the LATE projection run compared
+    # against SOLVE-time values, saw every mid-projected value as touched,
+    # and deferred almost nothing (measured OTHH: 26 deferred of ~350+
+    # soft shapes — see the broken-quarantine-carry note above).  Refresh
+    # the snapshot from the state THIS run just wrote back, under the SAME
+    # guard as the solve-side capture: the next projection run scopes
+    # against the PREVIOUS run's output, so only shapes the bounded
+    # post-mid churn (welds, band adoptions) actually touched re-project.
+    # ``broken`` carries the full persisted quarantine
+    # (``_final_projection_broken_keys``, refreshed above) so the next
+    # run's sparser envelope cannot un-quarantine an infeasible pocket.
+    # A stale snapshot is SAFE (mismatched values ⇒ nothing defers), so a
+    # geometry hiccup here simply keeps the previous snapshot.
+    if ((CURVE_NATIVE_SPINE or ROUTE_ARC_SPINE) and _scoped_projection_gate):
+        try:
+            _recapture_broken_keys = set(getattr(
+                layout, "_final_projection_broken_keys", None) or set())
+            _capture_projection_snapshot(layout, _fairing_moved_keys,
+                                         _recapture_broken_keys)
+        except _snapshot_geom_exceptions():
+            pass
+    _stage("snapshot")
     # LOCKSTEP PAIR-CAP FREEZE (2026-07-17): capture the baked pair
     # allowances THIS projection just enforced (grade_graph refreshed
     # ``layout._lockstep_shape_bake`` during the constraint build above)
@@ -2579,7 +2618,7 @@ def final_grade_projection(layout, icao: str = "", dem=None,
                 f"{name}={_stage_t.get(name, 0.0):.1f}s"
                 for name in ("seed", "ctx", "scope", "constraints",
                              "graph", "hard", "project", "fairing",
-                             "writeback")))
+                             "writeback", "snapshot")))
     except Exception:
         pass
 
