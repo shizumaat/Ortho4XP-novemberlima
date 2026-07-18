@@ -73,6 +73,11 @@ __all__ = [
     "FLAT_AIRPORT_FAST_PATH",
     "REACH_BAND_CLUSTERS",
     "REACH_BAND_CLUSTER_SIZE_M",
+    "RASTER_REACH_BAND",
+    "RASTER_REACH_BAND_CELL_M",
+    "RASTER_REACH_BAND_CONNECTIVITY",
+    "RASTER_REACH_BAND_OFFNET_RADIUS_M",
+    "RASTER_REACH_BAND_MAX_CELLS",
     "RECT_CROSS_FLATNESS_TOLERANCE_M",
     "BUILDING_SEAT_FLATNESS_TOLERANCE_M",
     "TAXI_MAX_GRADE",
@@ -1124,6 +1129,46 @@ REACH_BAND_CLUSTERS = (
 # common case (so the shared-line reuse fires often) while still amortizing the
 # scan over the tens of apron/taxiway body nodes a bucket holds.
 REACH_BAND_CLUSTER_SIZE_M = 24.0
+
+# ── Rasterized reach-band field (Tier 3 wave 2a, ``O4_RASTER_REACH_BAND``) ──
+# Replace the per-query nearest-visible-centerline reach-band evaluation (the
+# ~460 s band/nvc/node_bands wall of a warm OTHH build) with a precomputed
+# raster field: the pavement-with-holes mask is rasterized once per airport,
+# the runway-anchor cells are seeded with their (de-crowned) values, and TWO
+# multi-source Dijkstra passes over the masked grid settle
+# ``ceiling = min_a(value_a + cap·d_grid)`` / ``floor = max_a(value_a −
+# cap·d_grid)`` — the TRUE min-plus (cone-envelope) reach field in the grid
+# metric.  Every band query is then an O(1) nearest-cell grid read; the 74 ms
+# off-net skeleton fallback and the 45 k zone tail collapse into the same
+# lookup (bounded-radius nearest-paved-cell, else None).
+#
+# This is a DELIBERATE SEMANTIC REPLACEMENT (spec §3.5 "Wave 1 outcome"): the
+# raster field computes the exact envelope over all anchors in the grid metric,
+# where the legacy nearest-band-node evaluation could read a ceiling too high (a
+# recorded latent inexactness).  Acceptance is counts-not-worse, NOT byte
+# identity.  The solve and the validator both consume it through the single
+# producer ``building_feasibility.reach_band_unified``, so they stay aligned.
+# Gate OFF (``O4_RASTER_REACH_BAND=0``) restores the legacy nvc band
+# byte-identically.
+RASTER_REACH_BAND = (
+    _os_early.environ.get("O4_RASTER_REACH_BAND", "1") == "1")
+# Cell side (m).  Fine enough that the narrowest real taxiway corridor (≥15 m)
+# spans ≥3 cells and a ½-cell conservative erosion cannot close it; also the
+# nearest-cell query error is ≤ cell/√2.  3 m keeps the OTHH grid at a few
+# million cells (a few hundred MB of graph) while resolving corridors well.
+RASTER_REACH_BAND_CELL_M = 3.0
+# Grid connectivity: 8 (axial + diagonal chamfer; staircase over-estimates a
+# straight segment by ≤ ~7.6 %, the SAFE band-widening direction) or 16 (adds
+# knight moves through paved intermediates; ≤ ~2.8 % error, tighter/more
+# faithful).  Default 8 (robust — a knight move never shortcuts a hole).
+RASTER_REACH_BAND_CONNECTIVITY = 8
+# Off-mask query policy: a point off the paved mask reads the nearest paved
+# cell within this radius (its band widened by ``APRON_MAX_GRADE × offset``,
+# the skeleton-band slack rule), else None (off-net → local within-shape law).
+RASTER_REACH_BAND_OFFNET_RADIUS_M = 30.0
+# Safety ceiling on the grid cell count.  Above this the raster build refuses
+# and the legacy band runs (a pathological bounding box must never OOM a build).
+RASTER_REACH_BAND_MAX_CELLS = 60_000_000
 
 # Taxi-rect CROSS-section flatness reserve (m): a rect's two flat-cross
 # (cap≈0) edges want their endpoints EQUAL, so a rect certifies its

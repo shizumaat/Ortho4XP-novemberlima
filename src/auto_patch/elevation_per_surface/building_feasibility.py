@@ -726,6 +726,56 @@ def reach_band_unified(layout, G):
     if not getattr(G, "runway_anchor", None) or not getattr(G, "spine_adj", None):
         return lambda x, y: None
 
+    # RASTER REACH FIELD (Tier 3 wave 2a, ``O4_RASTER_REACH_BAND``, default on):
+    # replace the per-query nearest-visible-centerline evaluation below with a
+    # precomputed grid field (one masked multi-source Dijkstra per direction, O(1)
+    # nearest-cell reads).  This is a SEMANTIC replacement — the true min-plus cone
+    # envelope in the grid metric, not byte-identical to the legacy band (spec §3.5
+    # "Wave 1 outcome") — consumed by BOTH the solve and the validator through this
+    # one producer, so they stay aligned.  A None return (no pavement / empty grid /
+    # over the cell cap) falls through to the legacy band below.  Gate off restores
+    # the legacy nvc band byte-identically.
+    from auto_patch.config import RASTER_REACH_BAND
+    if RASTER_REACH_BAND and os.environ.get("O4_RASTER_REACH_BAND", "1") == "1":
+        try:
+            from auto_patch.elevation_per_surface.raster_reach_band import (
+                build_raster_reach_band)
+            _raster = build_raster_reach_band(layout, G)
+        except Exception:                                      # pragma: no cover
+            _raster = None
+        if _raster is not None:
+            # OFF-NET POLICY (mission item 3): a query the raster field cannot
+            # answer (off the paved mask beyond the bounded radius, or a paved
+            # component unreachable from any anchor) returns None from the raster.
+            # Rather than leave such a point unconstrained, fall back to the LEGACY
+            # band there — built ONCE, lazily, only if some query actually needs it
+            # (on a fully-covered airport the legacy band is never constructed, so
+            # the full perf win stands).  The legacy band is this same function with
+            # the gate forced off.
+            _legacy_holder = {}
+
+            def _band_with_fallback(x, y):
+                r = _raster(x, y)
+                if r is not None:
+                    return r
+                lb = _legacy_holder.get("band")
+                if lb is None:
+                    prev = os.environ.get("O4_RASTER_REACH_BAND")
+                    os.environ["O4_RASTER_REACH_BAND"] = "0"
+                    try:
+                        lb = reach_band_unified(layout, G)
+                    finally:
+                        if prev is None:
+                            os.environ.pop("O4_RASTER_REACH_BAND", None)
+                        else:
+                            os.environ["O4_RASTER_REACH_BAND"] = prev
+                    _legacy_holder["band"] = lb
+                return lb(x, y)
+
+            _band_with_fallback.raster_meta = getattr(   # type: ignore[attr-defined]
+                _raster, "raster_meta", None)
+            return _band_with_fallback
+
     # De-crown the runway-join anchor SEEDS into the ONE uncrowned profile
     # space this band is documented to live in (space invariant — see
     # crown.crown_drop_at / the flex_slack_at note; grade_graph_validate.
