@@ -4485,19 +4485,53 @@ def _detect_tunnel_portal_pairs(layout, dem, tile_lat, tile_lon):
     # Portal-FACE candidates (user 2026-07-17, EGGW class): bare soft
     # face quads hanging below grade, recognized by the classifier as
     # ``portal_faces``.  They pair only with EACH OTHER (a face and a
-    # cosmetic deck are different physical modelling conventions), and
-    # only where OpenStreetMap does NOT map the bore — a mapped
-    # ``tunnel=yes`` way between the faces means the OSM machinery
-    # (which knows the true road alignment and its DEM cut) owns the
-    # crossing, and the faces are corroboration, not a second emitter.
+    # cosmetic deck are different physical modelling conventions).
+    # Owner ruling 2026-07-18: a recognized face pair OWNS its crossing
+    # and receives the KBNA-style mouth/crown/collar treatment ALIGNED
+    # ON THE MOUTH ANCHORS — a mapped OSM ``tunnel=yes`` way between
+    # the faces is corroboration that strengthens the pair, never a
+    # reason to stand down (the OSM-side emitters yield through the
+    # crossing-ownership union, exactly as they do for KBNA pairs).
+    #
+    # A face's own horizontal projection is a sliver (a vertical quad
+    # projects to its face LINE), useless for the mouth/crown split and
+    # the collar — synthesize the KBNA-shaped plate footprint instead:
+    # a rectangle CENTERED ON THE ANCHOR (the anchor sits on the face
+    # line), spanning the face width plus a shoulder, reaching
+    # half-depth outward (the mouth half) and half-depth inward (the
+    # buried crown half).
     face_candidates = []
     _mapped_tunnel_lines_m: list = []
     for face in getattr(classification, "portal_faces", None) or []:
         try:
-            ring = [
-                to_meters(lon, lat) for lon, lat in
-                face.face_polygon_longitude_latitude.exterior.coords]
-            footprint = Polygon(ring)
+            anchor_x, anchor_y = to_meters(
+                face.anchor_longitude_latitude[0],
+                face.anchor_longitude_latitude[1])
+            line_bearing = math.radians(
+                float(getattr(face, "face_line_bearing_degrees", 0.0)))
+            along = (math.sin(line_bearing), math.cos(line_bearing))
+            across = (-along[1], along[0])
+            half_width = (0.5 * float(face.face_width_m)
+                          + float(_CFG.PORTAL_FACE_PLATE_SHOULDER_M))
+            half_depth = 0.5 * float(_CFG.PORTAL_FACE_PLATE_DEPTH_M)
+            footprint = Polygon([
+                (anchor_x + along[0] * half_width
+                 + across[0] * half_depth,
+                 anchor_y + along[1] * half_width
+                 + across[1] * half_depth),
+                (anchor_x - along[0] * half_width
+                 + across[0] * half_depth,
+                 anchor_y - along[1] * half_width
+                 + across[1] * half_depth),
+                (anchor_x - along[0] * half_width
+                 - across[0] * half_depth,
+                 anchor_y - along[1] * half_width
+                 - across[1] * half_depth),
+                (anchor_x + along[0] * half_width
+                 - across[0] * half_depth,
+                 anchor_y + along[1] * half_width
+                 - across[1] * half_depth),
+            ])
             if not footprint.is_valid:
                 footprint = footprint.buffer(0)
             if footprint.geom_type != "Polygon" or footprint.is_empty:
@@ -4677,31 +4711,22 @@ def _detect_tunnel_portal_pairs(layout, dem, tile_lat, tile_lon):
                     + float(_CFG.TUNNEL_PORTAL_PAIR_BURIED_MARGIN_M))
             if not buried:
                 continue
+            osm_corroborated = False
             if is_face_i and _mapped_tunnel_lines_m:
-                # OSM owns a mapped bore between the faces: the tunnel
-                # machinery (true road alignment + DEM cut) emits the
-                # crossing; the face pair is corroboration only.
+                # Owner ruling 2026-07-18: a mapped OSM bore between
+                # the faces CORROBORATES the pair (it never stands the
+                # pair down — the pair owns the crossing and the OSM
+                # emitters yield through the crossing-ownership union).
                 try:
                     connecting = LineString([
                         (centroid_i.x, centroid_i.y),
                         (centroid_j.x, centroid_j.y),
                     ]).buffer(20.0)
-                    if any(line.intersects(connecting)
-                           for line in _mapped_tunnel_lines_m):
-                        used.add(id(bridge_i))
-                        used.add(id(bridge_j))
-                        UI.vprint(
-                            1,
-                            "   [object-tunnel] portal-face pair "
-                            f"({spacing:.0f} m apart) corroborates a "
-                            "MAPPED OSM tunnel — OSM machinery owns "
-                            "the crossing: "
-                            f"{bridge_i.object_resources} + "
-                            f"{bridge_j.object_resources}",
-                        )
-                        break
+                    osm_corroborated = any(
+                        line.intersects(connecting)
+                        for line in _mapped_tunnel_lines_m)
                 except _GEOM_EXC:
-                    pass
+                    osm_corroborated = False
             pairs.append({
                 "portals": (
                     {"bridge": bridge_i, "footprint": footprint_i,
@@ -4713,12 +4738,15 @@ def _detect_tunnel_portal_pairs(layout, dem, tile_lat, tile_lon):
                 ),
                 "spacing_m": spacing,
                 "is_face": bool(is_face_i),
+                "osm_corroborated": osm_corroborated,
             })
             used.add(id(bridge_i))
             used.add(id(bridge_j))
             buried_evidence = (
                 "airside pavement over the body" if mid_max is None
                 else f"hill to {mid_max:.1f} m")
+            if osm_corroborated:
+                buried_evidence += ", mapped OSM tunnel corroborates"
             UI.vprint(
                 1,
                 "   [object-tunnel] portal pair recognized "

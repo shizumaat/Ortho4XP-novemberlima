@@ -368,9 +368,13 @@ class TestPortalFacePairing:
         for portal in pair["portals"]:
             assert portal["mouth_floor_m"] == pytest.approx(90.0)
 
-    def test_mapped_tunnel_between_suppresses_the_pair(
+    def test_mapped_tunnel_between_corroborates_the_pair(
         self, monkeypatch
     ) -> None:
+        # Owner ruling 2026-07-18: a mapped OSM bore between the faces
+        # STRENGTHENS the pair (recorded as corroboration) — it never
+        # stands the pair down.  The pair owns the crossing and the
+        # OSM-side emitters yield through the crossing-ownership union.
         _install_pairing_scene(monkeypatch, mapped_tunnel_between=True)
         faces = [
             _face_record(-50.0, 0.0, 0.0, "west_face"),
@@ -379,7 +383,9 @@ class TestPortalFacePairing:
         layout = _layout_with_faces(faces)
         pairs = bridges._detect_tunnel_portal_pairs(
             layout, object(), TILE_LATITUDE, TILE_LONGITUDE)
-        assert pairs == []
+        assert len(pairs) == 1
+        assert pairs[0]["is_face"] is True
+        assert pairs[0]["osm_corroborated"] is True
 
     def test_perpendicular_faces_do_not_pair(self, monkeypatch) -> None:
         # Two faces whose lines are 90 deg apart are not two ends of one

@@ -210,6 +210,8 @@ __all__ = [
     "TUNNEL_PORTAL_PAIR_MAX_SPACING_M",
     "TUNNEL_PORTAL_PAIR_HEADING_TOLERANCE_DEGREES",
     "TUNNEL_PORTAL_PAIR_BURIED_MARGIN_M",
+    "PORTAL_FACE_PLATE_SHOULDER_M",
+    "PORTAL_FACE_PLATE_DEPTH_M",
     "TUNNEL_PORTAL_MOUTH_SAMPLE_RANGE_M",
     "TUNNEL_PORTAL_CROWN",
     "TUNNEL_PORTAL_CROWN_COLLAR_M",
@@ -2499,6 +2501,14 @@ TUNNEL_PORTAL_PAIR_MIN_SPACING_M = 20.0
 TUNNEL_PORTAL_PAIR_MAX_SPACING_M = 600.0
 TUNNEL_PORTAL_PAIR_HEADING_TOLERANCE_DEGREES = 30.0
 TUNNEL_PORTAL_PAIR_BURIED_MARGIN_M = 1.0
+# Portal-FACE plate synthesis (owner ruling 2026-07-18, EGGW class): a
+# bare face quad's horizontal projection is a sliver, so the KBNA-style
+# mouth/crown/collar plates are built on a synthesized rectangle
+# CENTERED ON THE FACE ANCHOR — face width plus a shoulder each side,
+# half the depth outward (the road-grade mouth half) and half inward
+# (the deck-grade crown half over the buried bore).
+PORTAL_FACE_PLATE_SHOULDER_M = 3.0
+PORTAL_FACE_PLATE_DEPTH_M = 16.0
 # Outward ray from each mouth sampled over this range for the mouth
 # floor (the MINIMUM wins — the descending road's grade at the face,
 # robust against the embankment skirt inflating near samples).  150 m
