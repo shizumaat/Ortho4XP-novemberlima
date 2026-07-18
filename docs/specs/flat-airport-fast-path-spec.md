@@ -172,13 +172,10 @@ performance-neutral and is gated OFF by default (kept as scaffolding).
 
 ### Enforcement (owner ruling 2026-07-18 — hard law, all sessions)
 
-Any new code that increases build times must be evaluated by a Fable 5
-optimization agent considering the whole pipeline and whether the
-increase can be avoided or offset. Anything pushing a cold build
-(excluding download time) over the 60-second target requires a written
-explanation and explicit owner approval before landing. Recorded in
-the repo-root CLAUDE.md working-style rules (item 6); binds every
-session and agent.
+Canonical text: repo-root CLAUDE.md, working-style item 6 (two budgets
+— 60 s per-airport auto-patch, 300 s whole-tile compute, both cold and
+excluding downloads; >=1 % review trigger; budget-crossing needs owner
+approval). This spec section is a POINTER, not a second copy.
 
 ### Wave 3 — geometry & emission acceleration (terrain independent)
 
