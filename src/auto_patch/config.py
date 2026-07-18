@@ -1109,10 +1109,15 @@ FLAT_AIRPORT_FAST_PATH = (
 # EXACT, bit-identical band via the shared line without its own scan (see
 # ``reach_band_unified._batch`` / ``_confirms_line``).  A member the shared line
 # does not provably serve takes the exact per-node scan.  The output is
-# bit-identical to the per-node scan; only the scan work is amortized.  Default
-# ON; ``O4_REACH_BAND_CLUSTERS=0`` restores the per-node scan (byte-inert).
+# bit-identical to the per-node scan; only the scan work is amortized.
+# Default OFF (lead ruling after the wave-1 A/B): the amortization measured
+# PERFORMANCE-NEUTRAL (line-share hit rates 14-28 %, confirmation cost ≈ the
+# scan it replaces), and a neutral extra code path violates the
+# refinements-must-simplify standing ruling.  The machinery stays for wave 2
+# scaffolding (bucketing + consumer map + byte-identity tests);
+# ``O4_REACH_BAND_CLUSTERS=1`` enables it.
 REACH_BAND_CLUSTERS = (
-    _os_early.environ.get("O4_REACH_BAND_CLUSTERS", "1") == "1")
+    _os_early.environ.get("O4_REACH_BAND_CLUSTERS", "0") == "1")
 
 # Grid bucket side (m) for the reach-band cluster amortization.  ~24 m keeps a
 # bucket small enough that its members share one serving centerline in the
