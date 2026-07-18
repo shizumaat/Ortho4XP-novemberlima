@@ -53,6 +53,15 @@ _VIS_PAIR_CHUNK = 400_000
 # than this is treated as a point-touch (corner), not an edge-hug.
 _EPS_M = 0.05
 
+# Interior parameters (fraction of the way from endpoint A to endpoint B) at
+# which the vectorized adjacency pass samples each candidate chord for the
+# cheap ``contains_xy`` rejection prefilter.  Any sample falling outside the
+# eps-buffered pavement proves ``contains(buffered_pavement, segment)`` must be
+# False, so the pair can be rejected before the expensive full-segment
+# ``contains`` call.  The prefilter is necessary-only: pairs whose samples all
+# land inside still go through the full ``contains`` test.
+_PREFILTER_SAMPLE_FRACTIONS = (0.2, 0.4, 0.6, 0.8)
+
 __all__ = [
     "HoleRoute",
     "VisibilityGraph",
@@ -205,6 +214,26 @@ def _build_adjacency_vectorized(nodes, buf_poly, boundary, obstacles, eps_m):
     GEOS calls are batched.  ``shapely.contains(buf, segs)`` is elementwise
     identical to ``prep(buf).contains(seg)`` (GEOS PreparedContains == Contains),
     verified against the scalar path on real fixture geometry.
+
+    Two sound (verdict-preserving) prunes cut the GEOS work without changing a
+    single edge:
+
+    * Sampled ``contains_xy`` prefilter — before any LineString is built,
+      each candidate chord is probed at the interior parameters in
+      ``_PREFILTER_SAMPLE_FRACTIONS``.  ``contains(buf_poly, seg)`` requires
+      EVERY point of the segment to lie in ``buf_poly``, so one sample outside
+      proves the pair fails; only pairs with all samples inside pay for the
+      LineString build + full ``contains``.
+
+    * ``relate_pattern`` prune for the boundary-run stage —
+      ``_max_line_len(seg ∩ boundary) > eps`` needs a 1-dimensional component
+      in the intersection, which (both operands being lineal, so the Polygon
+      branch of ``_max_line_len`` is unreachable) requires the DE-9IM
+      interior/interior entry to have dimension 1.  The vectorized
+      ``relate_pattern(segs, boundary, "1********")`` is therefore a sound
+      necessary condition; the expensive ``intersection`` + ``_max_line_len``
+      run only on its hits.  Point-touches (segment endpoints on ring
+      vertices) yield 0-D entries and are skipped for free.
     """
     n = len(nodes)
     adj: list[list[tuple[int, float]]] = [[] for _ in range(n)]
@@ -227,25 +256,54 @@ def _build_adjacency_vectorized(nodes, buf_poly, boundary, obstacles, eps_m):
         keep = length > 1e-9
         if not keep.any():
             continue
-        # Build LineStrings only for the length-positive pairs.
+        # Sampled contains_xy rejection prefilter (sound, necessary-only):
+        # a pair with ANY interior sample outside the eps-buffered pavement
+        # cannot satisfy ``contains(buf_poly, seg)`` — reject it before the
+        # far more expensive per-segment LineString build + contains call.
+        for sample_fraction in _PREFILTER_SAMPLE_FRACTIONS:
+            candidate_indices = np.flatnonzero(keep)
+            if candidate_indices.size == 0:
+                break
+            sample_x = (ax[candidate_indices]
+                        + sample_fraction
+                        * (bx[candidate_indices] - ax[candidate_indices]))
+            sample_y = (ay[candidate_indices]
+                        + sample_fraction
+                        * (by[candidate_indices] - ay[candidate_indices]))
+            sample_inside = shapely.contains_xy(buf_poly, sample_x, sample_y)
+            keep[candidate_indices[~sample_inside]] = False
+        if not keep.any():
+            continue
+        # Build LineStrings only for the surviving pairs.
         sub = np.flatnonzero(keep)
         seg_coords = np.empty((sub.shape[0], 2, 2), dtype=float)
         seg_coords[:, 0, 0] = ax[sub]
         seg_coords[:, 0, 1] = ay[sub]
         seg_coords[:, 1, 0] = bx[sub]
         seg_coords[:, 1, 1] = by[sub]
-        segs = shapely.linestrings(seg_coords)
+        # np.asarray is a no-op passthrough on the geometry ndarray but gives
+        # the type checker the array (indexable) type the stubs lack.
+        segs = np.asarray(shapely.linestrings(seg_coords))
         # contains on the eps-buffered pavement.
         alive = shapely.contains(buf_poly, segs)
         if not alive.any():
             continue
         # Boundary-run rejection: reject where the longest 1-D component of the
-        # seg∩boundary exceeds eps (a chord hugging an existing edge).
-        aidx = np.flatnonzero(alive)
-        inter = shapely.intersection(segs[aidx], boundary)
-        for m, geom in zip(aidx, inter):
-            if _max_line_len(geom) > eps_m:
-                alive[m] = False
+        # seg∩boundary exceeds eps (a chord hugging an existing edge).  A 1-D
+        # component requires the DE-9IM interior/interior entry to be
+        # 1-dimensional, so the vectorized relate_pattern is a sound necessary
+        # condition — the expensive intersection + _max_line_len measurement
+        # runs only on its (rare) hits.
+        survivor_indices = np.flatnonzero(alive)
+        boundary_run_mask = shapely.relate_pattern(
+            segs[survivor_indices], boundary, "1********")
+        boundary_run_indices = survivor_indices[boundary_run_mask]
+        if boundary_run_indices.size:
+            boundary_overlaps = shapely.intersection(
+                segs[boundary_run_indices], boundary)
+            for m, geom in zip(boundary_run_indices, boundary_overlaps):
+                if _max_line_len(geom) > eps_m:
+                    alive[m] = False
         # Obstacle interior/edge rejection, per obstacle, same order/semantics.
         if obstacles:
             for ob, _pob, _corners in obstacles:

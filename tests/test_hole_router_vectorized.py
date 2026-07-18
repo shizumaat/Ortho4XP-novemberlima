@@ -9,7 +9,8 @@ the emitted cuts are byte-identical.  Pure synthetic geometry, headless."""
 import math
 
 import pytest
-from shapely.geometry import Polygon
+import shapely
+from shapely.geometry import LineString, Polygon
 
 from auto_patch.pavement import hole_router as hr
 
@@ -109,3 +110,109 @@ def test_chunking_preserves_order():
     finally:
         hr._VIS_PAIR_CHUNK = saved
     assert g_chunked.adj == g_full.adj
+
+
+# ── Targeted parity cases for the sound prunes (relate_pattern boundary-run
+#    prefilter + sampled contains_xy prefilter) inside the vectorized path ────
+
+
+def _adjacency_edge(graph, point_a, point_b):
+    """The ``(weight)`` of edge point_a→point_b in ``graph`` or ``None``."""
+    idx_a = hr._node_idx(graph.index, *point_a)
+    idx_b = hr._node_idx(graph.index, *point_b)
+    assert idx_a is not None and idx_b is not None
+    for neighbor, weight in graph.adj[idx_a]:
+        if neighbor == idx_b:
+            return weight
+    return None
+
+
+def test_boundary_run_chord_still_rejected():
+    """A chord lying along a collinear boundary run (longer than eps) must be
+    rejected by the boundary-run stage in BOTH paths — proving the
+    relate_pattern prune forwards the hit to the intersection measurement
+    instead of changing the verdict."""
+    poly = _dense_holed()
+    g_scalar = _build(poly, (), vectorized=False)
+    g_vector = _build(poly, (), vectorized=True)
+    assert g_vector.adj == g_scalar.adj
+
+    chord_a, chord_b = (0.0, 0.0), (10.0, 0.0)
+    # The chord passes the contains stage (it lies inside the eps-buffered
+    # pavement), so its absence can only come from the boundary-run stage.
+    buffered = poly.buffer(hr._EPS_M)
+    chord = LineString([chord_a, chord_b])
+    assert buffered.contains(chord)
+    assert hr._max_line_len(chord.intersection(poly.boundary)) > hr._EPS_M
+    assert _adjacency_edge(g_scalar, chord_a, chord_b) is None
+    assert _adjacency_edge(g_vector, chord_a, chord_b) is None
+
+
+def test_sub_eps_boundary_overlap_still_kept():
+    """A chord with a 1-D boundary overlap SHORTER than eps is a relate_pattern
+    hit but must survive the measurement — proving the prune does not blanket-
+    reject its hits."""
+    tiny = 0.04                       # < _EPS_M = 0.05
+    ring = [(0.0, 0.0), (10.0, 0.0), (10.0 + tiny, 0.0), (40.0, 0.0),
+            (40.0, 40.0), (0.0, 40.0)]
+    poly = Polygon(ring, [[(15, 15), (25, 15), (25, 25), (15, 25)]])
+    chord_a, chord_b = (10.0, 0.0), (10.0 + tiny, 0.0)
+    chord = LineString([chord_a, chord_b])
+    # The chord IS a relate_pattern boundary-run hit (1-D interior overlap)…
+    assert shapely.relate_pattern(chord, poly.boundary, "1********")
+    # …but its overlap is below eps, so both paths must keep the edge.
+    g_scalar = _build(poly, (), vectorized=False)
+    g_vector = _build(poly, (), vectorized=True)
+    assert g_vector.adj == g_scalar.adj
+    weight_scalar = _adjacency_edge(g_scalar, chord_a, chord_b)
+    weight_vector = _adjacency_edge(g_vector, chord_a, chord_b)
+    assert weight_scalar is not None
+    assert (weight_vector == weight_scalar
+            == math.hypot(chord_b[0] - chord_a[0], chord_b[1] - chord_a[1]))
+
+
+def _notched_polygon() -> Polygon:
+    """Rectangle with a 1 m-wide notch descending from the top edge at
+    x ∈ [19.5, 20.5]: the chord (0, 10)–(40, 10) crosses the notch void at
+    t = 0.5 — a parameter the contains_xy prefilter does NOT sample — so the
+    pair reaches the full ``contains`` stage and must still be rejected
+    there (the prefilter is necessary-only, not sufficient)."""
+    ring = [(0.0, 0.0), (40.0, 0.0), (40.0, 10.0), (40.0, 20.0),
+            (20.5, 20.0), (20.5, 8.0), (19.5, 8.0), (19.5, 20.0),
+            (0.0, 20.0), (0.0, 10.0)]
+    return Polygon(ring, [[(5, 3), (12, 3), (12, 7), (5, 7)]])
+
+
+def test_prefilter_missed_chord_still_rejected_by_full_contains():
+    """A chord whose sampled points ALL land inside the buffered pavement but
+    which exits the pavement between samples must still be rejected — the full
+    ``contains`` on prefilter survivors is load-bearing."""
+    poly = _notched_polygon()
+    chord_a, chord_b = (0.0, 10.0), (40.0, 10.0)
+    buffered = poly.buffer(hr._EPS_M)
+    # Every prefilter sample lands inside the buffered pavement…
+    for fraction in hr._PREFILTER_SAMPLE_FRACTIONS:
+        sample_x = chord_a[0] + fraction * (chord_b[0] - chord_a[0])
+        sample_y = chord_a[1] + fraction * (chord_b[1] - chord_a[1])
+        assert shapely.contains_xy(buffered, sample_x, sample_y)
+    # …but the chord itself leaves the pavement through the notch.
+    assert not buffered.contains(LineString([chord_a, chord_b]))
+    g_scalar = _build(poly, (), vectorized=False)
+    g_vector = _build(poly, (), vectorized=True)
+    assert g_vector.adj == g_scalar.adj
+    assert _adjacency_edge(g_scalar, chord_a, chord_b) is None
+    assert _adjacency_edge(g_vector, chord_a, chord_b) is None
+
+
+def test_near_boundary_and_notched_parity_with_obstacles():
+    """Near-boundary / notched geometry parity with an obstacle in play, so
+    the prunes are exercised together with the per-obstacle rejection stage."""
+    poly = _notched_polygon()
+    obstacles = hr.build_obstacles(
+        [Polygon([(30.0, 2.0), (36.0, 2.0), (36.0, 6.0), (30.0, 6.0)])])
+    g_scalar = _build(poly, obstacles, vectorized=False)
+    g_vector = _build(poly, obstacles, vectorized=True)
+    assert g_scalar is not None and g_vector is not None
+    assert g_vector.nodes == g_scalar.nodes
+    assert g_vector.adj == g_scalar.adj
+    assert sum(len(neighbors) for neighbors in g_scalar.adj) > 0
