@@ -288,6 +288,348 @@ def _project_vectorized(elev, iter_edges, n, max_iters, tol,
     elev[:] = z.tolist()
 
 
+# ── Chromatic (graph-colored) Gauss-Seidel projection (Tier 3 wave 2c) ───────
+# Routing-survey candidate 1 (docs/research/routing_optimization_survey.md).
+# ``_CHROMATIC`` / ``_CHAIN_PREPASS`` are read lazily at call time (one_solve
+# keeps config imports call-time, matching the module style) so the gate can be
+# flipped per-process and the tests can toggle it without a reload.
+def _chromatic_enabled():
+    try:
+        from auto_patch.config import CHROMATIC_PROJECTION
+        return CHROMATIC_PROJECTION
+    except Exception:
+        return False
+
+
+def _chain_prepass_enabled():
+    try:
+        from auto_patch.config import CHROMATIC_CHAIN_PREPASS
+        return CHROMATIC_CHAIN_PREPASS
+    except Exception:
+        return False
+
+
+def _color_edges_by_write(iter_edges):
+    """Greedily partition ``iter_edges`` into color classes on the
+    WRITE-conflict graph, deterministically.
+
+    An edge WRITES the endpoint(s) the sweep moves — both for ``kind == 0``
+    (split the excess), only ``j`` for ``kind == 1`` (``i`` fixed), only ``i``
+    for ``kind == 2`` (``j`` fixed).  Two edges conflict iff they write a common
+    node.  Within a color no two edges write the same node (a matching in the
+    write-conflict graph), so their per-endpoint corrections land on DISJOINT
+    entries and can be applied as one vectorized fancy-indexed update — a true
+    Gauss-Seidel step, not the stalling degree-normalised Jacobi.
+
+    Immovable endpoints are never written, so they impose no conflict: a hub of
+    ``k`` one-directional (``kind`` 1/2) edges — the zone→host cluster — colors
+    with a SINGLE color (all write distinct zone endpoints), the survey's
+    high-degree-hub mitigation.
+
+    Determinism: edges are processed in ``iter_edges`` order and each takes the
+    smallest color not used by an already-colored write-neighbour; the result is
+    invariant to intra-color order by construction (disjoint writes).  Returns a
+    list (indexed by color) of edge-index lists."""
+    used: dict = {}                 # node -> set of colors of edges writing it
+    ncolors = 0
+    edge_color = [0] * len(iter_edges)
+    for edge_index in range(len(iter_edges)):
+        i, j, _budget, kind = iter_edges[edge_index]
+        if kind == 0:
+            write_nodes = (i, j)
+        elif kind == 1:
+            write_nodes = (j,)
+        else:
+            write_nodes = (i,)
+        forbidden: set = set()
+        for node in write_nodes:
+            s = used.get(node)
+            if s:
+                forbidden |= s
+        color = 0
+        while color in forbidden:
+            color += 1
+        edge_color[edge_index] = color
+        if color + 1 > ncolors:
+            ncolors = color + 1
+        for node in write_nodes:
+            s = used.get(node)
+            if s is None:
+                used[node] = {color}
+            else:
+                s.add(color)
+    colors: list = [[] for _ in range(ncolors)]
+    for edge_index in range(len(iter_edges)):
+        colors[edge_color[edge_index]].append(edge_index)
+    return colors
+
+
+def _chain_envelope_clamp(elev, chain_nodes, chain_budgets, v_left, v_right):
+    """Two-pass Lipschitz RUNNING clamp of ONE chain (survey candidate 2).
+
+    ``chain_nodes`` are the free interior nodes ``c_1 … c_k`` in order;
+    ``chain_budgets`` are the ``k + 1`` consecutive edge budgets
+    ``b(L,c_1), b(c_1,c_2), …, b(c_k,R)``; ``v_left`` / ``v_right`` are the
+    (held) boundary values.  A forward sweep clamps each node into
+    ``[v_{i-1} − b, v_{i-1} + b]`` of its already-clamped LEFT neighbour, then a
+    backward sweep clamps each into ``[v_{i+1} − b, v_{i+1} + b]`` of its
+    already-clamped RIGHT neighbour (the running-clamp / repeated-median form).
+    When the chain is feasible (``|v_left − v_right| ≤ Σb``) the two O(k) passes
+    land a profile satisfying every consecutive edge with NO iteration — exactly
+    the residual class POCS otherwise chains excess through node-by-node.  An
+    infeasible chain (the boundaries contradict) is left near-feasible for the
+    colored sweep / broken quarantine to own the genuine step.  Mutates
+    ``elev`` in place; the boundaries themselves are never written."""
+    k = len(chain_nodes)
+    if k == 0:
+        return
+    # FORWARD: clamp against the running left neighbour (starts at v_left).
+    prev = v_left
+    for t in range(k):
+        b = chain_budgets[t]                # budget (prev -> c_t)
+        lo = prev - b
+        hi = prev + b
+        node = chain_nodes[t]
+        v = elev[node]
+        if v < lo:
+            v = lo
+        elif v > hi:
+            v = hi
+        elev[node] = v
+        prev = v
+    # BACKWARD: clamp against the running right neighbour (starts at v_right).
+    prev = v_right
+    for t in range(k - 1, -1, -1):
+        b = chain_budgets[t + 1]            # budget (c_t -> next-right)
+        lo = prev - b
+        hi = prev + b
+        node = chain_nodes[t]
+        v = elev[node]
+        if v < lo:
+            v = lo
+        elif v > hi:
+            v = hi
+        elev[node] = v
+        prev = v
+
+
+def _project_chain_prepass(elev, iter_edges, n, immovable):
+    """Closed-form warm start (survey candidate 2): detect 1-D chain
+    substructures in the regulated SYMMETRIC graph — maximal paths whose
+    interior nodes are FREE with degree exactly 2 and which touch no interval
+    edge — and solve each exactly with :func:`_chain_envelope_clamp`, bounded by
+    the current values of its two endpoints.  Interval-touched nodes and free
+    nodes of degree ≠ 2 (branch/leaf) bound a chain but are never moved here.
+
+    A warm start only: the colored sweep runs afterward and re-checks every
+    edge, so a chain that a later-considered chord would make cyclic can only
+    cost sweeps, never correctness.  Returns the number of chains solved.
+
+    Mutates ``elev`` in place; touches only free interior chain nodes."""
+    m = len(iter_edges)
+    # symmetric-only adjacency + interval-touched marks, tightest budget per pair
+    adj: list = [None] * n
+    interval_touched = bytearray(n)
+    for edge_index in range(m):
+        i, j, budget, _kind = iter_edges[edge_index]
+        if budget is None:                              # interval edge
+            interval_touched[i] = 1
+            interval_touched[j] = 1
+            continue
+        li = adj[i]
+        if li is None:
+            adj[i] = {j: budget}
+        else:
+            prev = li.get(j)
+            if prev is None or budget < prev:
+                li[j] = budget
+        lj = adj[j]
+        if lj is None:
+            adj[j] = {i: budget}
+        else:
+            prev = lj.get(i)
+            if prev is None or budget < prev:
+                lj[i] = budget
+
+    def _is_interior(node):
+        # a free, non-interval node with exactly two distinct regulated
+        # symmetric neighbours (a genuine 1-D chain link).
+        if node in immovable or interval_touched[node]:
+            return False
+        nb = adj[node]
+        return nb is not None and len(nb) == 2
+
+    visited = bytearray(n)
+    n_chains = 0
+    for start in range(n):
+        if visited[start] or not _is_interior(start):
+            continue
+        # walk to one boundary, collecting the chain.  ``walk_seen`` guards
+        # against a pure degree-2 RING (no boundary) — without it the walk of
+        # an all-interior cycle would never terminate (``visited`` is only
+        # stamped after assembly).
+        nbrs = list(adj[start].keys())
+        walk_seen = {start}
+        # walk left from start via nbrs[0]
+        left_nodes = []                     # interior nodes to the left (rev)
+        prev = start
+        cur = nbrs[0]
+        while _is_interior(cur) and not visited[cur] and cur not in walk_seen:
+            left_nodes.append(cur)
+            walk_seen.add(cur)
+            nxt = [x for x in adj[cur].keys() if x != prev]
+            if len(nxt) != 1:
+                break
+            prev, cur = cur, nxt[0]
+        left_boundary = cur                 # first non-interior (or visited)
+        # walk right from start via nbrs[1]
+        right_nodes = []
+        prev = start
+        cur = nbrs[1]
+        while _is_interior(cur) and not visited[cur] and cur not in walk_seen:
+            right_nodes.append(cur)
+            walk_seen.add(cur)
+            nxt = [x for x in adj[cur].keys() if x != prev]
+            if len(nxt) != 1:
+                break
+            prev, cur = cur, nxt[0]
+        right_boundary = cur
+        # assemble ordered interior: left_boundary, rev(left_nodes), start,
+        # right_nodes, right_boundary
+        interior = list(reversed(left_nodes)) + [start] + right_nodes
+        for node in interior:
+            visited[node] = 1
+        if (left_boundary == right_boundary
+                or left_boundary in walk_seen or right_boundary in walk_seen):
+            continue                        # degenerate ring — leave to the sweep
+        # consecutive budgets along [left_boundary, interior..., right_boundary]
+        seq = [left_boundary] + interior + [right_boundary]
+        budgets = []
+        ok = True
+        for a, b in zip(seq[:-1], seq[1:]):
+            na = adj[a]
+            if na is None or b not in na:
+                ok = False
+                break
+            budgets.append(na[b])
+        if not ok or len(budgets) != len(interior) + 1:
+            continue
+        _chain_envelope_clamp(elev, interior, budgets,
+                              elev[left_boundary], elev[right_boundary])
+        n_chains += 1
+    return n_chains
+
+
+def _project_chromatic(elev, iter_edges, n, max_iters, tol,
+                       interval_bounds_by_index=None, *, stats=None):
+    """Colored Gauss-Seidel POCS (survey candidate 1) — the vectorized
+    replacement for BOTH legacy inner sweeps.  Mutates ``elev`` in place.
+
+    Precomputes one deterministic write-conflict coloring
+    (:func:`_color_edges_by_write`); each sweep relaxes the color classes in
+    order, every class as a single vectorized fancy-indexed update whose writes
+    are disjoint (a valid independent projection batch) and which reads the
+    LATEST values from earlier classes — a true Gauss-Seidel step at numpy
+    speed, converging where the degree-normalised Jacobi stalls.
+
+    KKT / dual feasibility certificate (survey candidate 4): a full sweep that
+    applies NO correction proves every constraint satisfied, so iteration stops
+    on proof rather than the ``max_iters`` cap; the avoided sweeps are recorded
+    in ``stats``.  ``stats`` (optional dict) receives ``colors``, ``edges``,
+    ``sweeps``, ``sweeps_avoided``, ``certified`` and ``worst``.
+
+    Interval edges (``budget is None``) carry a signed slab
+    ``[s_low, s_high]`` in ``interval_bounds_by_index`` (keyed by ``iter_edges``
+    position); they relax in the same color classes as the symmetric edges."""
+    import numpy as np
+    bounds = interval_bounds_by_index or {}
+    _NEG_INF = float("-inf")
+    _POS_INF = float("inf")
+    colors = _color_edges_by_write(iter_edges)
+    # per-color numpy arrays, symmetric + interval partitioned.
+    sym: list = []
+    intv: list = []
+    for group in colors:
+        s_i = []; s_j = []; s_b = []; s_wi = []; s_wj = []
+        v_i = []; v_j = []; v_lo = []; v_hi = []; v_wi = []; v_wj = []
+        for edge_index in group:
+            ei, ej, budget, kind = iter_edges[edge_index]
+            wi = 0.5 if kind == 0 else (1.0 if kind == 2 else 0.0)
+            wj = 0.5 if kind == 0 else (1.0 if kind == 1 else 0.0)
+            if budget is None:
+                s_low, s_high = bounds.get(edge_index, (None, None))
+                v_i.append(ei); v_j.append(ej)
+                v_lo.append(_NEG_INF if s_low is None else s_low)
+                v_hi.append(_POS_INF if s_high is None else s_high)
+                v_wi.append(wi); v_wj.append(wj)
+            else:
+                s_i.append(ei); s_j.append(ej); s_b.append(budget)
+                s_wi.append(wi); s_wj.append(wj)
+        sym.append((
+            np.asarray(s_i, dtype=np.intp), np.asarray(s_j, dtype=np.intp),
+            np.asarray(s_b, dtype=np.float64), np.asarray(s_wi, dtype=np.float64),
+            np.asarray(s_wj, dtype=np.float64)))
+        intv.append((
+            np.asarray(v_i, dtype=np.intp), np.asarray(v_j, dtype=np.intp),
+            np.asarray(v_lo, dtype=np.float64), np.asarray(v_hi, dtype=np.float64),
+            np.asarray(v_wi, dtype=np.float64), np.asarray(v_wj, dtype=np.float64)))
+    z = np.asarray(elev, dtype=np.float64)
+    sweeps = 0
+    certified = False
+    worst = 0.0
+    for _sweep in range(max_iters):
+        sweeps += 1
+        any_active = False
+        worst = 0.0
+        for color_index in range(len(colors)):
+            I, J, B, WI, WJ = sym[color_index]
+            if I.size:
+                d = z[I] - z[J]
+                ad = np.abs(d)
+                over = ad - B
+                active = over > tol
+                if active.any():
+                    any_active = True
+                    ex = np.where(active, over, 0.0)
+                    w = ex.max()
+                    if w > worst:
+                        worst = float(w)
+                    s = np.sign(d)
+                    # disjoint writes within a color -> fancy-indexed add is a
+                    # valid simultaneous update (immovable slots carry weight 0).
+                    z[I] += -s * ex * WI
+                    z[J] += s * ex * WJ
+            Ii, Ji, Lo, Hi, IWI, IWJ = intv[color_index]
+            if Ii.size:
+                di = z[Ii] - z[Ji]
+                above = di - Hi
+                below = Lo - di
+                active_hi = above > tol
+                active_lo = below > tol
+                act = active_hi | active_lo
+                if act.any():
+                    any_active = True
+                    se = np.where(active_hi, above,
+                                  np.where(active_lo, di - Lo, 0.0))
+                    aw = np.abs(se).max()
+                    if aw > worst:
+                        worst = float(aw)
+                    z[Ii] += -se * IWI
+                    z[Ji] += se * IWJ
+        if not any_active:
+            certified = True
+            break
+    elev[:] = z.tolist()
+    if stats is not None:
+        stats["colors"] = len(colors)
+        stats["edges"] = len(iter_edges)
+        stats["sweeps"] = sweeps
+        stats["sweeps_avoided"] = max(0, max_iters - sweeps) if certified else 0
+        stats["certified"] = certified
+        stats["worst"] = worst
+    return sweeps, certified
+
+
 def feasibility_project(elev, shape_constraints, hard, *,
                         max_iters=4000, tol=1e-3, force_scalar=False,
                         flat_groups=None, broken_out=None, pre_broken=None,
@@ -880,7 +1222,54 @@ def feasibility_project(elev, shape_constraints, hard, *,
             _vec = False
     _sweeps_run = 0
     _last_worst = 0.0
-    if _vec and iter_edges:
+    # CHROMATIC (graph-colored) Gauss-Seidel (Tier 3 wave 2c, survey candidate
+    # 1): a numpy-vectorized TRUE Gauss-Seidel sweep that converges where the
+    # Jacobi stalls, so it replaces BOTH legacy inner paths — the
+    # ``force_scalar`` final projection (the 2400-sweep worklist) AND the
+    # mid-solve vectorised Jacobi.  A DIFFERENT legal fixpoint than the FIFO
+    # worklist (counts-not-worse, not byte-identical) — gate ``O4_CHROMATIC_
+    # PROJECTION`` (default ON); OFF falls straight through to the legacy split
+    # below, byte-identically.  The closed-form chain pre-pass (survey candidate
+    # 2) warm-starts 1-D substructures exactly before the sweep.
+    if _chromatic_enabled() and iter_edges:
+        _chain_prepass = _chain_prepass_enabled()
+        _chain_count = 0
+        if _chain_prepass:
+            _chain_count = _project_chain_prepass(elev, iter_edges, n, immovable)
+        _chroma_stats: dict = {}
+        _project_chromatic(elev, iter_edges, n, max_iters, tol,
+                           interval_bounds_by_index, stats=_chroma_stats)
+        # Lazy shapes: as for the Jacobi path, only the FINAL state matters for
+        # a certificate, so re-warm + re-sweep on the grown edge set until no
+        # further shape expands (bounded: each round expands ≥1 entry).
+        while lazy_entries_pending:
+            still_pending = []
+            expanded_any = False
+            for lazy_entry in lazy_entries_pending:
+                if "lazy_expand" not in lazy_entry:
+                    continue
+                if _lazy_nodes_moved(lazy_entry):
+                    _expand_lazy_entry_into_projection(lazy_entry)
+                    expanded_any = True
+                else:
+                    still_pending.append(lazy_entry)
+            lazy_entries_pending = still_pending
+            if not expanded_any:
+                break
+            if _chain_prepass:
+                _project_chain_prepass(elev, iter_edges, n, immovable)
+            _project_chromatic(elev, iter_edges, n, max_iters, tol,
+                               interval_bounds_by_index, stats=_chroma_stats)
+        _sweeps_run = _chroma_stats.get("sweeps", 0)
+        _last_worst = _chroma_stats.get("worst", 0.0)
+        if _os.environ.get("O4_STEP_DEBUG") == "1":
+            print(f"    [fp-chromatic] colors={_chroma_stats.get('colors')} "
+                  f"edges={_chroma_stats.get('edges')} "
+                  f"sweeps={_sweeps_run} "
+                  f"avoided={_chroma_stats.get('sweeps_avoided')} "
+                  f"certified={_chroma_stats.get('certified')} "
+                  f"chains={_chain_count} worst={_last_worst:.4f}")
+    elif _vec and iter_edges:
         _project_vectorized(elev, iter_edges, n, max_iters, tol,
                             interval_bounds_by_index)
         # Lazy shapes under the vectorised Jacobi: only the FINAL state
