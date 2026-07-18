@@ -1852,6 +1852,50 @@ def _project_triangle_planes(layout, bucket_to_idx, elev, immovable,
     return n_fixed, anchored, broken
 
 
+def _runway_boundary_freeze_indexes(
+        nodes, node_count, already_hard,
+        runway_boundary_lines, freeze_tolerance_m):
+    """Return the node indexes that lie inside the buffered runway-
+    boundary zone and must be frozen by the late projection.
+
+    WHY this freeze exists: a vertex lying ON a runway boundary EDGE
+    INTERIOR (a junction/crossing weld between two runway ring vertices)
+    is not in ``runway_idx`` (that set is ring-VERTEX keyed) yet carries
+    the runway longitudinal profile — the late pass moved one +0.24 m at
+    HECA 05L/23R and minted a 3.7 % profile kink.  The runway is the
+    datum; nothing on its boundary moves late.
+
+    The membership test is the exact GEOS ``contains`` predicate, run
+    C-vectorized over every candidate node in one ``shapely.contains_xy``
+    call rather than one prepared-``contains`` call per node (an O(n)
+    Python loop with a per-point GEOS crossing was a measurable part of
+    the EGLL-class late projection).  ``contains_xy`` on the same
+    ``unary_union(...).buffer(tol)`` zone is the identical predicate on
+    the identical geometry, so the returned index set is byte-identical.
+    Only indexes ``< node_count`` are considered (the ``>= n`` guard),
+    and indexes already in ``already_hard`` are skipped (adding an
+    already-frozen index would be harmless, but the guard keeps the
+    result set minimal exactly as the scalar loop did).
+    """
+    if not runway_boundary_lines:
+        return set()
+    import numpy as _np
+    import shapely as _shapely
+    from shapely.ops import unary_union as _frz_union
+    _rwy_zone = _frz_union(runway_boundary_lines).buffer(freeze_tolerance_m)
+    _limit = min(node_count, len(nodes))
+    if _limit <= 0:
+        return set()
+    _coords = _np.asarray(nodes[:_limit], dtype=float)
+    _inside = _shapely.contains_xy(
+        _rwy_zone, _coords[:, 0], _coords[:, 1])
+    # Iterate only the matches (flatnonzero), not every candidate index —
+    # the zone catches a few hundred nodes of the 131k-class total.
+    return {
+        int(_index) for _index in _np.flatnonzero(_inside)
+        if int(_index) not in already_hard}
+
+
 def final_grade_projection(layout, icao: str = "", dem=None,
                            tile_lat: int = 0, tile_lon: int = 0, *,
                            recapture_snapshot: bool = True) -> None:
@@ -2043,10 +2087,10 @@ def final_grade_projection(layout, icao: str = "", dem=None,
             # (that set is ring-VERTEX keyed) yet carries the runway
             # longitudinal profile — the late pass moved one +0.24 m at
             # HECA 05L/23R and minted a 3.7 % profile kink.  The runway
-            # is the datum; nothing on its boundary moves late.
-            from shapely.geometry import Point as _FrzPt
-            from shapely.ops import unary_union as _frz_union
-            from shapely.prepared import prep as _frz_prep
+            # is the datum; nothing on its boundary moves late.  The
+            # containment scan is C-vectorized in the helper (one GEOS
+            # ``contains_xy`` over all candidate nodes, identical
+            # predicate on the identical zone geometry).
             from auto_patch.layout import (
                 ROLE_RUNWAY as _FRZ_RWY,
                 ROLE_RUNWAY_CROSSING as _FRZ_RWX,
@@ -2057,14 +2101,8 @@ def final_grade_projection(layout, icao: str = "", dem=None,
                     and _s.polygon is not None
                     and not _s.polygon.is_empty
                     and _s.polygon.geom_type == "Polygon")]
-            if _rwy_lines:
-                _rwy_zone = _frz_prep(
-                    _frz_union(_rwy_lines).buffer(_FRZ_TOL))
-                for _fi2, (_fx2, _fy2) in enumerate(nodes):
-                    if _fi2 in hard or _fi2 >= n:
-                        continue
-                    if _rwy_zone.contains(_FrzPt(_fx2, _fy2)):
-                        hard.add(_fi2)
+            hard |= _runway_boundary_freeze_indexes(
+                nodes, n, hard, _rwy_lines, _FRZ_TOL)
     except _snapshot_geom_exceptions():                # pragma: no cover
         pass
     # RUNWAY-JOIN anchored nodes (user ruling 2026-07-16: taxi joins
