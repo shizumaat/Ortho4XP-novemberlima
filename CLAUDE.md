@@ -41,6 +41,16 @@ top-tier-model tokens only where judgment is required:
    calls). Verify all agent output by running its tests before integrating.
 5. **Never delegate:** interface design, UX copy, destructive operations,
    security-sensitive code, or the final review.
+6. **HARD LAW — build-time regressions (owner ruling 2026-07-18):** any
+   new code that increases build times must be evaluated by a **Fable 5
+   optimization agent** (lead-session-class model — spawn with the
+   inherited session model from a Fable lead, never Opus) that considers
+   the WHOLE pipeline and whether the increase can be avoided or offset.
+   Anything that pushes a cold tile build (excluding download time) over
+   the **60-second target** (docs/specs/flat-airport-fast-path-spec.md
+   §3.5) requires a written explanation and **explicit owner approval**
+   before it lands. No exceptions for "temporary" or gated code that is
+   default-on.
 
 ## Conventions
 

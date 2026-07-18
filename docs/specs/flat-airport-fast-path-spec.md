@@ -170,6 +170,16 @@ the solve's band producer and the validator's
 The wave-1 serving-line amortization shipped byte-identical but
 performance-neutral and is gated OFF by default (kept as scaffolding).
 
+### Enforcement (owner ruling 2026-07-18 — hard law, all sessions)
+
+Any new code that increases build times must be evaluated by a Fable 5
+optimization agent considering the whole pipeline and whether the
+increase can be avoided or offset. Anything pushing a cold build
+(excluding download time) over the 60-second target requires a written
+explanation and explicit owner approval before landing. Recorded in
+the repo-root CLAUDE.md working-style rules (item 6); binds every
+session and agent.
+
 ### Wave 3 — geometry & emission acceleration (terrain independent)
 
 Scope: the phase-1 shape construction and emission paths (rect
