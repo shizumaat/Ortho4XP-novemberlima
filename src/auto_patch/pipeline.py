@@ -6357,15 +6357,18 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     _projection_tile_lon = int(math.floor(layout.anchor[1]))
             except _GEOM_EXC:
                 _projection_dem = None
-        # T1b A/B gate (board docs/build_time_program_board.md): the
-        # LATE projection re-runs on final geometry anyway, so the mid
-        # call may be redundant (~20 s at OTHH class). Default ON =
-        # historic behavior; the experiment is one env var. Watch the
-        # torn-weld class and frozen-feature bake values when off —
-        # relevel_pads/ribbon/groundside fixups below were designed to
-        # read mid-projected values.
+        # T1b (board): DEFAULT FLIPPED OFF 2026-07-18 on owner order,
+        # pending an in-sim ruling. The LATE projection re-runs on the
+        # truly final geometry and absorbs the mid call's work — quiet
+        # A/B with the pass reorder below: OTHH 299.2 s (−64), CYXY
+        # 39.8 s (−22), SPJC 87.7 s (−13); all real law classes
+        # identical; the by-design break-region class grows (CYXY
+        # 239→400 pairs — solver-declared contained blends, not new
+        # violations). O4_FINAL_PROJECTION_MID=1 restores the historic
+        # double projection; the conformance passes below then run here
+        # against mid-projected values exactly as before.
         _mid_projection_on = (
-            os.environ.get("O4_FINAL_PROJECTION_MID", "1") == "1")
+            os.environ.get("O4_FINAL_PROJECTION_MID", "0") == "1")
         if _mid_projection_on:
             final_grade_projection(layout, icao, dem=_projection_dem,
                                    tile_lat=_projection_tile_lat,
