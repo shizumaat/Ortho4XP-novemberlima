@@ -4580,21 +4580,139 @@ SURFACE_MODEL_BUILDING_MASKING = "surface_model_building_masking"
 # its walls, so the mask must reach past the mapped footprint.
 DEFAULT_FOOTPRINT_MASK_BUFFER_M = 35.0
 
-# Upper bound, in pixels, on how far the inpainting looks for valid
-# ground values.  100 pixels at a 30 m grid is 3 km -- beyond any single
-# terminal complex while keeping gdal.FillNodata cheap.
+# Upper bound, in pixels, on how far the legacy gdal.FillNodata inpainting
+# looks for valid ground values.  100 pixels at a 30 m grid is 3 km --
+# beyond any single terminal complex while keeping gdal.FillNodata cheap.
 DEFAULT_FOOTPRINT_FILL_SEARCH_PIXELS = 100
+
+# The masked-hole fill algorithm.  The default vectorized distance-transform
+# fill replaces every masked (building) cell with the value of its nearest
+# trusted-ground cell in one O(N) exact-Euclidean pass, then applies a fixed
+# number of deterministic masked smoothing passes -- reproducing what
+# gdal.FillNodata does (interpolate holes from surrounding ground) as a
+# single deterministic array operation instead of an iterative search whose
+# cost grows with maxSearchDist.  The result is exactly reproducible (no
+# floating iteration-order dependence) and never touches unmasked cells.
+INSET_FILL_METHOD_DISTANCE_TRANSFORM = "distance_transform"
+INSET_FILL_METHOD_LEGACY = "gdal_fillnodata"
+
+# Smoothing passes applied to the filled cells only, matching the legacy
+# gdal.FillNodata(smoothingIterations=2) so the two paths stay comparable.
+DEFAULT_FILL_SMOOTHING_ITERATIONS = 2
+
+
+def _inset_fill_method():
+    """The masked-hole fill method, environment-overridable (default-on).
+
+    ``O4_INSET_FILL_METHOD=gdal_fillnodata`` restores the legacy in-place
+    ``gdal.FillNodata`` inpaint (the byte-for-byte fallback); any other or
+    absent value selects the vectorized distance-transform fill.
+    """
+    value = os.environ.get("O4_INSET_FILL_METHOD", "").strip().lower()
+    if value == INSET_FILL_METHOD_LEGACY:
+        return INSET_FILL_METHOD_LEGACY
+    return INSET_FILL_METHOD_DISTANCE_TRANSFORM
+
+
+def _fill_masked_by_distance_transform(
+    values, source_mask, smoothing_iterations=DEFAULT_FILL_SMOOTHING_ITERATIONS
+):
+    """Fill every non-source cell from its nearest trusted-ground cell.
+
+    SOURCE-AGNOSTIC by contract: it takes a boolean ``source_mask`` marking
+    the cells whose values are trusted ground, and knows nothing about where
+    the holes came from (building footprints, package objects, both).  Every
+    cell outside ``source_mask`` is overwritten with the value of the nearest
+    source cell in exact Euclidean distance (``scipy.ndimage`` distance
+    transform with ``return_indices``); the ground under an airport terminal
+    is nearly planar, so a nearest-ground value is an excellent estimate --
+    the same assumption the legacy fill relied on.  ``smoothing_iterations``
+    deterministic 3x3 masked-mean passes then soften the piecewise-constant
+    Voronoi seams; each pass only ever writes non-source cells, so every
+    source (unmasked) cell stays byte-identical.
+
+    Returns a new float64 array; ``values`` is not mutated.  The caller
+    restores genuine nodata afterwards, exactly as with gdal.FillNodata
+    (which also fills every non-source cell and lets the caller re-stamp the
+    sentinel).  Determinism: the distance transform and the fixed-count
+    box-mean passes have no iteration-order or thread dependence.
+    """
+    from scipy import ndimage
+
+    filled = numpy.asarray(values, dtype=numpy.float64).copy()
+    source_mask = numpy.asarray(source_mask, dtype=bool)
+    fill_mask = ~source_mask
+    if not source_mask.any() or not fill_mask.any():
+        # No trusted ground to source from, or nothing to fill: unchanged.
+        return filled
+    # Nearest source-cell index for every cell (exact Euclidean).  The EDT
+    # runs on the complement of the source mask, so each cell's returned
+    # index is that of the closest source cell.
+    nearest_indices = ndimage.distance_transform_edt(
+        fill_mask, return_distances=False, return_indices=True
+    )
+    nearest_values = filled[tuple(nearest_indices)]
+    filled[fill_mask] = nearest_values[fill_mask]
+    # Masked smoothing: average over a 3x3 window but write only the filled
+    # cells, so source cells (and thus every unmasked pixel) are untouched.
+    for _ in range(int(smoothing_iterations)):
+        blurred = ndimage.uniform_filter(filled, size=3, mode="nearest")
+        filled[fill_mask] = blurred[fill_mask]
+    return filled
+
+
+_BUILDING_QUERY_STATEMENTS = ['way["building"]', 'rel["building"]']
+
+
+def _load_building_layer_from_extracts(osm_layer, bbox_south_west_north_east):
+    """Populate ``osm_layer`` with buildings from local Geofabrik extracts.
+
+    The airport-inset footprint query previously went straight to Overpass,
+    bypassing the regional-extract accelerator the tile vector pipeline
+    already uses -- and for a large airport box that meant multi-minute
+    Overpass queue waits (the profiled dominant cost of a cold inset build).
+    When the downloaded extracts cover the box (the common airport case),
+    the ``building`` ways/relations are filtered out of the local pbf
+    instead, which is bounded by local disk I/O.  Returns ``True`` when the
+    layer was populated locally, ``False`` to fall through to Overpass --
+    the accelerator is never a dependency (missing index, region not stored
+    yet, or any failure all read as ``False``).
+    """
+    try:
+        import O4_OSM_Extracts as EXTRACTS
+    except Exception:
+        return False
+    try:
+        xml_bytes = EXTRACTS.osm_xml_from_local_extracts(
+            _BUILDING_QUERY_STATEMENTS,
+            bbox_south_west_north_east,
+            request_description="inset_buildings",
+        )
+    except Exception:
+        return False
+    if not xml_bytes:
+        return False
+    # Mirror OSM_query_to_OSM_layer's tag setup for this fixed query so
+    # update_dicosm keeps every building way/relation and its child nodes.
+    building_tags = {"n": [], "w": [("building", "")], "r": [("building", "")]}
+    try:
+        osm_layer.update_dicosm(xml_bytes, building_tags, building_tags)
+    except Exception:
+        return False
+    return True
 
 
 def openstreetmap_building_footprints(bounding_box_wgs84):
     """Absolute-WGS84 building footprint polygons from OpenStreetMap.
 
-    Queries Overpass for every ``building`` way and relation in the box
-    and returns a list of shapely polygons in plain (longitude, latitude)
-    coordinates (``OSM_to_MultiPolygon`` with a zero origin, so nothing
-    here is tile-relative).  Returns ``[]`` on any failure -- the caller
-    then skips the masking pass rather than failing the fetch: an
-    uncorrected surface-model inset is still better than no inset.
+    Returns a list of shapely polygons in plain (longitude, latitude)
+    coordinates for every ``building`` way and relation in the box
+    (``OSM_to_MultiPolygon`` with a zero origin, so nothing here is
+    tile-relative).  The data is served from the local Geofabrik regional
+    extracts when they cover the box, and from Overpass otherwise; returns
+    ``[]`` on any failure -- the caller then skips the masking pass rather
+    than failing the fetch: an uncorrected surface-model inset is still
+    better than no inset.
 
     Deliberately NOT cached on disk: an inset fetch is already a rare,
     cached event, and reusing a footprint file fetched for a smaller
@@ -4604,22 +4722,22 @@ def openstreetmap_building_footprints(bounding_box_wgs84):
     import O4_OSM_Utils as OSM
 
     (west, south, east, north) = bounding_box_wgs84
+    bbox = (south, west, north, east)
     osm_layer = OSM.OSM_layer()
-    try:
-        queried = OSM.OSM_query_to_OSM_layer(
-            ['way["building"]', 'rel["building"]'],
-            (south, west, north, east),
-            osm_layer,
-        )
-    except Exception as error:
-        UI.vprint(
-            1,
-            "   WARNING: OpenStreetMap building query failed:",
-            str(error),
-        )
-        return []
-    if not queried:
-        return []
+    if not _load_building_layer_from_extracts(osm_layer, bbox):
+        try:
+            queried = OSM.OSM_query_to_OSM_layer(
+                _BUILDING_QUERY_STATEMENTS, bbox, osm_layer,
+            )
+        except Exception as error:
+            UI.vprint(
+                1,
+                "   WARNING: OpenStreetMap building query failed:",
+                str(error),
+            )
+            return []
+        if not queried:
+            return []
     try:
         footprints = OSM.OSM_to_MultiPolygon(osm_layer, 0, 0)
     except Exception as error:
@@ -4630,6 +4748,53 @@ def openstreetmap_building_footprints(bounding_box_wgs84):
         )
         return []
     return [polygon for polygon in getattr(footprints, "geoms", []) if polygon.area]
+
+
+def package_object_footprints(bounding_box_wgs84, definition):
+    """Authoritative building footprints from installed airport packages.
+
+    The installed airport scenery package's DSF/OBJ8 object placements are
+    the footprints that actually render in the simulator, so they are the
+    PRIMARY footprint source for the inset mask (OpenStreetMap supplements
+    them).  Reading them requires the X-Plane installation root and per-pack
+    ``o4_object_footprints_*`` caches under ``Airport_mod_cache/`` (produced
+    by ``src/auto_patch/dsf_reader.read_dsf_object_buildings``); that pack
+    resolution is a build-context concern the download-time inset fetch does
+    not yet carry.
+
+    This is the SOURCE-AGNOSTIC seam for that union: it returns package
+    footprint polygons (plain lon/lat, like OpenStreetMap ones) when a pack
+    source is wired and ``[]`` otherwise, so today's behaviour is unchanged
+    (OSM-only) while the mask/fill pipeline is already source-agnostic and
+    the union is a one-call addition once pack resolution is threaded in.
+    See the report note: wiring the pack source is a separate cross-subsystem
+    change pending owner sign-off, not part of this performance pass.
+    """
+    return []
+
+
+def _collect_inset_building_footprints(bounding_box_wgs84, definition):
+    """UNION of building footprints for the inset mask (package + OSM).
+
+    Package (installed airport scenery) object footprints are authoritative
+    where present; OpenStreetMap footprints supplement them.  The mask built
+    from these is a boolean UNION, so precedence is moot -- a cell is masked
+    if ANY source covers it, and the downstream fill is completely agnostic
+    to which source contributed a polygon (requirement: sourcing rule and
+    fill algorithm stay decoupled).  Either source may be empty.
+
+    Returns ``(footprints, source_label)``.
+    """
+    package = package_object_footprints(bounding_box_wgs84, definition)
+    osm = openstreetmap_building_footprints(bounding_box_wgs84)
+    footprints = list(package) + list(osm)
+    if package and osm:
+        label = "installed package objects + OpenStreetMap footprints"
+    elif package:
+        label = "installed package objects"
+    else:
+        label = "OpenStreetMap building footprints"
+    return footprints, label
 
 
 def _buffer_footprints_in_metres(footprints, buffer_m, centre_latitude):
@@ -4721,14 +4886,16 @@ def mask_building_footprints_in_surface_model(
     """
     if not has_gdal:
         return {"skipped": "GDAL unavailable"}
-    footprints = openstreetmap_building_footprints(bounding_box_wgs84)
+    (footprints, footprint_source) = _collect_inset_building_footprints(
+        bounding_box_wgs84, definition
+    )
     buffer_m = _parse_float(
         definition.get("footprint_mask_buffer_m"),
         default=DEFAULT_FOOTPRINT_MASK_BUFFER_M,
     )
     if not footprints:
         return {
-            "skipped": "no OpenStreetMap building footprints in the box",
+            "skipped": "no building footprints in the box",
             "footprint_count": 0,
         }
     (west, south, east, north) = bounding_box_wgs84
@@ -4746,43 +4913,57 @@ def mask_building_footprints_in_surface_model(
         building_mask = _rasterize_footprint_mask(buffered, dataset)
         genuine_nodata = (values == nodata_value) | ~numpy.isfinite(values)
         pixels_to_fill = building_mask & ~genuine_nodata
+        # Trusted-ground sources: every cell that is neither under a
+        # footprint nor genuine nodata (so sentinels are never fill
+        # sources).  Both fill methods fill every non-source cell and let
+        # the caller restore genuine nodata, so only building pixels change.
+        interpolation_sources = ~building_mask & ~genuine_nodata
         if not pixels_to_fill.any():
             dataset = None
             return {
-                "footprint_source": "OpenStreetMap building footprints",
+                "footprint_source": footprint_source,
                 "footprint_count": len(footprints),
                 "masked_pixel_count": 0,
                 "footprint_mask_buffer_m": buffer_m,
+                "fill_method": _inset_fill_method(),
             }
-        # gdal.FillNodata fills every mask==0 pixel from mask!=0 pixels:
-        # zero out buildings AND genuine nodata (so sentinel values are
-        # never interpolation sources), then restore the genuine nodata
-        # afterwards -- only building pixels end up changed.
-        interpolation_sources = ~building_mask & ~genuine_nodata
-        source_mask_raster = gdal.GetDriverByName("MEM").Create(
-            "", dataset.RasterXSize, dataset.RasterYSize, 1, gdal.GDT_Byte
-        )
-        source_mask_raster.SetGeoTransform(dataset.GetGeoTransform())
-        source_mask_band = source_mask_raster.GetRasterBand(1)
-        source_mask_band.WriteArray(
-            interpolation_sources.astype(numpy.uint8) * 255
-        )
-        search_pixels = _parse_float(
-            definition.get("footprint_fill_search_pixels"),
-            default=DEFAULT_FOOTPRINT_FILL_SEARCH_PIXELS,
-        )
-        gdal.FillNodata(
-            targetBand=band,
-            maskBand=source_mask_band,
-            maxSearchDist=float(search_pixels),
-            smoothingIterations=2,
-        )
-        filled_values = band.ReadAsArray()
-        filled_values[genuine_nodata] = nodata_value
-        band.WriteArray(filled_values)
-        band.FlushCache()
-        dataset = None
-        source_mask_raster = None
+        fill_method = _inset_fill_method()
+        if fill_method == INSET_FILL_METHOD_DISTANCE_TRANSFORM:
+            filled_values = _fill_masked_by_distance_transform(
+                values,
+                interpolation_sources,
+                smoothing_iterations=DEFAULT_FILL_SMOOTHING_ITERATIONS,
+            )
+            filled_values[genuine_nodata] = nodata_value
+            band.WriteArray(filled_values)
+            band.FlushCache()
+            dataset = None
+        else:
+            source_mask_raster = gdal.GetDriverByName("MEM").Create(
+                "", dataset.RasterXSize, dataset.RasterYSize, 1,
+                gdal.GDT_Byte,
+            )
+            source_mask_raster.SetGeoTransform(dataset.GetGeoTransform())
+            source_mask_band = source_mask_raster.GetRasterBand(1)
+            source_mask_band.WriteArray(
+                interpolation_sources.astype(numpy.uint8) * 255
+            )
+            search_pixels = _parse_float(
+                definition.get("footprint_fill_search_pixels"),
+                default=DEFAULT_FOOTPRINT_FILL_SEARCH_PIXELS,
+            )
+            gdal.FillNodata(
+                targetBand=band,
+                maskBand=source_mask_band,
+                maxSearchDist=float(search_pixels),
+                smoothingIterations=DEFAULT_FILL_SMOOTHING_ITERATIONS,
+            )
+            filled_values = band.ReadAsArray()
+            filled_values[genuine_nodata] = nodata_value
+            band.WriteArray(filled_values)
+            band.FlushCache()
+            dataset = None
+            source_mask_raster = None
     except Exception as error:
         UI.vprint(
             1,
@@ -4791,13 +4972,14 @@ def mask_building_footprints_in_surface_model(
         )
         return {"skipped": str(error), "footprint_count": len(footprints)}
     return {
-        "footprint_source": "OpenStreetMap building footprints",
+        "footprint_source": footprint_source,
         "footprint_count": len(footprints),
         "masked_pixel_count": int(pixels_to_fill.sum()),
         "masked_fraction": round(
             float(pixels_to_fill.sum()) / float(values.size), 4
         ),
         "footprint_mask_buffer_m": buffer_m,
+        "fill_method": fill_method,
     }
 
 

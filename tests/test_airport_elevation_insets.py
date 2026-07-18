@@ -3190,3 +3190,129 @@ def test_copernicus_glo30_ships_with_masking_flag_and_ranks_last():
     codes = [definition["code"] for definition in selected]
     assert "COPERNICUSGLO30" in codes
     assert codes[-1] == "COPERNICUSGLO30"
+
+
+# =====================================================================
+# Distance-transform masked-hole fill (vectorized inpaint replacement)
+# =====================================================================
+def test_distance_transform_fill_fills_holes_from_nearest_ground():
+    """Every masked (non-source) cell takes a nearest-ground value; the
+    trusted-ground (source) cells stay byte-identical."""
+    values = numpy.array(
+        [
+            [10.0, 10.0, 10.0, 10.0, 10.0],
+            [10.0, 999.0, 999.0, 999.0, 10.0],
+            [10.0, 999.0, 999.0, 999.0, 10.0],
+            [10.0, 10.0, 10.0, 10.0, 10.0],
+        ]
+    )
+    source_mask = values == 10.0  # the ring of ground; the 999 block is holes
+    filled = INSETS._fill_masked_by_distance_transform(
+        values, source_mask, smoothing_iterations=0
+    )
+    # No sentinel/rooftop value survives anywhere.
+    assert not numpy.any(filled == 999.0)
+    # Holes are filled from the surrounding ground (all 10.0 here).
+    assert numpy.allclose(filled[~source_mask], 10.0)
+    # Source cells are untouched, exactly.
+    assert numpy.array_equal(filled[source_mask], values[source_mask])
+
+
+def test_distance_transform_fill_is_deterministic():
+    rng = numpy.random.default_rng(1234)
+    values = rng.normal(size=(37, 41)) * 5.0 + 100.0
+    source_mask = rng.random((37, 41)) > 0.3  # ~70% ground, 30% holes
+    first = INSETS._fill_masked_by_distance_transform(
+        values, source_mask, smoothing_iterations=2
+    )
+    second = INSETS._fill_masked_by_distance_transform(
+        values, source_mask, smoothing_iterations=2
+    )
+    # Bit-for-bit identical across repeated runs (no order/thread dependence).
+    assert numpy.array_equal(first, second)
+
+
+def test_distance_transform_fill_preserves_source_cells_with_smoothing():
+    """Smoothing passes never modify a single source (unmasked) cell."""
+    rng = numpy.random.default_rng(7)
+    values = rng.normal(size=(25, 25)) + 50.0
+    source_mask = numpy.ones((25, 25), dtype=bool)
+    source_mask[8:16, 8:16] = False  # a central hole
+    filled = INSETS._fill_masked_by_distance_transform(
+        values, source_mask, smoothing_iterations=5
+    )
+    assert numpy.array_equal(filled[source_mask], values[source_mask])
+
+
+def test_distance_transform_fill_stays_within_ground_range():
+    """A nearest-ground fill never overshoots the surrounding ground values
+    (no ringing / no rooftop leakage), even on a sloped ground."""
+    # Ground is a smooth ramp; a rectangular hole sits in the middle.
+    yy, xx = numpy.mgrid[0:30, 0:30]
+    values = 100.0 + 0.5 * xx + 0.3 * yy
+    values_with_holes = values.copy()
+    source_mask = numpy.ones((30, 30), dtype=bool)
+    source_mask[10:20, 10:20] = False
+    values_with_holes[~source_mask] = 5000.0  # rooftop contamination
+    filled = INSETS._fill_masked_by_distance_transform(
+        values_with_holes, source_mask, smoothing_iterations=2
+    )
+    ground_min = values[source_mask].min()
+    ground_max = values[source_mask].max()
+    filled_holes = filled[~source_mask]
+    assert filled_holes.min() >= ground_min - 1e-9
+    assert filled_holes.max() <= ground_max + 1e-9
+
+
+def test_distance_transform_fill_no_sources_returns_unchanged():
+    values = numpy.array([[1.0, 2.0], [3.0, 4.0]])
+    source_mask = numpy.zeros((2, 2), dtype=bool)  # nothing trusted
+    filled = INSETS._fill_masked_by_distance_transform(
+        values, source_mask, smoothing_iterations=2
+    )
+    assert numpy.array_equal(filled, values)
+
+
+def test_inset_fill_method_env_gate(monkeypatch):
+    monkeypatch.delenv("O4_INSET_FILL_METHOD", raising=False)
+    assert (
+        INSETS._inset_fill_method()
+        == INSETS.INSET_FILL_METHOD_DISTANCE_TRANSFORM
+    )
+    monkeypatch.setenv("O4_INSET_FILL_METHOD", "gdal_fillnodata")
+    assert INSETS._inset_fill_method() == INSETS.INSET_FILL_METHOD_LEGACY
+    monkeypatch.setenv("O4_INSET_FILL_METHOD", "distance_transform")
+    assert (
+        INSETS._inset_fill_method()
+        == INSETS.INSET_FILL_METHOD_DISTANCE_TRANSFORM
+    )
+
+
+def test_collect_footprints_is_source_agnostic_union(monkeypatch):
+    """The mask sourcing is a package + OSM union; today package is empty
+    so the union is exactly the OSM set (behaviour preserved), but the
+    collector shape supports the union without touching the fill."""
+    sentinel_osm = ["osm-polygon-a", "osm-polygon-b"]
+    monkeypatch.setattr(
+        INSETS, "openstreetmap_building_footprints",
+        lambda box: list(sentinel_osm),
+    )
+    monkeypatch.setattr(
+        INSETS, "package_object_footprints", lambda box, defn: [],
+    )
+    footprints, label = INSETS._collect_inset_building_footprints(
+        (0.0, 0.0, 1.0, 1.0), {"code": "X"}
+    )
+    assert footprints == sentinel_osm
+    assert "OpenStreetMap" in label
+
+    # With a package source present, the union carries both and labels it.
+    monkeypatch.setattr(
+        INSETS, "package_object_footprints",
+        lambda box, defn: ["pkg-1"],
+    )
+    footprints, label = INSETS._collect_inset_building_footprints(
+        (0.0, 0.0, 1.0, 1.0), {"code": "X"}
+    )
+    assert footprints == ["pkg-1"] + sentinel_osm
+    assert "package" in label and "OpenStreetMap" in label
