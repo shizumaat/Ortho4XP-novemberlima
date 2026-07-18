@@ -6357,9 +6357,17 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     _projection_tile_lon = int(math.floor(layout.anchor[1]))
             except _GEOM_EXC:
                 _projection_dem = None
-        final_grade_projection(layout, icao, dem=_projection_dem,
-                               tile_lat=_projection_tile_lat,
-                               tile_lon=_projection_tile_lon)
+        # T1b A/B gate (board docs/build_time_program_board.md): the
+        # LATE projection re-runs on final geometry anyway, so the mid
+        # call may be redundant (~20 s at OTHH class). Default ON =
+        # historic behavior; the experiment is one env var. Watch the
+        # torn-weld class and frozen-feature bake values when off —
+        # relevel_pads/ribbon/groundside fixups below were designed to
+        # read mid-projected values.
+        if os.environ.get("O4_FINAL_PROJECTION_MID", "1") == "1":
+            final_grade_projection(layout, icao, dem=_projection_dem,
+                                   tile_lat=_projection_tile_lat,
+                                   tile_lon=_projection_tile_lon)
         # PAD-IN-SOLVED-PAVEMENT HOST LEVEL (user 2026-07-10, round 6 site 3):
         # a building pad embedded in / abutting SOLVED pavement must sit FLAT at
         # the level the HOST pavement solved to at the contact, not at its
