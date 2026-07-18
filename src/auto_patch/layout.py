@@ -1208,6 +1208,15 @@ class PavementLayout:
         # affecting step of emission.
         _WELD_TOL_M = 0.005
         _cell_m = 1.0
+        # The soft strip-vs-strip tear guard below is part of the raster
+        # reach-band reconciliation (the class arises only where that tighter
+        # band clamps abutting pavements ~2 m apart); scoped to it so gate-OFF
+        # keeps its established byte-identical emit.
+        import os as _os_layout
+        from .config import RASTER_REACH_BAND as _RRB_DEFAULT
+        _rrb_env = _os_layout.environ.get("O4_RASTER_REACH_BAND")
+        _raster_reach_on = ((_rrb_env == "1") if _rrb_env is not None
+                            else bool(_RRB_DEFAULT))
         _nid_xy: dict[int, tuple[float, float]] = {}
         _grid: dict[tuple[int, int], list[int]] = {}
         for _p_i, (_si, _s, _enids, _sa, _sna) in enumerate(pending):
@@ -1299,23 +1308,47 @@ class PavementLayout:
                     # renders as the designed wall between the twin
                     # and the foreign shape's own node.
                     _authority_roles = node_id_to_authority_roles.get(nid)
-                    if (_way_is_strip and _authority_roles
-                            and not (_authority_roles
-                                     & WELD_DONOR_ROLES)):
-                        _wall_a = _soft_claim_mean(n0)
-                        _wall_b = _soft_claim_mean(n1)
-                        if _wall_a is not None and _wall_b is not None:
-                            twin = next_nid[0]
-                            next_nid[0] -= 1
-                            node_id_to_ll[twin] = node_id_to_ll[nid]
-                            node_id_to_alts[twin] = [
-                                (1.0 - _t) * _wall_a + _t * _wall_b]
-                            _nid_xy[twin] = _nid_xy[nid]
-                            out.append(twin)
-                            member.add(twin)
-                            changed = True
-                            _n_weld += 1
-                            continue
+                    _non_donor_authority = bool(
+                        _authority_roles
+                        and not (_authority_roles & WELD_DONOR_ROLES))
+                    # SOFT strip-vs-strip TEAR guard (raster-reach-band
+                    # reconciliation, 2026-07-18): a node ANOTHER SOFT strip
+                    # owns (no authority claimant), spliced into THIS strip's
+                    # edge, carries the FOREIGN strip's value.  Where two
+                    # strips grade off pavements the tighter, correct reach
+                    # band now clamps ~2 m apart, that foreign value differs
+                    # from this strip's own edge-interpolated value by more
+                    # than the merge tolerance and renders as a sub-metre
+                    # near-vertical TEAR (the check_grade adjacent-ground
+                    # sentinel).  Twin it at THIS strip's own value — the same
+                    # coordinate-weld / designed-wall resolution as the
+                    # non-donor-authority case, extended to soft↔soft.
+                    _wall_a = _soft_claim_mean(n0) if _way_is_strip else None
+                    _wall_b = _soft_claim_mean(n1) if _way_is_strip else None
+                    _soft_strip_tear = False
+                    if (_raster_reach_on and _way_is_strip
+                            and not _authority_roles
+                            and _wall_a is not None and _wall_b is not None):
+                        _foreign = node_id_to_alts.get(nid)
+                        if _foreign:
+                            _own_interp = (1.0 - _t) * _wall_a + _t * _wall_b
+                            _soft_strip_tear = (
+                                abs(sum(_foreign) / len(_foreign) - _own_interp)
+                                > VERTEX_ALT_MERGE_TOL_M)
+                    if (_way_is_strip
+                            and (_non_donor_authority or _soft_strip_tear)
+                            and _wall_a is not None and _wall_b is not None):
+                        twin = next_nid[0]
+                        next_nid[0] -= 1
+                        node_id_to_ll[twin] = node_id_to_ll[nid]
+                        node_id_to_alts[twin] = [
+                            (1.0 - _t) * _wall_a + _t * _wall_b]
+                        _nid_xy[twin] = _nid_xy[nid]
+                        out.append(twin)
+                        member.add(twin)
+                        changed = True
+                        _n_weld += 1
+                        continue
                     if nid in member:
                         # The way already passes through this node
                         # ELSEWHERE (a multi-way collinear seam that

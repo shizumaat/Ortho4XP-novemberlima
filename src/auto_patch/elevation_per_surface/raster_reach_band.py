@@ -34,10 +34,11 @@ entry):
    ``APRON_MAX_GRADE × offset``, else returns ``None`` (off-net).
 
 This is a DELIBERATE SEMANTIC REPLACEMENT, gated ``O4_RASTER_REACH_BAND``
-(default OFF pending an adjacent-ground reconciliation — see ``config.py``).  It
-is NOT byte-identical to the legacy band.  The solve and the validator both build
-the band through :func:`reach_band_unified`, so gating there keeps them on the
-same producer.
+(default ON since Tier 3 wave 2b, 2026-07-18 — the adjacent-ground tear classes
+the tighter band opened are reconciled; see ``config.py`` and
+``adjacent_ground._heal_emitted_band_tears``).  It is NOT byte-identical to the
+legacy band.  The solve and the validator both build the band through
+:func:`reach_band_unified`, so gating there keeps them on the same producer.
 """
 
 from __future__ import annotations

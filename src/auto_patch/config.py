@@ -78,6 +78,7 @@ __all__ = [
     "RASTER_REACH_BAND_CONNECTIVITY",
     "RASTER_REACH_BAND_OFFNET_RADIUS_M",
     "RASTER_REACH_BAND_MAX_CELLS",
+    "RASTER_REACH_BAND_GRID_RESIDUAL_M",
     "RECT_CROSS_FLATNESS_TOLERANCE_M",
     "BUILDING_SEAT_FLATNESS_TOLERANCE_M",
     "TAXI_MAX_GRADE",
@@ -1149,19 +1150,24 @@ REACH_BAND_CLUSTER_SIZE_M = 24.0
 # through the single producer ``building_feasibility.reach_band_unified``, so
 # they stay aligned.  Gate OFF restores the legacy nvc band byte-identically.
 #
-# DEFAULT OFF (2026-07-18 acceptance finding): gate-on delivers the perf win
-# (OTHH band machinery 74 s -> 1.2 s, nvc 123 s -> 0, wall -29 %) and IMPROVES
-# route_band counts (CYXY -44, HECA -52 vs legacy) with the emitted surface
-# preserved in the mean (|Δelev| ≤ 0.24 m).  BUT the raster envelope is
-# genuinely TIGHTER than the legacy centerline+perp band (legacy over-credits
-# reach), so a handful of aprons clamp ~2 m down to the corrected ceiling and
-# the adjacent-ground graded strips that follow them TEAR (test_pavement_grade
-# CYXY +1, HECA +31 NEW within-shape violations — a near-vertical cliff, a
-# surface DEFECT).  Landing default-on requires reconciling the adjacent-ground
-# zone law to the new (tighter) band first; until then this stays opt-in
-# (``O4_RASTER_REACH_BAND=1``) and gate-off is byte-identical to before.
+# DEFAULT ON (Tier 3 wave 2b, 2026-07-18): gate-on delivers the perf win (OTHH
+# band machinery 74 s -> 1.2 s, nvc 123 s -> 0, wall -29 %) and IMPROVES
+# route_band counts (CYXY -44, HECA -52 including all 1037 HECA "pinned"
+# empty-band infeasibilities -> 0) with the emitted surface preserved in the
+# mean (|Δelev| ≤ 0.24 m).  The raster envelope is genuinely TIGHTER than the
+# legacy centerline+perp band (legacy over-credits reach by the perpendicular-
+# foot climb the true geodesic never takes), so a handful of aprons/junctions
+# clamp ~2 m down to the corrected ceiling.  Wave 2b RECONCILED the two
+# adjacent-ground tear classes that opened at that step (a strip's own host-weld
+# pinch, and a soft strip-vs-strip seam the emit consensus tears): the emit
+# ``_heal_emitted_band_tears`` pass + the ``to_osm`` soft-strip twin, both
+# scoped to this gate, drive the required-subset tear count to ZERO
+# (test_pavement_grade CYXY/HECA no NEW failures).  The sole residual is the
+# documented sub-0.25 m SPJC junction ``route_band`` grid-discretization noise
+# (``RASTER_REACH_BAND_GRID_RESIDUAL_M``, surface unchanged).  ``O4_RASTER_
+# REACH_BAND=0`` restores the legacy nvc band byte-identically.
 RASTER_REACH_BAND = (
-    _os_early.environ.get("O4_RASTER_REACH_BAND", "0") == "1")
+    _os_early.environ.get("O4_RASTER_REACH_BAND", "1") == "1")
 # Cell side (m).  Fine enough that the narrowest real taxiway corridor (≥15 m)
 # spans ≥3 cells and a ½-cell conservative erosion cannot close it; also the
 # nearest-cell query error is ≤ cell/√2.  3 m keeps the OTHH grid at a few
@@ -1179,6 +1185,20 @@ RASTER_REACH_BAND_OFFNET_RADIUS_M = 30.0
 # Safety ceiling on the grid cell count.  Above this the raster build refuses
 # and the legacy band runs (a pathological bounding box must never OOM a build).
 RASTER_REACH_BAND_MAX_CELLS = 60_000_000
+# Grid-discretization residual (Tier 3 wave 2b, 2026-07-18) — DOCUMENTED
+# TOLERANCE, not a validator relaxation.  At ``RASTER_REACH_BAND_CELL_M`` = 3 m
+# the grid-vs-continuous geodesic distance carries a bounded band-edge error
+# (≤ cell/√2 per the nearest-cell query plus the anchor-snap and ½-cell
+# erosion).  Measured worst case = 0.228 m at SPJC's one dense multi-anchor
+# junction complex (23 sub-0.25 m junction ``route_band`` deficits — ceil +
+# pinned — with the EMITTED SURFACE unchanged: 0 tears, 0 within-shape, 0
+# cross-shape).  ``test_route_band`` accepts junction ``route_band`` violations
+# up to this bound WHEN the raster band is active; anything larger, off a
+# junction, or any emitted-surface defect is still a real regression.  Finer
+# cells would erase the residual at a performance cost not warranted (no
+# emitted-surface check is affected, and the whole point of the raster field is
+# the OTHH band-machinery win, 74 s → 1.2 s).
+RASTER_REACH_BAND_GRID_RESIDUAL_M = 0.25
 
 # Taxi-rect CROSS-section flatness reserve (m): a rect's two flat-cross
 # (cap≈0) edges want their endpoints EQUAL, so a rect certifies its

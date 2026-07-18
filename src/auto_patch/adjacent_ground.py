@@ -961,6 +961,177 @@ def _heal_band_tears(ring, alts, weld, tear_max, min_jump,
     return new_ring, new_alts
 
 
+def _raster_reach_band_active() -> bool:
+    """Whether the rasterized reach band is the active band producer (the
+    runtime env ``O4_RASTER_REACH_BAND`` overriding the ``config`` default —
+    the exact resolution :func:`building_feasibility.reach_band_unified`
+    uses, so the emitter's reconciliation and the band producer agree)."""
+    from .config import RASTER_REACH_BAND
+    env = os.environ.get("O4_RASTER_REACH_BAND")
+    return (env == "1") if env is not None else bool(RASTER_REACH_BAND)
+
+
+def _heal_emitted_band_tears(emitted_shapes, layout):
+    """FINAL tear-heal over the emitted ``graded_strip`` group (2026-07-18).
+
+    The per-piece ``_heal_band_tears`` at emit runs BEFORE the piece's own
+    re-deconflict ``difference()`` / remap and before neighbour bands settle,
+    so a tear the LATER geometry mints escapes it.  Two classes the raster
+    reach band exposes (an apron/junction the tighter, CORRECT ceiling clamps
+    ~2 m down, its strips then bridging the resulting step) survive to emit:
+
+      1. WITHIN-STRIP PINCH: a strip clips against a NOT-dropped abutting
+         pavement and pinches its own host-weld row and the clip row
+         sub-metre apart.
+      2. CROSS-STRIP SEAM: two neighbour strips grading off pavements now
+         ~2 m apart share a seam node through the emit VALUE CONSENSUS
+         (``to_osm``: a shared node carries the mean of the strips touching
+         it), so one strip inherits the other's value and tears against its
+         own adjacent vertex — a tear invisible in the strip's OWN
+         ``node_altitudes`` (it lives only in the shared consensus).
+
+    Under the legacy band the two references sat within the tear jump, so
+    neither fired; this is a raster-band reconciliation, not a new law.  The
+    ruled resolution is unchanged (``_heal_band_tears`` doctrine: the sub-metre
+    near-vertical edge is the ONLY unlawful thing — the DEM-aware corridor
+    validator accepts the wide terrain-riding edges — so it is removed
+    geometrically).  This pass detects the tear against the EFFECTIVE emitted
+    value (the cross-strip shared-coordinate consensus, so class 2 is visible)
+    and collapses it by dropping an UNSHARED, non-donor vertex — never a vertex
+    another strip or a donor pavement also owns (moving it would un-weld that
+    seam).  Runs before the group decimation (healed rings decimate cleanly)
+    and before the pipeline's final epsilon-wedge weld (which re-conforms the
+    dropped-vertex seam).  Returns the number of strips healed.
+    """
+    from collections import defaultdict
+    from shapely.strtree import STRtree
+    from .layout import WELD_DONOR_ROLES
+    donor_ext = [s.polygon.exterior for s in layout.shapes
+                 if (s.role or "") in WELD_DONOR_ROLES
+                 and s.polygon is not None and not s.polygon.is_empty
+                 and s.polygon.geom_type == "Polygon"]
+    try:
+        tree = STRtree(donor_ext) if donor_ext else None
+    except _GEOM_EXC:
+        tree = None
+    _WELD_TOL_M = 0.05
+
+    def _on_donor(x, y):
+        if tree is None:
+            return False
+        try:
+            hit = tree.query_nearest(Point(x, y), max_distance=_WELD_TOL_M)
+        except _GEOM_EXC:
+            return False
+        return len(hit) > 0
+
+    # Cross-strip shared-coordinate consensus (mirrors ``to_osm``'s soft-mean
+    # rule): millimetre vertex key -> list of contributing strip values, so a
+    # vertex two strips share resolves to the value the patch actually emits
+    # there (class 2).  Values within the emit-merge tolerance intern into ONE
+    # node in ``to_osm``; a spread past it splits into separate nodes (a clean
+    # wall, no tear), so only same-key values within tolerance are a tear risk.
+    strip_vals: "defaultdict[tuple, list]" = defaultdict(list)
+    strip_rings: list = []
+    for sh in emitted_shapes:
+        if (sh.ref != _ADJACENT_REF or sh.polygon is None
+                or sh.polygon.is_empty
+                or sh.polygon.geom_type != "Polygon"
+                or sh.node_altitudes is None):
+            continue
+        try:
+            ring = list(sh.polygon.exterior.coords)[:-1]
+        except _GEOM_EXC:
+            continue
+        alts = list(sh.node_altitudes[:len(ring)])
+        if len(ring) != len(alts) or len(ring) < 4:
+            continue
+        keys = [_vertex_key(vx, vy) for (vx, vy) in ring]
+        for k, a in zip(keys, alts):
+            strip_vals[k].append(float(a))
+        strip_rings.append((sh, ring, alts, keys))
+
+    def _effective(k, own):
+        vals = strip_vals.get(k)
+        if not vals or len(vals) <= 1:
+            return own
+        # Same-key values within the merge tolerance intern to one node whose
+        # emitted altitude is their mean (``to_osm``); a wider spread splits
+        # into separate nodes (no shared value → no cross-strip tear).
+        if max(vals) - min(vals) <= VERTEX_ALT_MERGE_TOL_M:
+            return sum(vals) / float(len(vals))
+        return own
+
+    healed = 0
+    for (sh, ring, alts, keys) in strip_rings:
+        n = len(ring)
+        on_donor = [_on_donor(vx, vy) for (vx, vy) in ring]
+        # SHARED = another strip owns this exact coordinate, or a donor
+        # pavement edge does: dropping it would un-weld that seam, so it is
+        # protected; the tear is resolved by dropping the strip's OWN vertex.
+        shared = [on_donor[i] or len(strip_vals.get(keys[i], ())) >= 2
+                  for i in range(n)]
+        eff = [_effective(keys[i], alts[i]) for i in range(n)]
+        keep = [True] * n
+        changed = True
+        guard = 0
+        while changed and guard < 2 * n:
+            guard += 1
+            changed = False
+            idxs = [i for i in range(n) if keep[i]]
+            m = len(idxs)
+            if m <= 3:
+                break
+            for a in range(m):
+                i = idxs[a]
+                j = idxs[(a + 1) % m]
+                d = math.hypot(ring[j][0] - ring[i][0],
+                               ring[j][1] - ring[i][1])
+                de = abs(eff[i] - eff[j])
+                if not (d < 0.2 * CLEARANCE_STATION_STEP_M and de > 1.0):
+                    continue
+                # Drop an UNSHARED endpoint (prefer the larger spike relative
+                # to its far ring neighbour); never a shared/donor vertex.
+                cand = []
+                if not shared[i]:
+                    pi = idxs[(a - 1) % m]
+                    cand.append((abs(eff[i] - eff[pi]), i))
+                if not shared[j]:
+                    nj = idxs[(a + 2) % m]
+                    cand.append((abs(eff[j] - eff[nj]), j))
+                if not cand:
+                    continue                       # both protected — leave it
+                keep[max(cand)[1]] = False
+                changed = True
+                break
+        if all(keep):
+            continue
+        new_ring = [ring[i] for i in range(n) if keep[i]]
+        new_alts = [alts[i] for i in range(n) if keep[i]]
+        if len(new_ring) < 3:
+            continue
+        try:
+            poly = Polygon(new_ring + [new_ring[0]])
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if poly.is_empty or poly.geom_type != "Polygon":
+                continue
+        except _GEOM_EXC:
+            continue
+        rebuilt = _open_coords(poly)
+        if len(rebuilt) < 3:
+            continue
+        if len(rebuilt) == len(new_ring):
+            out_alts = new_alts
+        else:
+            out_alts = [round(float(_nearest_alt(
+                new_ring, new_alts, vx, vy)), 1) for vx, vy in rebuilt]
+        sh.polygon = poly
+        sh.node_altitudes = out_alts + [out_alts[0]]
+        healed += 1
+    return healed
+
+
 def _ring_edge_reference(coords, ring_alts):
     """The shared ring linear-reference (code motion out of
     ``_make_edge_projection_resampler``, Slice B stage B3 order 2 — the
@@ -3294,6 +3465,20 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                     continue
             return False
 
+        # FINAL TEAR HEAL (raster-reach-band reconciliation, 2026-07-18):
+        # collapse any sub-metre near-vertical pinch the per-piece heal could
+        # not see because a later geometry op (this piece's re-deconflict, a
+        # neighbour band's clip) minted it — the class a tighter, correct
+        # reach ceiling exposes at an apron/junction it clamps down.  Runs
+        # before decimation so the healed rings decimate cleanly.  Scoped to
+        # the raster reach band (the path this reconciles): gate-OFF keeps its
+        # established byte-identical baseline — the legacy band does not drop
+        # aprons, so the pinch class does not arise there.
+        _n_final_heal = (_heal_emitted_band_tears(emitted_shapes, layout)
+                         if _raster_reach_band_active() else 0)
+        if _n_final_heal:
+            UI.vprint(1, f"  [adjacent-ground] final tear heal: collapsed "
+                         f"pinch edge(s) in {_n_final_heal} strip(s).")
         removed = decimate_shape_group(
             emitted_shapes, Z_TOL_BOUNDARY_M,
             protect_predicate=_on_foreign_boundary)
