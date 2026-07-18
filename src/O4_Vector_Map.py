@@ -413,8 +413,20 @@ def build_poly_file(tile):
 
 
 ################################################################################
-def include_airports(vector_map, tile):
-    UI.vprint(0, "-> Dealing with airports")
+def load_airports_and_prepare_dem(tile):
+    """Airport OSM layer + ``dico_airports`` + the PRODUCTION tile DEM.
+
+    This is the exact prelude the tile build runs before auto-patch
+    generation: airports layer load, airport dictionaries, elevation
+    insets, tile-wide overlay, DEM construction, inset densification,
+    overlay bake, and airport smoothing — ``tile.dem`` afterwards IS the
+    DEM every production ``build_airport_pavement`` call receives via
+    ``tile_dem``.  Factored out (2026-07-18, user: standalone probes
+    must test with the production DEM) so
+    ``tools/production_airport_patch.py`` can run single-airport builds
+    against the identical surface.  Returns ``(airport_layer,
+    dico_airports)``, or ``(None, None)`` when the airports layer
+    cannot be loaded."""
     airport_layer = OSM.OSM_layer()
     queries = AIRPORTS_QUERIES
     tags_of_interest = ["all"]
@@ -426,7 +438,7 @@ def include_airports(vector_map, tile):
         tags_of_interest,
         cached_suffix="airports",
     ):
-        return (0, 0)
+        return (None, None)
     # The airports layer was the only download the next stages need
     # right away — fetch every other layer this build will read in the
     # background while airport processing / auto-patch builds compute.
@@ -475,6 +487,17 @@ def include_airports(vector_map, tile):
     # smoothing pass (airport insets keep baking last, after smoothing).
     ELEVATION_LEVEL.bake_tile_overlay_into_alt_dem(tile)
     APT.smooth_raster_over_airports(tile, dico_airports)
+    return (airport_layer, dico_airports)
+
+
+################################################################################
+def run_auto_patch_generation(tile, airport_layer, dico_airports):
+    """The tile build's auto-patch generation call, exactly as
+    ``include_airports`` runs it (mode resolution, CIFP discovery, lazy
+    taxiway/building/road providers).  ``tile.dem`` must already be the
+    production DEM (:func:`load_airports_and_prepare_dem`).  Factored
+    out with it (2026-07-18) for the single-airport production lab loop
+    in ``tools/production_airport_patch.py``."""
     # Auto-generate runway, taxiway, and building patches from CIFP data +
     # OSM geometry (before loading patches so include_patches() picks them up)
     # Backward compat: legacy bool True/False configs map to "All"/"None"
@@ -557,6 +580,15 @@ def include_airports(vector_map, tile):
                 road_data=_road_provider,
                 mode=auto_patch_mode,
             )
+
+
+################################################################################
+def include_airports(vector_map, tile):
+    UI.vprint(0, "-> Dealing with airports")
+    (airport_layer, dico_airports) = load_airports_and_prepare_dem(tile)
+    if airport_layer is None:
+        return (0, 0)
+    run_auto_patch_generation(tile, airport_layer, dico_airports)
     (patches_area, patches_list) = include_patches(vector_map, tile)
     runway_taxiway_apron_area = APT.encode_runways_taxiways_and_aprons(
         tile, airport_layer, dico_airports, vector_map, patches_list,
