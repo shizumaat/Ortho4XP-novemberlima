@@ -50,7 +50,7 @@ PHASE_STARTS = [
     (1991, "3 Building taxiways & terminals"),
     (3321, "4 Building taxi rects, junctions & service roads"),
     (4241, "5 Solving elevations (FAA grade compliance)"),
-    (5939, "6 Emitting terrain features & finalizing"),
+    (5951, "6 Emitting terrain features & finalizing"),
 ]
 
 
