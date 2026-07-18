@@ -55,7 +55,10 @@ top-tier-model tokens only where judgment is required:
    build by ≥1 % — additionally requires a written explanation and
    **explicit owner approval** before landing. Gated-but-default-on
    code is not exempt. Every implementation-agent brief must include a
-   build-time impact statement.
+   build-time impact statement. Executable check:
+   `venv/bin/python tools/check_build_time.py` (baselines:
+   `tools/build_time_baselines.json`; owner approvals:
+   `tools/build_time_approvals.json`).
 
 ## Conventions
 

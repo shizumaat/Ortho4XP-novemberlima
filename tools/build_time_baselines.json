@@ -1,0 +1,5 @@
+{
+ "_doc": "Committed build-time baselines for the hard-law checker tools/check_build_time.py (canonical law: CLAUDE.md working-style item 6). Cold-equivalent measurements excluding downloads; update via 'venv/bin/python tools/check_build_time.py --run --update-baselines <ICAO ...>' and commit alongside the change that paid for any new numbers.",
+ "airports": {},
+ "tiles": {}
+}

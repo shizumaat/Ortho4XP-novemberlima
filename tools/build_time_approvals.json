@@ -1,0 +1,4 @@
+{
+ "_doc": "Owner-committed approvals for build-time hard-law exceptions (canonical law: CLAUDE.md working-style item 6; checker: tools/check_build_time.py). Each entry: subject ('airport:<ICAO>' | 'tile:<short_latlon>' | '*'), metric ('total' | 'phase:<label>' | '*'), allowed_seconds (approved ceiling the measured value must stay under), reason (required, non-empty), approved_by (required), date. Hollow entries are ignored by the checker.",
+ "approvals": []
+}
