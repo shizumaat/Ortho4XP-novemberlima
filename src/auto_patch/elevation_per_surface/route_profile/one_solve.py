@@ -241,18 +241,30 @@ def _project_vectorized(elev, iter_edges, n, max_iters, tol,
         wj_int = np.where(Ki == 0, 0.5, np.where(Ki == 1, 1.0, 0.0))
     z = np.asarray(elev, dtype=np.float64)
     for _it in range(max_iters):
-        d = z[I] - z[J]
-        over = np.abs(d) - B
-        active = over > tol
-        any_active = bool(active.any())
-        # signed excess per ACTIVE edge (0 elsewhere) — scatter-add to endpoints
-        # via bincount (true C scatter, far faster than np.add.at).
-        se = np.where(active, np.sign(d) * over, 0.0)
-        acc = (np.bincount(I, weights=-se * wi, minlength=n)
-               + np.bincount(J, weights=se * wj, minlength=n))
-        af = active.astype(np.float64)
-        cnt = (np.bincount(I, weights=af, minlength=n)
-               + np.bincount(J, weights=af, minlength=n))
+        if m:
+            d = z[I] - z[J]
+            over = np.abs(d) - B
+            active = over > tol
+            any_active = bool(active.any())
+            # signed excess per ACTIVE edge (0 elsewhere) — scatter-add to
+            # endpoints via bincount (true C scatter, far faster than
+            # np.add.at).
+            se = np.where(active, np.sign(d) * over, 0.0)
+            acc = (np.bincount(I, weights=-se * wi, minlength=n)
+                   + np.bincount(J, weights=se * wj, minlength=n))
+            af = active.astype(np.float64)
+            cnt = (np.bincount(I, weights=af, minlength=n)
+                   + np.bincount(J, weights=af, minlength=n))
+        else:
+            # ALL-INTERVAL edge set (every edge carries the ``None`` budget
+            # sentinel — EGWN's scoped projection): np.bincount's empty-input
+            # fast path returns int64 even when float weights are passed, so
+            # deriving ``acc``/``cnt`` from the empty symmetric arrays would
+            # birth int64 accumulators and the interval block's ``+=`` below
+            # raises a same-kind casting error.  Born float64 instead.
+            any_active = False
+            acc = np.zeros(n, dtype=np.float64)
+            cnt = np.zeros(n, dtype=np.float64)
         if have_int:
             di = z[Ii] - z[Ji]
             above = di - Hi                       # >tol ⇒ over the ceiling
