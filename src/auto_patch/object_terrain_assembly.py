@@ -170,9 +170,12 @@ def _load_object_geometry_by_resource(
     placements, pack_root, xplane_root
 ):
     """Resolve and load OBJ8 geometry for every terrain-relative placement
-    resource, skipping light-only objects (no solid geometry) and
-    mass-placed clutter (more than :data:`MAXIMUM_PLACEMENTS_PER_RESOURCE`
-    placements) — the same two skips Phase 1 applies."""
+    resource, skipping light-only objects (no solid geometry), mass-placed
+    clutter (more than :data:`MAXIMUM_PLACEMENTS_PER_RESOURCE` placements)
+    — the same two skips Phase 1 applies — and stock library assets
+    (``lib/...``), which the classifier refuses anyway (2026-07-18): not
+    loading them saves parsing catalogue geometry such as the 27k-triangle
+    ``lib/ships/OilRig.obj``."""
     placement_count_by_resource: dict[str, int] = {}
     for placement in placements:
         placement_count_by_resource[placement.resource_path] = (
@@ -186,6 +189,8 @@ def _load_object_geometry_by_resource(
             placement_count_by_resource[resource_path]
             > MAXIMUM_PLACEMENTS_PER_RESOURCE
         ):
+            continue
+        if object_terrain_features.is_stock_library_resource(resource_path):
             continue
         physical_path = obj8_reader.resolve_object_resource(
             resource_path, pack_root, xplane_root
@@ -339,10 +344,13 @@ def _discover_sibling_road_networks(
 # pre-screen, composed placement transform, bulk footprint unions) —
 # results are equivalent within float tolerance but must be rebuilt on
 # the new code path.
-_CLASSIFICATION_CACHE_VERSION = 7  # 7: tunnels carry solid_outline_footprint
-#    (flush-bottom trench floors).  5: face records grew bridge-shaped
-#    compatibility fields (deck_polygon/frame_origin) — older pickles
-#    lack them and crash pair consumers once face pairs own crossings.
+# 5: face records grew bridge-shaped compatibility fields
+# (deck_polygon/frame_origin) — older pickles lack them and crash pair
+# consumers once face pairs own crossings.
+# 7: tunnels carry solid_outline_footprint (flush-bottom trench floors).
+# 8: stock-library (lib/...) resources excluded from classification, plus
+# the AGL-limb above-grade height cap (EGKR Redhill control tower).
+_CLASSIFICATION_CACHE_VERSION = 8
 
 # Sidecar file name prefix; the full name carries the DSF stem
 # (``o4_object_terrain_classification_<dsf-stem>.cache``).  Lives under

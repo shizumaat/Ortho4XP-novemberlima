@@ -770,6 +770,137 @@ class TestBasementNotTunnel:
 
 
 # ---------------------------------------------------------------------------
+# stock-library exclusion + AGL-limb above-grade height cap (2026-07-18,
+# tile +51-001: the EGKR Redhill control tower and the EGKK oil rig)
+# ---------------------------------------------------------------------------
+
+class TestStockLibraryExclusion:
+    def test_predicate(self):
+        assert otf.is_stock_library_resource(
+            "lib/airport/control_towers/small/16m_Norway.obj"
+        )
+        assert otf.is_stock_library_resource("lib/ships/OilRig.obj")
+        assert otf.is_stock_library_resource("LIB\\ships\\OilRig.obj")
+        assert otf.is_stock_library_resource("./lib/cars/car.obj")
+        assert not otf.is_stock_library_resource("Airport/Tunnel/6.obj")
+        assert not otf.is_stock_library_resource("mylib/tunnel.obj")
+        assert not otf.is_stock_library_resource("library/tunnel.obj")
+
+    def test_library_tunnel_shape_is_not_consumed(self):
+        """The roofed-shell geometry classifies as a tunnel under a pack
+        path (TestTunnelRecognition) — the SAME geometry under a ``lib/``
+        virtual path must produce nothing at all: a stock catalogue asset
+        is never a pack-authored terrain shell."""
+        geometry = _roofed_shell_tunnel_geometry()
+        resource = "lib/airport/control_towers/small/16m_Norway.obj"
+        result = otf.classify_object_terrain_features(
+            [_placement(resource)], {resource: geometry}, pack_root="PACK"
+        )
+        assert result.tunnels == []
+        assert result.bridges == []
+        assert result.refusals == []
+        assert result.exclusions == []
+        assert result.ground_interfaces == []
+
+    def test_library_bridge_shape_is_not_consumed(self):
+        """The hard-deck bridge geometry under a ``lib/`` path (the EGKK
+        oil rig class: deck on legs) must not classify as a bridge."""
+        geometry = _hard_deck_bridge_geometry()
+        resource = "lib/ships/OilRig.obj"
+        result = otf.classify_object_terrain_features(
+            [_placement(resource)], {resource: geometry}, pack_root="PACK"
+        )
+        assert result.bridges == []
+        assert result.tunnels == []
+        assert result.exclusions == []
+
+
+class TestAglBuriedBuildingNotTunnel:
+    def test_buried_tower_stands_above_grade(self):
+        """EGKR Redhill (measured 2026-07-18): a control tower placed at
+        OBJECT_AGL -4 carries real below-grade horizontal area (its buried
+        floors) yet stands far above effective grade — the AGL limb must
+        refuse anything reaching over
+        TUNNEL_AGL_MAX_ABOVE_GRADE_HEIGHT_M."""
+        builder = _GeometryBuilder()
+        # Buried ground floor: authored 0, effective -4 — 100 m² of
+        # below-grade near-horizontal area, well over the 25 m² gate.
+        builder.add_horizontal_rectangle(-5, 5, -5, 5, 0.0, segments=2)
+        # The tower roof: authored +16, effective +12.
+        builder.add_horizontal_rectangle(-5, 5, -5, 5, 16.0, segments=2)
+        resource = "Airport/Towers/tower_synthetic.obj"
+        placements = [
+            _placement(
+                resource,
+                above_ground_level_metres=-4.0,
+                placement_kind="OBJECT_AGL",
+            )
+        ]
+        result = otf.classify_object_terrain_features(
+            placements, {resource: builder.build()}
+        )
+        assert result.tunnels == []
+
+    def test_shell_with_low_parapet_still_fires(self):
+        """A true AGL shell may poke slightly above grade (EGLL Tunnel/10
+        tops out at +0.84 m effective): a +1.5 m parapet stays under the
+        2.0 m cap and the limb must still fire."""
+        builder = _GeometryBuilder()
+        # Below-grade deck: authored 0, effective -2 — 200 m².
+        builder.add_horizontal_rectangle(-10, 10, -5, 5, 0.0, segments=2)
+        # Low parapet top: authored +3.5, effective +1.5.
+        builder.add_horizontal_rectangle(-10, 10, -5, -4, 3.5, segments=2)
+        resource = "Airport/Tunnel/parapet_synthetic.obj"
+        placements = [
+            _placement(
+                resource,
+                above_ground_level_metres=-2.0,
+                placement_kind="OBJECT_AGL",
+            )
+        ]
+        result = otf.classify_object_terrain_features(
+            placements, {resource: builder.build()}
+        )
+        assert len(result.tunnels) == 1
+
+
+class TestRealStockLibrarySmoke:
+    def test_norway_tower_at_redhill_offset(self):
+        """The real EGKR misclassification, end to end: the stock 16 m
+        Norway control tower at its Global-Airports OBJECT_AGL -4.0 must
+        classify as nothing — and even under a non-library alias the AGL
+        height cap alone must refuse it (defense in depth)."""
+        xplane_root = os.environ.get("XPLANE_ROOT", "/Users/noah/X-Plane 12")
+        virtual = "lib/airport/control_towers/small/16m_Norway.obj"
+        physical = (
+            obj8_reader.resolve_object_resource(virtual, None, xplane_root)
+            if os.path.isdir(xplane_root)
+            else None
+        )
+        if not physical:
+            pytest.skip("X-Plane default library not available")
+        geometry = load_object_file(physical)
+        placement = _placement(
+            virtual,
+            above_ground_level_metres=-4.0,
+            placement_kind="OBJECT_AGL",
+            longitude=-0.13837,
+            latitude=51.21598,
+        )
+        result = otf.classify_object_terrain_features(
+            [placement], {virtual: geometry}
+        )
+        assert result.tunnels == []
+        assert result.exclusions == []
+
+        alias = "Airport/Towers/norway_16m_alias.obj"
+        aliased = otf.classify_object_terrain_features(
+            [placement._replace(resource_path=alias)], {alias: geometry}
+        )
+        assert aliased.tunnels == []
+
+
+# ---------------------------------------------------------------------------
 # clearance planes: largest-area ceiling versus lowest limiting underside
 # ---------------------------------------------------------------------------
 

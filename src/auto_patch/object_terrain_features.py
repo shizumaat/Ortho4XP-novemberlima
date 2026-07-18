@@ -125,6 +125,22 @@ TUNNEL_MIN_BELOW_GRADE_DECK_AREA_M2 = 200.0
 # −1.0 m, so the threshold is 1.0, not the body-depth 2.0.
 TUNNEL_MIN_BELOW_GRADE_AGL_OFFSET_M = 1.0
 
+# The AGL limb recognizes SHELLS — structures living essentially below the
+# effective grade plane.  A building merely SEATED below grade (a negative
+# offset to sink its foundation into a slope) stands tall above it, so the
+# limb refuses any resource whose solid faces reach higher than this above
+# effective grade.  Measured 2026-07-18 (tile +51-001): the EGKR Redhill
+# control tower ``lib/airport/control_towers/small/16m_Norway.obj``, placed
+# at OBJECT_AGL −4.0 by Global Airports, carried 138.7 m² of below-grade
+# deck area and classified as a tunnel — its highest face sits at +15.19 m
+# effective.  The three true EGLL AGL shells top out at −1.69 (Tunnel/6),
+# −0.66 (Tunnel/7) and +0.84 m (Tunnel/10); 2.0 keeps better than a metre
+# of margin over the tallest true shell and rejects every measured
+# building.  Note an above-grade AREA test cannot do this job: Tunnel/10
+# carries MORE near-horizontal area above grade (128.7 m²) than below
+# (55.1 m²) — height, not area, is the discriminator.
+TUNNEL_AGL_MAX_ABOVE_GRADE_HEIGHT_M = 2.0
+
 # The AGL limb applies only to SINGLE-placement resources (spec section
 # 2.1 lists "single placement" among the tunnel signatures) that carry at
 # least this much near-horizontal solid area below effective grade.
@@ -216,6 +232,33 @@ GROUND_CONTACT_TOLERANCE_M = 0.5
 # Placements whose expanded world footprints overlap by this margin pool
 # into one structure (module docstring, "Grouping").
 STRUCTURE_GROUPING_EPSILON_M = 2.0
+
+# ---------------------------------------------------------------------------
+# Stock-library exclusion (2026-07-18, tile +51-001).  X-Plane's default
+# library exports its virtual paths under ``lib/`` (``lib/airport/...``,
+# ``lib/ships/...``, ``lib/cars/...``); a DSF referencing such a path is
+# placing a GENERIC catalogue asset — a control tower, an oil rig, ramp
+# clutter — never a pack-authored terrain shell, so no terrain feature
+# should ever adapt to one.  Two live misclassifications motivated this:
+# ``lib/airport/control_towers/small/16m_Norway.obj`` at EGKR Redhill
+# (OBJECT_AGL −4.0 → feature-A tunnel) and ``lib/ships/OilRig.obj`` at
+# EGKK (deck-and-legs geometry → bridge/deck terrain in the building-pad
+# exclusion pass).  Third-party libraries that re-export ``lib/`` paths
+# to replace stock assets are equally generic, so the prefix test stays
+# correct for them too.
+# ---------------------------------------------------------------------------
+STOCK_LIBRARY_RESOURCE_PREFIX = "lib/"
+
+
+def is_stock_library_resource(resource_path: str) -> bool:
+    """True when ``resource_path`` is an X-Plane library virtual path
+    (``lib/...``) — a stock catalogue asset the terrain classifier must
+    never consume.  Case-insensitive, tolerant of backslash separators
+    and a leading ``./``."""
+    normalized = resource_path.replace("\\", "/").lower()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized.startswith(STOCK_LIBRARY_RESOURCE_PREFIX)
 
 # ---------------------------------------------------------------------------
 # Pool evidence pre-screen (performance round, 2026-07-10).  A pool is
@@ -1731,8 +1774,10 @@ def _agl_tunnel_seed_resources(
     """Resources whose below-grade ``OBJECT_AGL`` placement is a credible
     tunnel signal (the guarded AGL limb — see
     :data:`TUNNEL_AGL_MIN_BELOW_GRADE_DECK_AREA_M2`): single placement,
-    offset at or below −:data:`TUNNEL_MIN_BELOW_GRADE_AGL_OFFSET_M`, and
-    real below-effective-grade horizontal deck area."""
+    offset at or below −:data:`TUNNEL_MIN_BELOW_GRADE_AGL_OFFSET_M`, real
+    below-effective-grade horizontal deck area, and nothing standing more
+    than :data:`TUNNEL_AGL_MAX_ABOVE_GRADE_HEIGHT_M` above grade (a shell
+    lives below the grade plane; a buried BUILDING towers over it)."""
     placement_count: dict[str, int] = {}
     for placement in placements:
         placement_count[placement.resource_path] = (
@@ -1753,6 +1798,21 @@ def _agl_tunnel_seed_resources(
             below_grade_area_by_index.tolist(),
         )
     }
+    highest_face_by_index = numpy.full(
+        len(frame.triangle_resource_paths), -numpy.inf
+    )
+    numpy.maximum.at(
+        highest_face_by_index,
+        frame.triangle_resource_indices,
+        frame.triangle_height_m,
+    )
+    highest_face = {
+        resource: height
+        for resource, height in zip(
+            frame.triangle_resource_paths,
+            highest_face_by_index.tolist(),
+        )
+    }
     return {
         placement.resource_path
         for placement in placements
@@ -1761,6 +1821,8 @@ def _agl_tunnel_seed_resources(
         and placement_count[placement.resource_path] == 1
         and below_grade_area.get(placement.resource_path, 0.0)
         >= TUNNEL_AGL_MIN_BELOW_GRADE_DECK_AREA_M2
+        and highest_face.get(placement.resource_path, -numpy.inf)
+        <= TUNNEL_AGL_MAX_ABOVE_GRADE_HEIGHT_M
     }
 
 
@@ -3531,8 +3593,23 @@ def classify_object_terrain_features(
     resource in :attr:`ClassificationResult.exclusions` (ruling R4).
 
     Grouping reuses ``object_anchor.discover_object_pools``; each pool is
-    tried as a tunnel first (below-grade signature) then as a bridge."""
-    mean_sea_level_placements = mean_sea_level_placements or []
+    tried as a tunnel first (below-grade signature) then as a bridge.
+
+    Stock library assets (``lib/...`` virtual paths — see
+    :func:`is_stock_library_resource`) are dropped up front: a catalogue
+    object is never a pack-authored terrain shell, whatever its shape or
+    placement offset (2026-07-18, the EGKR control tower and EGKK oil
+    rig)."""
+    mean_sea_level_placements = [
+        placement
+        for placement in (mean_sea_level_placements or [])
+        if not is_stock_library_resource(placement.resource_path)
+    ]
+    placements = [
+        placement
+        for placement in placements
+        if not is_stock_library_resource(placement.resource_path)
+    ]
     resolved_paths = {
         placement.resource_path: placement.resource_path
         for placement in placements

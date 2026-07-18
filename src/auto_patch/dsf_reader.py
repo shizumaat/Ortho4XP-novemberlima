@@ -1097,7 +1097,9 @@ def airport_mod_cache_dir(pack_root: str) -> str | None:
 # Bump when the partition / footprint logic changes shape in a way that
 # would make an old cached ring set wrong — invalidates every footprint
 # sidecar.
-_OBJECT_FOOTPRINT_CACHE_VERSION = 2  # 2: portal-face exclusions (EGGW)
+# 2: portal-face exclusions (EGGW); 3: terrain classifier refuses stock
+# library (lib/...) resources, changing the terrain-exclusion pass output
+_OBJECT_FOOTPRINT_CACHE_VERSION = 3
 
 # Sidecar file name prefix; the full name carries the DSF stem
 # (``o4_object_footprints_<dsf-stem>.cache``) so two DSFs of one pack
