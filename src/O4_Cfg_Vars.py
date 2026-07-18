@@ -51,7 +51,12 @@ cfg_app_vars = {
     "osm_regional_extracts": {
         "type": bool,
         "default": True,
-        "hint": "Serve OpenStreetMap vector data from locally stored Geofabrik regional extracts when available, falling back to the Overpass servers. The first build in a region records it for download; the extract is then fetched in the background (typically a few hundred megabytes, once per region) and every later build in that region reads OSM data locally - no waiting on shared OSM servers, no rate limits.",
+        "hint": "Serve OpenStreetMap vector data from locally stored Geofabrik regional extracts when available, falling back to the Overpass servers. The extract for a region is fetched once (typically a few hundred megabytes) and every build in that region then reads OSM data locally - no waiting on shared OSM servers, no rate limits.",
+    },
+    "osm_extract_foreground_download": {
+        "type": bool,
+        "default": True,
+        "hint": "When a build needs a regional extract that is not stored yet, download it immediately and wait for it (the Geofabrik servers are fast and unthrottled, so this is almost always quicker than the Overpass fallback - a first Cairo-tile build spent 21 minutes on throttled Overpass queries while the Egypt extract finished downloading one minute in). Off: the first build in a region uses Overpass while the extract downloads in the background, as before.",
     },
     "osm_extract_refresh_days": {
         "type": float,
@@ -616,6 +621,7 @@ list_app_vars = [
     "cleaning_level",
     "overpass_server_choice",
     "osm_regional_extracts",
+    "osm_extract_foreground_download",
     "osm_extract_refresh_days",
     "base_elevation_source",
     "skip_downloads",

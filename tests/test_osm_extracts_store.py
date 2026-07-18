@@ -220,7 +220,10 @@ class TestPbfContentValidation:
 class TestEntryPoint:
     BBOX = (38, -9.5, 39, -8.5)
 
-    def test_missing_extract_queues_and_falls_back(self, store):
+    def test_missing_extract_queues_and_falls_back(self, store, monkeypatch):
+        # Lazy mode (foreground download off): record wanted, use Overpass.
+        monkeypatch.setattr(
+            EXTRACTS, "foreground_download_enabled", lambda: False)
         result = EXTRACTS.osm_xml_from_local_extracts(
             ['way["natural"="water"]'], self.BBOX)
         assert result is None
@@ -431,3 +434,111 @@ class TestDownloadCancellation:
             "portugal", "https://example.invalid/portugal.pbf")
         assert ok is True
         assert os.path.isfile(EXTRACTS._region_file("portugal"))
+
+
+class TestForegroundDownload:
+    """First build in a region downloads the extract NOW instead of
+    falling back to Overpass (owner ruling 2026-07-18)."""
+
+    BBOX = (38, -9.5, 39, -8.5)
+    SENTINEL = b"<osm-foreground/>"
+
+    @pytest.fixture(autouse=True)
+    def _foreground_environment(self, store, monkeypatch):
+        import types
+
+        import O4_UI_Utils as UI
+
+        monkeypatch.setattr(UI, "red_flag", False)
+        monkeypatch.setattr(EXTRACTS, "FOREGROUND_POLL_SECONDS", 0.01)
+        monkeypatch.setitem(
+            sys.modules, "O4_OSM_Extract_Filter",
+            types.SimpleNamespace(
+                filter_extracts_to_osm_xml=lambda paths, statements, bbox:
+                    self.SENTINEL))
+        self.store = store
+
+    def _fake_successful_downloader(self, calls):
+        def _download(region_id, url, foreground=False):
+            calls.append((region_id, foreground))
+            with open(EXTRACTS._region_file(region_id), "wb") as pbf:
+                pbf.write(_PBF_HEADER)
+            return True
+        return _download
+
+    def test_missing_extract_downloads_foreground_and_serves(
+            self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(EXTRACTS, "_download_extract",
+                            self._fake_successful_downloader(calls))
+        result = EXTRACTS.osm_xml_from_local_extracts(
+            ['way["building"]'], self.BBOX)
+        assert result == self.SENTINEL
+        assert calls == [("portugal", True)]
+        wanted = EXTRACTS._read_json(os.path.join(self.store, "wanted.json"))
+        assert wanted in (None, [])        # nothing left for maintenance
+
+    def test_download_failure_falls_back_to_overpass_and_queues(
+            self, monkeypatch):
+        monkeypatch.setattr(
+            EXTRACTS, "_download_extract",
+            lambda region_id, url, foreground=False: False)
+        result = EXTRACTS.osm_xml_from_local_extracts(
+            ['way["building"]'], self.BBOX)
+        assert result is None
+        wanted = EXTRACTS._read_json(os.path.join(self.store, "wanted.json"))
+        assert wanted == ["portugal"]
+
+    def test_red_flag_skips_foreground_download(self, monkeypatch):
+        import O4_UI_Utils as UI
+
+        monkeypatch.setattr(UI, "red_flag", True)
+
+        def _must_not_download(region_id, url, foreground=False):
+            raise AssertionError("no download may start under red_flag")
+        monkeypatch.setattr(EXTRACTS, "_download_extract",
+                            _must_not_download)
+        assert EXTRACTS.osm_xml_from_local_extracts(
+            ['way["building"]'], self.BBOX) is None
+
+    def test_waits_for_live_concurrent_downloader(self, monkeypatch):
+        import threading
+
+        def _must_not_download(region_id, url, foreground=False):
+            raise AssertionError(
+                "a live concurrent download must be awaited, not raced")
+        monkeypatch.setattr(EXTRACTS, "_download_extract",
+                            _must_not_download)
+        # A FRESH sibling .tmp = another process is streaming this region.
+        concurrent_tmp = EXTRACTS._region_file("portugal") + ".tmp-9999-1"
+        with open(concurrent_tmp, "wb") as tmp_file:
+            tmp_file.write(b"partial")
+
+        def _finish_download():
+            time.sleep(0.05)
+            with open(EXTRACTS._region_file("portugal"), "wb") as pbf:
+                pbf.write(_PBF_HEADER)
+        finisher = threading.Thread(target=_finish_download)
+        finisher.start()
+        try:
+            result = EXTRACTS.osm_xml_from_local_extracts(
+                ['way["building"]'], self.BBOX)
+        finally:
+            finisher.join()
+        assert result == self.SENTINEL
+
+    def test_stale_tmp_is_ignored_removed_and_download_proceeds(
+            self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(EXTRACTS, "_download_extract",
+                            self._fake_successful_downloader(calls))
+        stale_tmp = EXTRACTS._region_file("portugal") + ".tmp-1234-5"
+        with open(stale_tmp, "wb") as tmp_file:
+            tmp_file.write(b"crashed download residue")
+        stale_by = EXTRACTS.CONCURRENT_TMP_FRESH_SECONDS + 60
+        os.utime(stale_tmp, (time.time() - stale_by, time.time() - stale_by))
+        result = EXTRACTS.osm_xml_from_local_extracts(
+            ['way["building"]'], self.BBOX)
+        assert result == self.SENTINEL
+        assert calls == [("portugal", True)]
+        assert not os.path.exists(stale_tmp)
