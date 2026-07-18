@@ -65,7 +65,7 @@ def _read_back_values(layout):
 
 def test_projection_recaptures_snapshot_with_post_projection_values(
         monkeypatch):
-    monkeypatch.delenv("O4_SCOPED_FINAL_PROJECTION", raising=False)
+    monkeypatch.setenv("O4_SCOPED_FINAL_PROJECTION", "1")   # opt-in since the 2026-07-18 default flip
     monkeypatch.delenv("O4_FINAL_GRADE_PROJECTION", raising=False)
     layout = _apron_layout()
     assert getattr(layout, "_final_projection_snapshot", None) is None
@@ -84,7 +84,7 @@ def test_projection_recaptures_snapshot_with_post_projection_values(
 
 
 def test_second_projection_run_defers_unchanged_shape(monkeypatch, capsys):
-    monkeypatch.delenv("O4_SCOPED_FINAL_PROJECTION", raising=False)
+    monkeypatch.setenv("O4_SCOPED_FINAL_PROJECTION", "1")   # opt-in since the 2026-07-18 default flip
     monkeypatch.delenv("O4_FINAL_GRADE_PROJECTION", raising=False)
     layout = _apron_layout()
     apron = layout.shapes[0]
@@ -113,7 +113,7 @@ def test_second_projection_run_defers_unchanged_shape(monkeypatch, capsys):
 
 
 def test_value_churn_after_projection_blocks_deferral(monkeypatch):
-    monkeypatch.delenv("O4_SCOPED_FINAL_PROJECTION", raising=False)
+    monkeypatch.setenv("O4_SCOPED_FINAL_PROJECTION", "1")   # opt-in since the 2026-07-18 default flip
     monkeypatch.delenv("O4_FINAL_GRADE_PROJECTION", raising=False)
     layout = _apron_layout()
     apron = layout.shapes[0]

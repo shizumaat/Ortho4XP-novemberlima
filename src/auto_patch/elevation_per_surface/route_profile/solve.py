@@ -999,8 +999,7 @@ def solve_route_profile(layout, icao: str,
             # plateau" was the first-edge-wins dedup enforcing conflicting
             # duplicate budgets).  Cap with headroom; the loop exits early
             # at tol.
-            _scoped_gate = (_os.environ.get(
-                "O4_SCOPED_FINAL_PROJECTION", "1") == "1")
+            _scoped_gate = _scoped_projection_enabled()
             # Capture the BROKEN quarantine (genuine anchor contradictions,
             # full-graph detection) for the scoped final projection — its
             # sparser graph can miss the same contradictions and grind POCS
@@ -1443,6 +1442,20 @@ def solve_route_profile(layout, icao: str,
 
 
 # ── SCOPED FINAL PROJECTION (user 2026-07-05, O4_SCOPED_FINAL_PROJECTION) ────
+# DEFAULT FLIPPED OFF 2026-07-18 (board T1a verdict): quiet-machine A/B at
+# OTHH measured the whole apparatus (solve-side capture + scope pass +
+# mid-exit recapture + deferral) NET-NEGATIVE at the target class — 363.3 s
+# with scoping vs 325.2 s without, check_grade counts identical except +1
+# by-design break pair at SPJC and +1 noise-aware spine kink at OTHH (CYXY
+# byte-identical).  Deferral engaged (OTHH late: 124 deferred) but deferred
+# shapes were cheap — the constraints stage barely moved — while capture
+# rivals the seed stage per call (HECA: 14.4 s for ONE deferred shape).
+# O4_SCOPED_FINAL_PROJECTION=1 re-enables the machinery; it is retained
+# for post-solve-churn regimes where deferral might pay again.
+
+
+def _scoped_projection_enabled() -> bool:
+    return _os.environ.get("O4_SCOPED_FINAL_PROJECTION", "0") == "1"
 # Shapely-domain exceptions only (project rule: never catch built-ins here).
 def _snapshot_geom_exceptions():
     from shapely.errors import GEOSException, TopologicalError
@@ -1968,8 +1981,7 @@ def final_grade_projection(layout, icao: str = "", dem=None,
     # nothing to do; deferred shapes become zero-cost lazy stubs that expand
     # the moment the projection moves one of their nodes.
     snapshot = getattr(layout, "_final_projection_snapshot", None)
-    scoped = (snapshot is not None and _os.environ.get(
-        "O4_SCOPED_FINAL_PROJECTION", "1") == "1")
+    scoped = (snapshot is not None and _scoped_projection_enabled())
     defer_ids: set = set()
     pre_broken: set = set()
     if scoped:
@@ -2567,8 +2579,7 @@ def final_grade_projection(layout, icao: str = "", dem=None,
     # this fairing is the LAST pass before writeback, nothing re-enforces
     # the pairs it perturbs, so the snapshot recaptured below must exclude
     # the moved nodes from the "unchanged ⇒ already enforced" proof.
-    _scoped_projection_gate = (_os.environ.get(
-        "O4_SCOPED_FINAL_PROJECTION", "1") == "1")
+    _scoped_projection_gate = _scoped_projection_enabled()
     _pre_fairing_elev = (list(elev)
                          if _scoped_projection_gate and recapture_snapshot
                          else None)
