@@ -103,8 +103,29 @@ def test_record_water_tris_routes_water_sea_to_inland(tmp_path):
     UI.red_flag = False
     tile = _FakeTile(tmp_path)
     _write_mesh(tile, triangle_attributes=(2, 3, 1))
-    (dico_sea, dico_inland) = MASK.record_water_tris(tile)
+    (dico_sea, dico_inland, coastline_sea_present) = (
+        MASK.record_water_tris(tile)
+    )
     sea_count = sum(len(tris) for tris in dico_sea.values())
     inland_count = sum(len(tris) for tris in dico_inland.values())
     assert sea_count >= 1          # the pure-sea triangle
     assert inland_count == 2       # WATER|SEA and pure WATER
+    assert coastline_sea_present   # bit 2 rules that pure-sea triangle
+
+
+def test_record_water_tris_sea_equivalent_lakes_are_not_marine(tmp_path):
+    """The CYXY shape (owner 2026-07-18): a mesh whose only mask-water
+    is sea-EQUIVALENT lakes (bit 4, the large-lake routing) fills
+    ``dico_sea`` — the lakes DO get mask squares — but reports no
+    marine coastline sea, so marine-only consumers (the reef/tidal-flat
+    shallow-water fallback) know to stay quiet."""
+    import O4_UI_Utils as UI
+
+    UI.red_flag = False
+    tile = _FakeTile(tmp_path)
+    _write_mesh(tile, triangle_attributes=(4, 4, 4))
+    (dico_sea, dico_inland, coastline_sea_present) = (
+        MASK.record_water_tris(tile)
+    )
+    assert dico_sea                       # lake squares still masked
+    assert not coastline_sea_present      # ... but nothing marine

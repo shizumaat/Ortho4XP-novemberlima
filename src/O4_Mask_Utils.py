@@ -178,7 +178,7 @@ def build_masks(tile, for_imagery=False):
     
     # Record water tris form mesh (and portions of nearby meshes)
     UI.vprint(1, "-> Reading mesh data")
-    (dico_sea, dico_inland) = record_water_tris(tile, )
+    (dico_sea, dico_inland, coastline_sea_present) = record_water_tris(tile)
 
     UI.vprint(1, "-> Construction of the masks")
 
@@ -222,7 +222,8 @@ def build_masks(tile, for_imagery=False):
     )
     shallow_water_categories = None
     if shallow_water_fallback_wanted(
-        tile, dico_sea, bathymetry_band_vrt, airport_gated_band
+        tile, dico_sea, coastline_sea_present, bathymetry_band_vrt,
+        airport_gated_band
     ):
         shallow_water_categories = load_shallow_water_polygons(tile)
 
@@ -541,19 +542,30 @@ def build_dem_pre_mask(til_x, til_y, tile):
 ################################################################################
 
 ################################################################################
-def shallow_water_fallback_wanted(tile, dico_sea, bathymetry_band_vrt,
-                                  airport_gated_band):
+def shallow_water_fallback_wanted(tile, dico_sea, coastline_sea_present,
+                                  bathymetry_band_vrt, airport_gated_band):
     """Whether the mapped shallow-water fallback should download at all.
 
     Masks are only ever built for the squares in ``dico_sea``, so a
     landlocked tile (no sea or sea-equivalent water in the mask region,
-    ``dico_sea`` empty) must not spend two Overpass round trips on reef
+    ``dico_sea`` empty) must not spend two download round trips on reef
     and tidal-flat queries whose result could never be rasterized.
+
+    ``coastline_sea_present`` sharpens that to MARINE water (owner
+    2026-07-18): reefs and tidal flats are tidal features, and a tile
+    whose mask squares come only from sea-EQUIVALENT lakes (bit 4, the
+    large-lake routing — the Whitehorse lakes around CYXY) has nothing
+    they could ever apply to.  Left open, the queries went to the
+    regional-extract filter chain (north-admreg + us + us-pacific +
+    us/alaska + yukon) and stalled the masks step for ~8 minutes.
+
     Beyond that, the fallback loads when no measured band covers the
     tile — or alongside an airport-gated band, whose beyond-the-radius
     squares it fills — and only while the fallback setting is on.
     """
     if not dico_sea:
+        return False
+    if not coastline_sea_present:
         return False
     if bathymetry_band_vrt is not None and not airport_gated_band:
         return False
@@ -971,6 +983,12 @@ def record_water_tris(tile):
     ####################
     dico_sea = {}
     dico_inland = {}
+    # Whether any recorded triangle carries the coastline-flood SEA bit
+    # (bit 2) as its ruling class.  Sea-EQUIVALENT lakes (bit 4, the
+    # large-lake mask routing) fill dico_sea without setting this: they
+    # get mask squares but are not marine water, and marine-only
+    # consumers (the reef/tidal-flat shallow-water fallback) gate on it.
+    coastline_sea_present = False
     ####################
     [til_x_min, til_y_min] = GEO.wgs84_to_orthogrid(
         tile.lat + 1, tile.lon, tile.mask_zl
@@ -1046,6 +1064,8 @@ def record_water_tris(tile):
                 or til_y > til_y_max + 16
             ):
                 continue
+            if (water_bits & 2) and not water_type_is_inland(water_bits):
+                coastline_sea_present = True
             (til_x2, til_y2) = GEO.wgs84_to_orthogrid(
                 bary_lat, bary_lon, tile.mask_zl + 2
             )
@@ -1189,7 +1209,7 @@ def record_water_tris(tile):
                         ]
             f_mesh.close()
     
-    return (dico_sea, dico_inland)
+    return (dico_sea, dico_inland, coastline_sea_present)
 ################################################################################
         
 ################################################################################

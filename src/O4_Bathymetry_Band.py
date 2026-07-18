@@ -356,9 +356,13 @@ def _band_geometry(tile):
     polygons are collected separately (they get the tight
     :data:`INLAND_WATER_BAND_KM` reach) and best-effort only: when the
     ``water`` query cache already exists on disk — the masks step must
-    never trigger a fresh Overpass download for inland lakes.  Returns
-    ``(coastline_geometry, inland_geometry_or_None)`` or ``None`` on a
-    failed coastline download.
+    never trigger a fresh Overpass download for inland lakes.  Inland
+    water is only collected AT ALL when the tile has a coastline: the
+    reach serves coastal lagoons the water-class rulings keep
+    inland-classed, and on a landlocked tile (no coastline ways at all)
+    the band is skipped outright — no provider has lake bathymetry.
+    Returns ``(coastline_geometry, inland_geometry_or_None)`` or
+    ``None`` on a failed coastline download.
     """
     import O4_OSM_Utils as OSM
     from shapely.geometry import GeometryCollection
@@ -376,6 +380,19 @@ def _band_geometry(tile):
     coastline = OSM.OSM_to_MultiLineString(
         coastline_layer, tile.lat, tile.lon
     )
+
+    # Landlocked tiles stop here (owner direction 2026-07-18): the
+    # inland reach below exists to serve inland-CLASSED water adjoining
+    # a coast — tidal lagoons like the Ria Formosa, which the water-class
+    # rulings deliberately keep inland — never freestanding lakes.  No
+    # shipped provider measures lake or reservoir bathymetry, so on a
+    # tile with no coastline every selected cell would be a wasted fetch
+    # (CYXY: 46 cells probed around the Whitehorse lakes).  The large
+    # sea-equivalent lakes that DO have measured depth (the Great Lakes,
+    # the Caspian) are tagged natural=coastline in OSM and keep their
+    # band through the coastline branch.
+    if coastline.is_empty:
+        return (coastline, None)
 
     inland = None
     water_cache = FNAMES.osm_cached(tile.lat, tile.lon, "water")

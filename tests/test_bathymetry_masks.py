@@ -342,8 +342,22 @@ def test_shallow_water_fallback_skipped_on_landlocked_tile():
     tile = types.SimpleNamespace(lat=48, lon=8,
                                  osm_shallow_water_fallback=True)
     assert not MASK.shallow_water_fallback_wanted(
-        tile, dico_sea={}, bathymetry_band_vrt=None,
-        airport_gated_band=False)
+        tile, dico_sea={}, coastline_sea_present=False,
+        bathymetry_band_vrt=None, airport_gated_band=False)
+
+
+def test_shallow_water_fallback_skipped_on_sea_equivalent_lakes():
+    """The CYXY 8-minute stall (owner 2026-07-18): sea-EQUIVALENT lakes
+    fill ``dico_sea`` with mask squares, but reefs and tidal flats are
+    marine features — without a coastline-flood SEA triangle anywhere in
+    the mask region the fallback must not run its downloads (they were
+    going to the regional-extract filter chain, 8 minutes at CYXY)."""
+    lake_sea = {(0, 0): [(0.0,) * 6]}
+    tile = types.SimpleNamespace(lat=60, lon=-136,
+                                 osm_shallow_water_fallback=True)
+    assert not MASK.shallow_water_fallback_wanted(
+        tile, lake_sea, coastline_sea_present=False,
+        bathymetry_band_vrt=None, airport_gated_band=False)
 
 
 def test_shallow_water_fallback_gating_matrix():
@@ -354,19 +368,114 @@ def test_shallow_water_fallback_gating_matrix():
     tile = types.SimpleNamespace(lat=37, lon=-8,
                                  osm_shallow_water_fallback=True)
     assert MASK.shallow_water_fallback_wanted(
-        tile, coastal_sea, bathymetry_band_vrt=None,
-        airport_gated_band=False)
+        tile, coastal_sea, coastline_sea_present=True,
+        bathymetry_band_vrt=None, airport_gated_band=False)
     assert MASK.shallow_water_fallback_wanted(
-        tile, coastal_sea, bathymetry_band_vrt="band.vrt",
-        airport_gated_band=True)
+        tile, coastal_sea, coastline_sea_present=True,
+        bathymetry_band_vrt="band.vrt", airport_gated_band=True)
     assert not MASK.shallow_water_fallback_wanted(
-        tile, coastal_sea, bathymetry_band_vrt="band.vrt",
-        airport_gated_band=False)
+        tile, coastal_sea, coastline_sea_present=True,
+        bathymetry_band_vrt="band.vrt", airport_gated_band=False)
     tile_fallback_off = types.SimpleNamespace(
         lat=37, lon=-8, osm_shallow_water_fallback=False)
     assert not MASK.shallow_water_fallback_wanted(
-        tile_fallback_off, coastal_sea, bathymetry_band_vrt=None,
-        airport_gated_band=False)
+        tile_fallback_off, coastal_sea, coastline_sea_present=True,
+        bathymetry_band_vrt=None, airport_gated_band=False)
+
+
+def _install_band_geometry_osm(monkeypatch, tmp_path, coastline,
+                               water_polygons):
+    """Route ``_band_geometry``'s OSM traffic to synthetic data.
+
+    The coastline query succeeds and yields ``coastline``; a ``water``
+    cache file exists on disk and, if parsed, yields
+    ``water_polygons``.  Returns the list of issued cache suffixes so a
+    test can assert which queries actually ran."""
+    import O4_OSM_Utils as OSM
+    from shapely.geometry import MultiPolygon
+
+    queries_issued = []
+
+    def _record_query(queries, layer, lat, lon, tags, cached_suffix="",
+                      **keyword_arguments):
+        queries_issued.append(cached_suffix)
+        return 1
+
+    monkeypatch.setattr(OSM, "OSM_layer", lambda: object())
+    monkeypatch.setattr(OSM, "OSM_queries_to_OSM_layer", _record_query)
+    monkeypatch.setattr(
+        OSM, "OSM_to_MultiLineString", lambda layer, lat, lon: coastline
+    )
+    monkeypatch.setattr(
+        OSM,
+        "OSM_to_MultiPolygon",
+        lambda layer, lat, lon: MultiPolygon(water_polygons),
+    )
+    water_cache = tmp_path / "water.osm.bz2"
+    water_cache.write_bytes(b"")
+    monkeypatch.setattr(
+        FNAMES, "osm_cached", lambda lat, lon, suffix: str(water_cache)
+    )
+    return queries_issued
+
+
+def test_landlocked_tile_skips_the_band_outright(monkeypatch, tmp_path):
+    """A tile with big inland lakes but no coastline ways never fetches
+    the bathymetry band (owner direction 2026-07-18): the inland reach
+    only serves lagoons adjoining a coast, and no shipped provider has
+    lake bathymetry — CYXY was probing 46 wasted cells around the
+    Whitehorse lakes.  The cached water query must not even be parsed."""
+    import O4_Airport_Elevation_Insets as INSETS
+    from shapely.geometry import MultiLineString
+
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    queries_issued = _install_band_geometry_osm(
+        monkeypatch, tmp_path, MultiLineString([]), []
+    )
+    monkeypatch.setattr(
+        INSETS,
+        "select_bathymetry_definitions",
+        lambda lat, lon: [{
+            "code": "FAKEBATHY", "role": "bathymetry", "enabled": True,
+            "priority": 100.0, "native_resolution_m": 3.0,
+        }],
+    )
+
+    def _never_fetch(*args, **keyword_arguments):
+        raise AssertionError(
+            "a landlocked tile must not fetch bathymetry band cells"
+        )
+
+    monkeypatch.setattr(INSETS, "fetch_inset", _never_fetch)
+
+    tile = types.SimpleNamespace(lat=60, lon=-136,
+                                 bathymetry_band_km=5.0)
+    assert BATHYBAND._ensure_bathymetry_band_now(
+        tile, fine_nearshore_only=True) is None
+    assert queries_issued == ["coastline"]
+
+
+def test_coastal_tile_keeps_the_inland_lagoon_reach(monkeypatch,
+                                                    tmp_path):
+    """The reason the inland reach EXISTS: a coastal tile whose lagoon
+    is inland-classed water (the Ria Formosa under the water-class
+    rulings) still collects the lagoon geometry for cell selection —
+    the landlocked guard must never eat this case."""
+    from shapely.geometry import MultiLineString, Polygon
+
+    queries_issued = _install_band_geometry_osm(
+        monkeypatch,
+        tmp_path,
+        MultiLineString([[(0.1, 0.05), (0.1, 0.35)]]),
+        # ~25 km2 at the equator: over MINIMUM_INLAND_WATER_KM2.
+        [Polygon([(0.2, 0.2), (0.25, 0.2), (0.25, 0.25), (0.2, 0.25)])],
+    )
+
+    tile = types.SimpleNamespace(lat=0, lon=0, bathymetry_band_km=5.0)
+    (coastline, inland) = BATHYBAND._band_geometry(tile)
+    assert not coastline.is_empty
+    assert inland is not None and not inland.is_empty
+    assert queries_issued == ["coastline", "water"]
 
 
 # =====================================================================
@@ -454,10 +563,13 @@ def test_record_water_tris_handles_sub_100_triangle_mesh(data_root):
     tile = _make_tile(data_root, use_masks_for_inland=False)
     _write_minimal_mesh(tile, filler_count=2)  # 3 triangles total
 
-    (dico_sea, dico_inland) = MASK.record_water_tris(tile)
+    (dico_sea, dico_inland, coastline_sea_present) = (
+        MASK.record_water_tris(tile)
+    )
 
     assert dico_sea  # the sea triangle was still attributed
     assert dico_inland == {}
+    assert coastline_sea_present  # pure SEA drives the marine flag
 
 
 # =====================================================================
@@ -527,7 +639,8 @@ def test_build_masks_dem_too_tristate_resolution(
     monkeypatch.setattr(MASK.DEM, "DEM", _RecordingDEM)
     # No mesh squares to process: the tri-state logic runs, the parallel
     # build immediately drains an empty queue.
-    monkeypatch.setattr(MASK, "record_water_tris", lambda tile: ({}, {}))
+    monkeypatch.setattr(
+        MASK, "record_water_tris", lambda tile: ({}, {}, False))
 
     tile = _make_tile(data_root, masks_use_DEM_too=setting)
     _write_minimal_mesh(tile)  # mesh must exist to pass the guard
@@ -646,7 +759,7 @@ def test_shallow_water_fallback_loads_alongside_gated_band(
     # but build_mask returns immediately on it, so only the resolution
     # logic actually runs.
     monkeypatch.setattr(
-        MASK, "record_water_tris", lambda tile: ({(0, 0): []}, {}))
+        MASK, "record_water_tris", lambda tile: ({(0, 0): []}, {}, True))
 
     tile = _make_tile(
         data_root,
