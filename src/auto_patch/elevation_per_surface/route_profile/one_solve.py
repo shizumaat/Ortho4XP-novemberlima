@@ -309,6 +309,92 @@ def _chain_prepass_enabled():
         return False
 
 
+def _extend_edge_coloring_by_write(iter_edges: list,
+                                   coloring_state: dict) -> tuple:
+    """Extend the greedy first-fit WRITE-conflict edge coloring held in
+    ``coloring_state`` to cover every edge of ``iter_edges`` (perf 2026-07-18,
+    partition-identical to the original per-edge ``forbidden`` union scan).
+
+    ``coloring_state`` (mutated in place; pass ``{}`` to color from scratch)
+    carries the coloring of a PREFIX of ``iter_edges``:
+
+    * ``"edge_color"`` — per-edge color list (length = colored prefix);
+    * ``"color_count"`` — number of colors used so far;
+    * ``"used_colors_by_node"`` — node → set of colors of edges writing it;
+    * ``"next_free_color_by_node"`` — node → smallest color index NOT in the
+      node's used set (advanced lazily).
+
+    Greedy first-fit is PREFIX-STABLE — an edge's color depends only on
+    earlier edges in list order — so extending a carried prefix over appended
+    edges (the lazy-expansion rounds, which only ever APPEND) yields exactly
+    the coloring a from-scratch run over the full list would.
+
+    HUB ACCELERATION (exact, not approximate): the first-fit color is
+    ``c* = min{c ≥ 0 : c ∉ used[a] and c ∉ used[b]}`` over the edge's write
+    nodes.  Every ``c < next_free[a]`` lies in ``used[a]`` (and likewise for
+    ``b``), so ``c* ≥ max(next_free[a], next_free[b])``; scanning upward from
+    that bound and testing membership in BOTH per-node sets directly reaches
+    the same ``c*`` as the original scan-from-0 over the union — without
+    materialising the O(write-degree) ``forbidden`` union copy per edge that
+    made near-clique apron bodies quadratic (the 20.5 s OTHH leaf).  A
+    single-write-node edge (``kind`` 1/2) takes ``next_free[w]`` outright —
+    the zone→host hub still colors with a single color.
+
+    Returns ``(edge_color, color_count)`` with ``edge_color`` the state's
+    (now full-length) per-edge color list."""
+    edge_color = coloring_state.setdefault("edge_color", [])
+    used = coloring_state.setdefault("used_colors_by_node", {})
+    next_free = coloring_state.setdefault("next_free_color_by_node", {})
+    color_count = coloring_state.get("color_count", 0)
+    colored_prefix = len(edge_color)
+    if colored_prefix > len(iter_edges):
+        # Defensive: the carried state outran the edge list (caller misuse) —
+        # a stale prefix cannot be trusted, so recolor from scratch.
+        edge_color.clear()
+        used.clear()
+        next_free.clear()
+        color_count = 0
+        colored_prefix = 0
+    for edge_index in range(colored_prefix, len(iter_edges)):
+        i, j, _budget, kind = iter_edges[edge_index]
+        if kind == 0:
+            used_i = used.get(i)
+            used_j = used.get(j)
+            if used_i is None:
+                color = 0 if used_j is None else next_free[j]
+            elif used_j is None:
+                color = next_free[i]
+            else:
+                free_i = next_free[i]
+                free_j = next_free[j]
+                color = free_i if free_i > free_j else free_j
+                while color in used_i or color in used_j:
+                    color += 1
+            write_nodes = (i, j)
+        else:
+            write_node = j if kind == 1 else i
+            color = next_free.get(write_node, 0)
+            write_nodes = (write_node,)
+        edge_color.append(color)
+        if color + 1 > color_count:
+            color_count = color + 1
+        for node in write_nodes:
+            s = used.get(node)
+            if s is None:
+                used[node] = {color}
+                next_free[node] = 1 if color == 0 else 0
+            else:
+                s.add(color)
+                free = next_free[node]
+                if color == free:
+                    free += 1
+                    while free in s:
+                        free += 1
+                    next_free[node] = free
+    coloring_state["color_count"] = color_count
+    return edge_color, color_count
+
+
 def _color_edges_by_write(iter_edges):
     """Greedily partition ``iter_edges`` into color classes on the
     WRITE-conflict graph, deterministically.
@@ -328,37 +414,12 @@ def _color_edges_by_write(iter_edges):
 
     Determinism: edges are processed in ``iter_edges`` order and each takes the
     smallest color not used by an already-colored write-neighbour; the result is
-    invariant to intra-color order by construction (disjoint writes).  Returns a
-    list (indexed by color) of edge-index lists."""
-    used: dict = {}                 # node -> set of colors of edges writing it
-    ncolors = 0
-    edge_color = [0] * len(iter_edges)
-    for edge_index in range(len(iter_edges)):
-        i, j, _budget, kind = iter_edges[edge_index]
-        if kind == 0:
-            write_nodes = (i, j)
-        elif kind == 1:
-            write_nodes = (j,)
-        else:
-            write_nodes = (i,)
-        forbidden: set = set()
-        for node in write_nodes:
-            s = used.get(node)
-            if s:
-                forbidden |= s
-        color = 0
-        while color in forbidden:
-            color += 1
-        edge_color[edge_index] = color
-        if color + 1 > ncolors:
-            ncolors = color + 1
-        for node in write_nodes:
-            s = used.get(node)
-            if s is None:
-                used[node] = {color}
-            else:
-                s.add(color)
-    colors: list = [[] for _ in range(ncolors)]
+    invariant to intra-color order by construction (disjoint writes).  The
+    greedy scan itself lives in :func:`_extend_edge_coloring_by_write` (exact
+    hub-accelerated first-fit, perf 2026-07-18).  Returns a list (indexed by
+    color) of edge-index lists."""
+    edge_color, color_count = _extend_edge_coloring_by_write(iter_edges, {})
+    colors: list = [[] for _ in range(color_count)]
     for edge_index in range(len(iter_edges)):
         colors[edge_color[edge_index]].append(edge_index)
     return colors
@@ -521,22 +582,42 @@ def _project_chain_prepass(elev, iter_edges, n, immovable):
 
 
 def _project_chromatic(elev, iter_edges, n, max_iters, tol,
-                       interval_bounds_by_index=None, *, stats=None):
+                       interval_bounds_by_index=None, *, stats=None,
+                       coloring_state=None, run_feasibility_precheck=True):
     """Colored Gauss-Seidel POCS (survey candidate 1) — the vectorized
     replacement for BOTH legacy inner sweeps.  Mutates ``elev`` in place.
 
     Precomputes one deterministic write-conflict coloring
-    (:func:`_color_edges_by_write`); each sweep relaxes the color classes in
-    order, every class as a single vectorized fancy-indexed update whose writes
-    are disjoint (a valid independent projection batch) and which reads the
-    LATEST values from earlier classes — a true Gauss-Seidel step at numpy
-    speed, converging where the degree-normalised Jacobi stalls.
+    (:func:`_extend_edge_coloring_by_write`); each sweep relaxes the color
+    classes in order, every class as a single vectorized fancy-indexed update
+    whose writes are disjoint (a valid independent projection batch) and which
+    reads the LATEST values from earlier classes — a true Gauss-Seidel step at
+    numpy speed, converging where the degree-normalised Jacobi stalls.
 
     KKT / dual feasibility certificate (survey candidate 4): a full sweep that
     applies NO correction proves every constraint satisfied, so iteration stops
     on proof rather than the ``max_iters`` cap; the avoided sweeps are recorded
     in ``stats``.  ``stats`` (optional dict) receives ``colors``, ``edges``,
     ``sweeps``, ``sweeps_avoided``, ``certified`` and ``worst``.
+
+    FEASIBILITY PRE-CHECK (perf 2026-07-18, byte-identical): one vectorized
+    residual pass over the flat edge columns BEFORE the coloring.  Sweep 1
+    applies zero corrections iff every edge is already within tolerance at
+    entry (the first color class only moves when active, so an all-satisfied
+    system passes through every class untouched) — so when no edge violates,
+    this returns the exact certified-on-sweep-1 result (``(1, True)``, the
+    same counters and writeback) without paying the coloring or the per-color
+    array build at all.  The repeated re-projection call sites are usually
+    already feasible, which is where the saving lands.  ``stats["colors"]`` is
+    unknowable without coloring and reported as ``None`` on this path (it is
+    only ever read by the ``O4_STEP_DEBUG`` print, under which the coloring IS
+    computed so the line stays faithful).  ``run_feasibility_precheck=False``
+    forces the full path (test hook; both paths are value-identical).
+
+    ``coloring_state`` (optional dict, mutated) carries the incremental
+    coloring across lazy-expansion rounds — see
+    :func:`_extend_edge_coloring_by_write`; rounds only APPEND edges and the
+    greedy coloring is prefix-stable, so extending is exact.
 
     Interval edges (``budget is None``) carry a signed slab
     ``[s_low, s_high]`` in ``interval_bounds_by_index`` (keyed by ``iter_edges``
@@ -545,35 +626,106 @@ def _project_chromatic(elev, iter_edges, n, max_iters, tol,
     bounds = interval_bounds_by_index or {}
     _NEG_INF = float("-inf")
     _POS_INF = float("inf")
-    colors = _color_edges_by_write(iter_edges)
-    # per-color numpy arrays, symmetric + interval partitioned.
+    edge_count = len(iter_edges)
+    # ONE flat pass over ``iter_edges`` (perf 2026-07-18, byte-identical):
+    # the endpoint / weight / budget / slab columns feed BOTH the feasibility
+    # pre-check and the per-color array build below (stable argsort slicing
+    # replaces the former per-color Python append loop; the weight formulas
+    # and the None→∓inf slab mapping are verbatim the old per-edge ones).
+    flat_endpoint_i = [0] * edge_count
+    flat_endpoint_j = [0] * edge_count
+    flat_weight_i = [0.0] * edge_count
+    flat_weight_j = [0.0] * edge_count
+    flat_budget = [0.0] * edge_count        # dummy 0.0 at interval slots
+    flat_slab_low = [_NEG_INF] * edge_count
+    flat_slab_high = [_POS_INF] * edge_count
+    flat_is_interval = [False] * edge_count
+    for edge_index in range(edge_count):
+        ei, ej, budget, kind = iter_edges[edge_index]
+        flat_endpoint_i[edge_index] = ei
+        flat_endpoint_j[edge_index] = ej
+        flat_weight_i[edge_index] = \
+            0.5 if kind == 0 else (1.0 if kind == 2 else 0.0)
+        flat_weight_j[edge_index] = \
+            0.5 if kind == 0 else (1.0 if kind == 1 else 0.0)
+        if budget is None:
+            flat_is_interval[edge_index] = True
+            s_low, s_high = bounds.get(edge_index, (None, None))
+            if s_low is not None:
+                flat_slab_low[edge_index] = s_low
+            if s_high is not None:
+                flat_slab_high[edge_index] = s_high
+        else:
+            flat_budget[edge_index] = budget
+    endpoint_i = np.asarray(flat_endpoint_i, dtype=np.intp)
+    endpoint_j = np.asarray(flat_endpoint_j, dtype=np.intp)
+    weight_i = np.asarray(flat_weight_i, dtype=np.float64)
+    weight_j = np.asarray(flat_weight_j, dtype=np.float64)
+    budget_column = np.asarray(flat_budget, dtype=np.float64)
+    slab_low_column = np.asarray(flat_slab_low, dtype=np.float64)
+    slab_high_column = np.asarray(flat_slab_high, dtype=np.float64)
+    interval_mask = np.asarray(flat_is_interval, dtype=bool)
+    z = np.asarray(elev, dtype=np.float64)
+    # ── feasibility pre-check (see docstring): certified without coloring ──
+    if run_feasibility_precheck and max_iters >= 1:
+        feasible = True
+        symmetric_rows = np.flatnonzero(~interval_mask)
+        if symmetric_rows.size:
+            d = z[endpoint_i[symmetric_rows]] - z[endpoint_j[symmetric_rows]]
+            over = np.abs(d) - budget_column[symmetric_rows]
+            feasible = not bool((over > tol).any())
+        if feasible:
+            interval_rows = np.flatnonzero(interval_mask)
+            if interval_rows.size:
+                di = (z[endpoint_i[interval_rows]]
+                      - z[endpoint_j[interval_rows]])
+                above = di - slab_high_column[interval_rows]
+                below = slab_low_column[interval_rows] - di
+                feasible = not bool(((above > tol) | (below > tol)).any())
+        if feasible:
+            # Mirror the certified-on-sweep-1 exit exactly: same writeback,
+            # same counters, same return value (worst resets to 0.0 at sweep
+            # start and no edge was active, so it stays 0.0).
+            elev[:] = z.tolist()
+            if stats is not None:
+                color_count_report = None
+                if _os.environ.get("O4_STEP_DEBUG") == "1":
+                    _, color_count_report = _extend_edge_coloring_by_write(
+                        iter_edges,
+                        coloring_state if coloring_state is not None else {})
+                stats["colors"] = color_count_report
+                stats["edges"] = edge_count
+                stats["sweeps"] = 1
+                stats["sweeps_avoided"] = max(0, max_iters - 1)
+                stats["certified"] = True
+                stats["worst"] = 0.0
+            return 1, True
+    edge_color, color_count = _extend_edge_coloring_by_write(
+        iter_edges, coloring_state if coloring_state is not None else {})
+    # per-color numpy arrays, symmetric + interval partitioned, sliced from
+    # the flat columns via ONE stable argsort: within a color the members come
+    # out in ascending edge order — exactly the order the old per-color append
+    # loop produced (and irrelevant to the math anyway: disjoint writes).
+    edge_color_array = np.asarray(edge_color, dtype=np.int64)
+    stable_order = np.argsort(edge_color_array, kind="stable")
+    group_bounds = np.searchsorted(edge_color_array[stable_order],
+                                   np.arange(color_count + 1))
     sym: list = []
     intv: list = []
-    for group in colors:
-        s_i = []; s_j = []; s_b = []; s_wi = []; s_wj = []
-        v_i = []; v_j = []; v_lo = []; v_hi = []; v_wi = []; v_wj = []
-        for edge_index in group:
-            ei, ej, budget, kind = iter_edges[edge_index]
-            wi = 0.5 if kind == 0 else (1.0 if kind == 2 else 0.0)
-            wj = 0.5 if kind == 0 else (1.0 if kind == 1 else 0.0)
-            if budget is None:
-                s_low, s_high = bounds.get(edge_index, (None, None))
-                v_i.append(ei); v_j.append(ej)
-                v_lo.append(_NEG_INF if s_low is None else s_low)
-                v_hi.append(_POS_INF if s_high is None else s_high)
-                v_wi.append(wi); v_wj.append(wj)
-            else:
-                s_i.append(ei); s_j.append(ej); s_b.append(budget)
-                s_wi.append(wi); s_wj.append(wj)
+    for color in range(color_count):
+        members = stable_order[group_bounds[color]:group_bounds[color + 1]]
+        member_is_interval = interval_mask[members]
+        symmetric_members = members[~member_is_interval]
+        interval_members = members[member_is_interval]
         sym.append((
-            np.asarray(s_i, dtype=np.intp), np.asarray(s_j, dtype=np.intp),
-            np.asarray(s_b, dtype=np.float64), np.asarray(s_wi, dtype=np.float64),
-            np.asarray(s_wj, dtype=np.float64)))
+            endpoint_i[symmetric_members], endpoint_j[symmetric_members],
+            budget_column[symmetric_members],
+            weight_i[symmetric_members], weight_j[symmetric_members]))
         intv.append((
-            np.asarray(v_i, dtype=np.intp), np.asarray(v_j, dtype=np.intp),
-            np.asarray(v_lo, dtype=np.float64), np.asarray(v_hi, dtype=np.float64),
-            np.asarray(v_wi, dtype=np.float64), np.asarray(v_wj, dtype=np.float64)))
-    z = np.asarray(elev, dtype=np.float64)
+            endpoint_i[interval_members], endpoint_j[interval_members],
+            slab_low_column[interval_members],
+            slab_high_column[interval_members],
+            weight_i[interval_members], weight_j[interval_members]))
     sweeps = 0
     certified = False
     worst = 0.0
@@ -581,7 +733,7 @@ def _project_chromatic(elev, iter_edges, n, max_iters, tol,
         sweeps += 1
         any_active = False
         worst = 0.0
-        for color_index in range(len(colors)):
+        for color_index in range(color_count):
             I, J, B, WI, WJ = sym[color_index]
             if I.size:
                 d = z[I] - z[J]
@@ -621,7 +773,7 @@ def _project_chromatic(elev, iter_edges, n, max_iters, tol,
             break
     elev[:] = z.tolist()
     if stats is not None:
-        stats["colors"] = len(colors)
+        stats["colors"] = color_count
         stats["edges"] = len(iter_edges)
         stats["sweeps"] = sweeps
         stats["sweeps_avoided"] = max(0, max_iters - sweeps) if certified else 0
@@ -1237,8 +1389,14 @@ def feasibility_project(elev, shape_constraints, hard, *,
         if _chain_prepass:
             _chain_count = _project_chain_prepass(elev, iter_edges, n, immovable)
         _chroma_stats: dict = {}
+        # Incremental coloring across the lazy rounds (perf 2026-07-18,
+        # partition-identical): expansion only APPENDS to ``iter_edges`` and
+        # the greedy coloring is prefix-stable, so the carried state colors
+        # just the appended suffix each round instead of the whole grown set.
+        _coloring_state: dict = {}
         _project_chromatic(elev, iter_edges, n, max_iters, tol,
-                           interval_bounds_by_index, stats=_chroma_stats)
+                           interval_bounds_by_index, stats=_chroma_stats,
+                           coloring_state=_coloring_state)
         # Lazy shapes: as for the Jacobi path, only the FINAL state matters for
         # a certificate, so re-warm + re-sweep on the grown edge set until no
         # further shape expands (bounded: each round expands ≥1 entry).
@@ -1259,7 +1417,8 @@ def feasibility_project(elev, shape_constraints, hard, *,
             if _chain_prepass:
                 _project_chain_prepass(elev, iter_edges, n, immovable)
             _project_chromatic(elev, iter_edges, n, max_iters, tol,
-                               interval_bounds_by_index, stats=_chroma_stats)
+                               interval_bounds_by_index, stats=_chroma_stats,
+                               coloring_state=_coloring_state)
         _sweeps_run = _chroma_stats.get("sweeps", 0)
         _last_worst = _chroma_stats.get("worst", 0.0)
         if _os.environ.get("O4_STEP_DEBUG") == "1":
