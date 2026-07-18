@@ -6364,73 +6364,92 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # torn-weld class and frozen-feature bake values when off —
         # relevel_pads/ribbon/groundside fixups below were designed to
         # read mid-projected values.
-        if os.environ.get("O4_FINAL_PROJECTION_MID", "1") == "1":
+        _mid_projection_on = (
+            os.environ.get("O4_FINAL_PROJECTION_MID", "1") == "1")
+        if _mid_projection_on:
             final_grade_projection(layout, icao, dem=_projection_dem,
                                    tile_lat=_projection_tile_lat,
                                    tile_lon=_projection_tile_lon)
-        # PAD-IN-SOLVED-PAVEMENT HOST LEVEL (user 2026-07-10, round 6 site 3):
-        # a building pad embedded in / abutting SOLVED pavement must sit FLAT at
-        # the level the HOST pavement solved to at the contact, not at its
-        # raw-DEM frontage seat.  The initial solve already lifts a movable-flat
-        # pad to its host, but ``final_grade_projection`` re-runs
-        # ``build_building_seats`` (DEM-biased) and re-stamps the pit value
-        # (CYXY building8 → 705.0 while apron #129 solved 708.65; a -333 %/1.1 m
-        # step, "a big hump in this apron").  Runs AFTER the projection so it
-        # reads the FINAL host solution and nothing re-seats the pad afterwards;
-        # it also lifts the shared apron lip so pad and host weld at one flat
-        # level (no emit cliff).  Gate off → no-op / byte-identical.
-        from .elevation_per_surface.route_profile.anchors import (
-            relevel_pads_to_host_pavement)
-        _n_padhost = relevel_pads_to_host_pavement(layout)
-        if _n_padhost:
-            UI.vprint(1,
-                f"  [pav-builder] {icao}: pad-host level — {_n_padhost} "
-                f"embedded pad(s) re-levelled to the host pavement solution.")
-        # GROUNDSIDE RE-LIMIT after the projection (user 2026-07-06, CYXY
-        # #184): groundside lots are NOT in the projection's constraint
-        # roles, so enforcing a ROAD edge can nudge a welded mouth a few
-        # cm past the lot ring's 4 % Lipschitz field (measured: the
-        # limiter's lawful 699.80 pushed to 699.84 → a 4.64 % lot pair).
-        # The chord limiter is idempotent and its weld re-adoption keeps
-        # road and lot emitting one value — re-running it here re-levels
-        # the ring around the projected weld; the cm-scale road-side
-        # drift it re-introduces sits inside the validator's rounding
-        # envelope, unlike the lot-side tear it removes.
-        # RIBBON/BRIDGE RE-ADOPTION after the projection (user 2026-07-06,
-        # CYXY apron #29): the seam cascade ran before this projection —
-        # a pavement vertex the projection then moved leaves the ribbon/
-        # bridge holding the STALE adopted value, and the emit consensus
-        # drags the welded node back over the pavement law (693.00 lawful
-        # → 692.85 emitted, 1.25 % on a 1 % apron).  The cascade is
-        # altitude-only and idempotent — re-running it re-adopts the
-        # projected values.
-        try:
-            from .boundary import _conform_ribbon_to_pavement_seam
-            _conform_ribbon_to_pavement_seam(layout)
-        except _GEOM_EXC:
-            pass
-        try:
-            from .groundside import _grade_limit_groundside_chords
-            layout._weld_relimit_moved_xy = []
-            _grade_limit_groundside_chords(layout)
-            # Quarantine welds the re-adoption MOVED: the projection
-            # placed the road there, the lot law pulled it back — the
-            # residual tension has no lawful joint value (see the
-            # limiter's moved-weld note).  Their over-cap pairs report
-            # as break-region blends, not actionable misses.
-            _moved = getattr(layout, "_weld_relimit_moved_xy", None) or []
-            if _moved:
-                _existing_ll = list(
-                    getattr(layout, "_break_node_ll", None) or [])
-                _seen_ll = {(round(la, 7), round(lo, 7))
-                            for (la, lo) in _existing_ll}
-                for (_wx, _wy) in _moved:
-                    _la, _lo = layout.m_to_ll(_wx, _wy)
-                    if (round(_la, 7), round(_lo, 7)) not in _seen_ll:
-                        _existing_ll.append((_la, _lo))
-                layout._break_node_ll = _existing_ll
-        except _GEOM_EXC:
-            pass
+
+        def _post_projection_conformance_passes():
+            # PAD-IN-SOLVED-PAVEMENT HOST LEVEL (user 2026-07-10, round 6
+            # site 3): a building pad embedded in / abutting SOLVED pavement
+            # must sit FLAT at the level the HOST pavement solved to at the
+            # contact, not at its raw-DEM frontage seat.  The initial solve
+            # already lifts a movable-flat pad to its host, but
+            # ``final_grade_projection`` re-runs ``build_building_seats``
+            # (DEM-biased) and re-stamps the pit value (CYXY building8 →
+            # 705.0 while apron #129 solved 708.65; a -333 %/1.1 m step,
+            # "a big hump in this apron").  Runs AFTER the projection so it
+            # reads the FINAL host solution and nothing re-seats the pad
+            # afterwards; it also lifts the shared apron lip so pad and
+            # host weld at one flat level (no emit cliff).  Gate off →
+            # no-op / byte-identical.
+            from .elevation_per_surface.route_profile.anchors import (
+                relevel_pads_to_host_pavement)
+            _n_padhost = relevel_pads_to_host_pavement(layout)
+            if _n_padhost:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: pad-host level — {_n_padhost} "
+                    f"embedded pad(s) re-levelled to the host pavement "
+                    f"solution.")
+            # GROUNDSIDE RE-LIMIT after the projection (user 2026-07-06,
+            # CYXY #184): groundside lots are NOT in the projection's
+            # constraint roles, so enforcing a ROAD edge can nudge a welded
+            # mouth a few cm past the lot ring's 4 % Lipschitz field
+            # (measured: the limiter's lawful 699.80 pushed to 699.84 → a
+            # 4.64 % lot pair).  The chord limiter is idempotent and its
+            # weld re-adoption keeps road and lot emitting one value —
+            # re-running it here re-levels the ring around the projected
+            # weld; the cm-scale road-side drift it re-introduces sits
+            # inside the validator's rounding envelope, unlike the
+            # lot-side tear it removes.
+            # RIBBON/BRIDGE RE-ADOPTION after the projection (user
+            # 2026-07-06, CYXY apron #29): the seam cascade ran before
+            # this projection — a pavement vertex the projection then
+            # moved leaves the ribbon/bridge holding the STALE adopted
+            # value, and the emit consensus drags the welded node back
+            # over the pavement law (693.00 lawful → 692.85 emitted,
+            # 1.25 % on a 1 % apron).  The cascade is altitude-only and
+            # idempotent — re-running it re-adopts the projected values.
+            try:
+                from .boundary import _conform_ribbon_to_pavement_seam
+                _conform_ribbon_to_pavement_seam(layout)
+            except _GEOM_EXC:
+                pass
+            try:
+                from .groundside import _grade_limit_groundside_chords
+                layout._weld_relimit_moved_xy = []
+                _grade_limit_groundside_chords(layout)
+                # Quarantine welds the re-adoption MOVED: the projection
+                # placed the road there, the lot law pulled it back — the
+                # residual tension has no lawful joint value (see the
+                # limiter's moved-weld note).  Their over-cap pairs report
+                # as break-region blends, not actionable misses.
+                _moved = getattr(layout, "_weld_relimit_moved_xy", None) \
+                    or []
+                if _moved:
+                    _existing_ll = list(
+                        getattr(layout, "_break_node_ll", None) or [])
+                    _seen_ll = {(round(la, 7), round(lo, 7))
+                                for (la, lo) in _existing_ll}
+                    for (_wx, _wy) in _moved:
+                        _la, _lo = layout.m_to_ll(_wx, _wy)
+                        if (round(_la, 7), round(_lo, 7)) not in _seen_ll:
+                            _existing_ll.append((_la, _lo))
+                    layout._break_node_ll = _existing_ll
+            except _GEOM_EXC:
+                pass
+
+        # T1b reorder (board): with the mid projection ON these passes run
+        # here, reading mid-projected values (historic behavior).  With it
+        # OFF they are DEFERRED until after the LATE projection — running
+        # them here would seat pads / re-adopt ribbon values against
+        # unprojected solver values, which the late projection then moves
+        # again (measured OTHH: break-region pairs 42 → 61 without the
+        # reorder).
+        if _mid_projection_on:
+            _post_projection_conformance_passes()
 
         # SPINE CROWN v2 (user ruling 2026-07-07, part 30): the crown is
         # built INSIDE the solve now — runway rings (uniform per-ref
@@ -6743,6 +6762,19 @@ def build_airport_pavement(icao: str, xplane_root: str,
             UI.vprint(1, f"  [pav-builder] WARN {icao}: late final "
                          f"grade projection failed ({_late_fgp_exc!r}) "
                          f"— mid-pipeline projection values kept.")
+    # T1b reorder second half: with the MID projection gated off, the
+    # pad-host / ribbon-re-adoption / groundside-re-limit passes were
+    # deferred to run against LATE-projected values (see the closure at
+    # the mid site).  Runs whether or not the late gate fired — with
+    # both projections off this is simply their original semantic
+    # position relative to the last projection that ran (none).
+    if compute_elevations and not _mid_projection_on:
+        try:
+            _post_projection_conformance_passes()
+        except _GEOM_EXC as _deferred_conformance_exc:
+            UI.vprint(1, f"  [pav-builder] WARN {icao}: deferred "
+                         f"post-projection conformance passes failed "
+                         f"({_deferred_conformance_exc!r}).")
 
     # Record this build's actual per-phase and total wall time so the
     # NEXT build of this (or a similarly-sized) airport starts with a
