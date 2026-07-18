@@ -510,6 +510,12 @@ class TunnelStructure:
     mouth_polygons: list[Polygon]
     mouth_depth_samples: list[MouthDepthStatistics]
     body_depth_m: float
+    # Deepest SOLID effective height across the WHOLE structure (walls
+    # included — EGLL shells reach up to ~2 m below their road decks).
+    # The trench floor keys on this, never on the deck median: a floor
+    # at deck − 0.5 left the shell bottoms buried and ground poking
+    # through the side walls (user 2026-07-18, in-sim).
+    solid_minimum_y_m: float | None = None
 
 
 @dataclass(frozen=True)
@@ -1861,6 +1867,10 @@ def _classify_tunnel(
     body_depth_m = (
         -median(covered_deck_heights) if covered_deck_heights else 0.0
     )
+    solid_minimum_y_m = min(
+        (corner[1] for triangle in triangles for corner in triangle.corners),
+        default=None,
+    )
 
     reference_placement = placements[0]
     return TunnelStructure(
@@ -1880,6 +1890,7 @@ def _classify_tunnel(
         mouth_polygons=mouth_polygons,
         mouth_depth_samples=mouth_depth_samples,
         body_depth_m=body_depth_m,
+        solid_minimum_y_m=solid_minimum_y_m,
     )
 
 

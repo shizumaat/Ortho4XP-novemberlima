@@ -6916,6 +6916,27 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             footprint = portal.get("footprint")
             if mouth_floor is None or footprint is None:
                 continue
+            # FACE portals (user 2026-07-18, screenshots): the crown
+            # split, forward sweep and collar clip must align with THE
+            # FACE, not the pair axis — a road can enter the portal
+            # obliquely (EGGW: 58° crossing), and splitting by the pair
+            # axis draws the crown edge diagonally across the flat face
+            # object.  Redirect this portal's working ``outward`` to
+            # the FACE NORMAL (sign-matched to the road side) before
+            # any plate geometry is derived; the road-following mouth
+            # floor was already sampled along the true road direction
+            # at pairing time and is unaffected.
+            if pair.get("is_face") and portal.get("outward") is not None:
+                face_line_bearing = math.radians(float(getattr(
+                    portal["bridge"], "face_line_bearing_degrees", 0.0)))
+                face_along = (math.sin(face_line_bearing),
+                              math.cos(face_line_bearing))
+                face_normal = (-face_along[1], face_along[0])
+                road_outward = portal["outward"]
+                if (face_normal[0] * road_outward[0]
+                        + face_normal[1] * road_outward[1]) < 0.0:
+                    face_normal = (-face_normal[0], -face_normal[1])
+                portal["outward"] = face_normal
             # Crown split (user ruling 2026-07-14): the buried half of
             # the footprint — the side facing the runway over the
             # tunnel body — is seated at the OBJECT TOP (mouth floor +
@@ -6935,6 +6956,40 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                         and buried_half.area >= 4.0):
                     mouth_geometry = mouth_half
                     crown_geometry = buried_half
+                    # NODE-SPLIT THE FACE MEETING for face portals
+                    # (user 2026-07-18, screenshots): the mouth's back
+                    # edge and the crown's front edge lie on the SAME
+                    # face line — interned into one ~0.5 m node bucket
+                    # the first writer's road-grade value wins and the
+                    # crown renders as a RAMP across its whole depth
+                    # (measured EGGW v18: 148.5 → 154.8 over the crown
+                    # zone instead of a flat 157.8 shelf).  Trim the
+                    # crown 1.0 m off the face so the two rows stay
+                    # distinct nodes: mouth at road grade, crown flat
+                    # at the object top, a near-vertical wall between
+                    # them that the face object itself covers.  KBNA
+                    # structural portals keep the coincident meeting —
+                    # their objects hide it by design.
+                    if pair.get("is_face") and mouth_half_plane is not None:
+                        try:
+                            outward_vector = portal["outward"]
+                            face_setback = shapely_translate(
+                                mouth_half_plane,
+                                xoff=-outward_vector[0] * 1.0,
+                                yoff=-outward_vector[1] * 1.0)
+                            trimmed = crown_geometry.difference(
+                                face_setback)
+                            if (trimmed.geom_type == "MultiPolygon"
+                                    and not trimmed.is_empty):
+                                trimmed = max(
+                                    trimmed.geoms,
+                                    key=lambda part: part.area)
+                            if (trimmed.geom_type == "Polygon"
+                                    and not trimmed.is_empty
+                                    and trimmed.area >= 4.0):
+                                crown_geometry = trimmed
+                        except _GEOM_EXC:
+                            pass
             # Defect C (2026-07-15): the collar derives its lateral
             # extent from the object's FULL solid footprint (the
             # captured never-stack building pad), not the deck-face
@@ -7272,9 +7327,18 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                     )
                     for step in range(1, sweep_steps + 1)
                 ])
+                # Face portals get SQUARE collar corners (mitre join):
+                # the round buffer's arcs read as curved ridges against
+                # a flat straight-topped face object (user 2026-07-18
+                # screenshots); KBNA-class structural portals keep the
+                # round join against their natural hill.
+                if pair.get("is_face"):
+                    collar_band = collar_footprint.buffer(
+                        collar_reach, join_style=2, mitre_limit=3.0)
+                else:
+                    collar_band = collar_footprint.buffer(collar_reach)
                 collar_geometry = (
-                    collar_footprint
-                    .buffer(collar_reach)
+                    collar_band
                     .difference(collar_footprint)
                     .difference(footprint)
                     .difference(forward_sweep)

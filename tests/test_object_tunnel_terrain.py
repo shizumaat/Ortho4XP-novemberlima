@@ -411,10 +411,15 @@ class TestDegenerate:
             layout, None, TILE_LATITUDE, TILE_LONGITUDE
         ) == (0, 0)
 
-    def test_no_deck_footprint_skipped(self):
+    def test_no_footprints_at_all_skipped(self):
+        # Flush-outside rule (user 2026-07-18): the trench cuts the
+        # UNION of deck and roof footprints, so a record missing only
+        # its deck still cuts the roof extent.  Only a record with
+        # NEITHER footprint is degenerate and skipped.
         layout = _FakeLayout()
         tunnel = _tunnel()
         object.__setattr__(tunnel, "deck_footprint", None)
+        object.__setattr__(tunnel, "roof_footprint", None)
         setattr(
             layout, assembly.CLASSIFICATION_ATTRIBUTE,
             _Classification([tunnel]),

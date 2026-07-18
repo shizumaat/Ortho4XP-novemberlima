@@ -339,7 +339,8 @@ def _discover_sibling_road_networks(
 # pre-screen, composed placement transform, bulk footprint unions) —
 # results are equivalent within float tolerance but must be rebuilt on
 # the new code path.
-_CLASSIFICATION_CACHE_VERSION = 5  # 5: face records grew bridge-shaped
+_CLASSIFICATION_CACHE_VERSION = 6  # 6: tunnels carry solid_minimum_y_m
+#    (flush-bottom trench floors).  5: face records grew bridge-shaped
 #    compatibility fields (deck_polygon/frame_origin) — older pickles
 #    lack them and crash pair consumers once face pairs own crossings.
 
@@ -906,16 +907,32 @@ def _log_classification_summary(icao, result, road_networks) -> None:
 
 
 def _tunnel_footprint_meters_parts(tunnel, to_meters) -> list:
-    """Project a tunnel's WHOLE-BODY deck footprint (amendment A1: the
-    author cuts the entire body, not the mouths alone) to layout-meter
-    shapely ``Polygon`` parts.  Empty list on absent/degenerate geometry."""
+    """Project a tunnel's WHOLE-BODY OUTER footprint (amendment A1: the
+    author cuts the entire body, not the mouths alone; user 2026-07-18:
+    the cut must be flush with the OUTSIDE of the objects, so the roof
+    slab — which spans the shell's outer walls — joins the drivable deck
+    in the union, else ground pokes through the side walls) to
+    layout-meter shapely ``Polygon`` parts.  Empty list on
+    absent/degenerate geometry."""
     from shapely.geometry import Polygon
+    from shapely.ops import unary_union
     from .object_terrain_features import frame_polygon_to_longitude_latitude
 
-    if tunnel.deck_footprint is None or tunnel.deck_footprint.is_empty:
+    frame_parts = [
+        footprint for footprint in (
+            tunnel.deck_footprint, tunnel.roof_footprint)
+        if footprint is not None and not footprint.is_empty
+    ]
+    if not frame_parts:
+        return []
+    try:
+        outer_footprint = unary_union(frame_parts)
+    except Exception:
+        outer_footprint = tunnel.deck_footprint
+    if outer_footprint is None or outer_footprint.is_empty:
         return []
     footprint_longitude_latitude = frame_polygon_to_longitude_latitude(
-        tunnel.deck_footprint, tunnel.frame_origin_longitude_latitude
+        outer_footprint, tunnel.frame_origin_longitude_latitude
     )
     parts = (
         list(footprint_longitude_latitude.geoms)
@@ -1088,9 +1105,18 @@ def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
             continue
         # The deck's effective level is negative below grade; the AGL offset
         # is already folded into ``body_depth_m`` (classifier effective
-        # height), so ``-body_depth_m`` is passed straight to the law.
+        # height).  The floor keys on the DEEPEST SOLID of the whole
+        # structure when the classifier measured it (user 2026-07-18:
+        # EGLL shell walls reach up to ~2 m below the road deck — a
+        # deck-median floor left the object bottoms buried), falling
+        # back to the deck median for older records.
+        deck_reference_y = -float(tunnel.body_depth_m)
+        solid_minimum_y = getattr(tunnel, "solid_minimum_y_m", None)
+        if solid_minimum_y is not None:
+            deck_reference_y = min(deck_reference_y,
+                                   float(solid_minimum_y))
         floor_elevation = tunnel_trench_floor_elevation_m(
-            float(datum), -float(tunnel.body_depth_m)
+            float(datum), deck_reference_y
         )
         rim_elevation = tunnel_trench_rim_elevation_m(float(datum))
 
