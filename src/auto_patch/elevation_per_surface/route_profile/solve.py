@@ -588,6 +588,12 @@ def solve_route_profile(layout, icao: str,
         getattr(layout, "_adjacent_ground_first_zone_index", None)
         if _os.environ.get("O4_ZONE_NODE_SKIP_REACH_BAND", "1") == "1"
         else None)
+    # REACH-BAND CLUSTER AMORTIZATION (Tier 3 wave 1, O4_REACH_BAND_CLUSTERS):
+    # ``node_bands`` shares the expensive per-node serving-centerline scan
+    # across spatial buckets via the band's ``.batch`` method — one scan per
+    # bucket, reused by every member the representative's line provably also
+    # serves (an EXACT, bit-identical band, no per-member scan).  Gate OFF or a
+    # band without ``.batch`` → the exact per-node scan, byte-identical.
     node_band = node_bands(nodes, band, skip_from=_zone_skip)
     _psub(0.55, "Solving elevations — reach bands computed")
     building_seats = build_building_seats(

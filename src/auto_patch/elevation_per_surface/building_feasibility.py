@@ -910,13 +910,23 @@ def reach_band_unified(layout, G):
     # solve and the emit share ONE cache keyed by exact query point.
     _nvc_cache = layout.__dict__.setdefault("_reach_nvc_cache", {})
 
-    def band(x, y):
-        c = Point(x, y)
-        ln = (_nearest_visible_centerline(c, cls, vis, tree=cl_tree,
-                                          cache=_nvc_cache, cls_arr=cls_arr)
-              if vis is not None
-              else next(_cl_by_distance(c, cls, cl_tree),
-                        min(cls, key=lambda L: L.distance(c))))
+    def _serving_line(c):
+        """The serving centerline for point ``c`` — the nearest-visible
+        centerline (memoized) when visibility is on, else the plain nearest."""
+        if vis is not None:
+            return _nearest_visible_centerline(c, cls, vis, tree=cl_tree,
+                                               cache=_nvc_cache, cls_arr=cls_arr)
+        return next(_cl_by_distance(c, cls, cl_tree),
+                    min(cls, key=lambda L: L.distance(c)))
+
+    def _band_for_line(x, y, c, ln):
+        """The band ``(floor, ceil) | None`` for ``c`` given its serving line
+        ``ln`` — everything ``band`` does AFTER the serving-line lookup (phantom
+        fallback, ``_band_via``, junction multi-route widening).  Splitting the
+        serving-line lookup out lets the cluster batch reuse a proven-shared
+        line without re-running the expensive nearest-visible scan, while this
+        tail (and therefore the returned value) stays bit-identical to
+        ``band``."""
         perp = c.distance(ln)
         if vis is not None and perp > _PHANTOM_MIN_PERP_M:
             from shapely.ops import nearest_points
@@ -958,6 +968,91 @@ def reach_band_unified(layout, G):
                     ceil = max(ceil, r[1])
         return (floor, ceil)
 
+    def band(x, y):
+        c = Point(x, y)
+        return _band_for_line(x, y, c, _serving_line(c))
+
+    def _confirms_line(c, ln):
+        """True iff ``_serving_line(c)`` provably equals ``ln`` — a cheap
+        SUFFICIENT condition (never a false positive): ``ln`` is the nearest
+        centerline to ``c`` AND, under visibility, its chord is on pavement.
+        ``_nearest_visible_centerline`` walks candidates in true distance order
+        and returns the first whose chord is accepted, so when the nearest line
+        itself is accepted it is the serving line — reproducing that decision
+        without the multi-candidate walk.  A False result (nearest is some other
+        line, or the nearest's chord is not on pavement) is inconclusive, so the
+        caller falls back to the exact per-point ``band``.  Bit-identical: a
+        confirmed member takes ``_band_for_line(.., ln)`` = ``band`` exactly."""
+        first = next(_cl_by_distance(c, cls, cl_tree), None)
+        if first is not ln:
+            return False
+        if vis is None:
+            return True
+        from shapely.ops import nearest_points
+        foot = nearest_points(ln, c)[0]
+        return _chord_on_pavement(c, foot, vis)
+
+    def _batch(nodes, limit):
+        """Cluster-amortized EXACT band evaluation (Tier 3 wave 1,
+        ``O4_REACH_BAND_CLUSTERS``): bucket the first ``limit`` query points
+        into ``REACH_BAND_CLUSTER_SIZE_M`` grid cells, run the expensive
+        nearest-visible serving-line scan ONCE per cell (at the cell
+        representative), and give every other member the SAME line WITHOUT the
+        scan when :func:`_confirms_line` proves that line is also the member's
+        serving line — then compute its band through the identical
+        ``_band_for_line`` tail.  A member the shared line does not provably
+        serve takes the exact per-point ``band``.  The result is bit-identical
+        to ``[band(x, y) for (x, y) in nodes[:limit]]`` (plus ``None`` past
+        ``limit``); the only thing amortized is the serving-line scan for
+        members that share the representative's line."""
+        from auto_patch.config import REACH_BAND_CLUSTER_SIZE_M
+        size = REACH_BAND_CLUSTER_SIZE_M
+        n = len(nodes)
+        out = [None] * n
+        lim = n if limit is None else min(limit, n)
+        if lim <= 0:
+            return out
+        buckets: dict = {}
+        for i in range(lim):
+            x, y = nodes[i]
+            buckets.setdefault((int(math.floor(x / size)),
+                                int(math.floor(y / size))), []).append(i)
+        n_rep = n_shared = n_exact = 0
+        for key in sorted(buckets):
+            members = buckets[key]
+            cx = (key[0] + 0.5) * size
+            cy = (key[1] + 0.5) * size
+            rep = min(members,
+                      key=lambda i: ((nodes[i][0] - cx) ** 2
+                                     + (nodes[i][1] - cy) ** 2, i))
+            rx, ry = nodes[rep]
+            c_rep = Point(rx, ry)
+            ln_rep = _serving_line(c_rep)
+            out[rep] = _band_for_line(rx, ry, c_rep, ln_rep)
+            n_rep += 1
+            for i in members:
+                if i == rep:
+                    continue
+                x, y = nodes[i]
+                c = Point(x, y)
+                if _confirms_line(c, ln_rep):
+                    out[i] = _band_for_line(x, y, c, ln_rep)
+                    n_shared += 1
+                else:
+                    out[i] = band(x, y)
+                    n_exact += 1
+        if os.environ.get("O4_REACH_BAND_CLUSTER_QUIET") != "1":
+            try:
+                import O4_UI_Utils as _UI
+                _UI.vprint(1, f"  [reach-band-clusters] {len(buckets)} bucket(s): "
+                              f"{n_rep} rep scan(s) + {n_exact} exact, "
+                              f"{n_shared} line-shared (scan skipped) "
+                              f"of {lim} node(s)")
+            except Exception:                                  # pragma: no cover
+                pass
+        return out
+
+    band.batch = _batch                                        # type: ignore
     return band
 
 

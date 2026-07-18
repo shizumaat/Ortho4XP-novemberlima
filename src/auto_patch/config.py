@@ -71,6 +71,8 @@ __all__ = [
     "FLATNESS_CERTIFICATE_RATE_FACTOR",
     "FLAT_CERTIFICATE_COVERAGE",
     "FLAT_AIRPORT_FAST_PATH",
+    "REACH_BAND_CLUSTERS",
+    "REACH_BAND_CLUSTER_SIZE_M",
     "RECT_CROSS_FLATNESS_TOLERANCE_M",
     "BUILDING_SEAT_FLATNESS_TOLERANCE_M",
     "TAXI_MAX_GRADE",
@@ -1096,6 +1098,27 @@ FLAT_CERTIFICATE_COVERAGE = (
 # (the env-gate A/B inertness harness, spec §4.1).
 FLAT_AIRPORT_FAST_PATH = (
     _os_early.environ.get("O4_FLAT_AIRPORT_FAST_PATH", "1") == "1")
+
+# Reach-band cluster amortization (Tier 3 wave 1, ``O4_REACH_BAND_CLUSTERS``).
+# The dominant per-node reach-band cost (``building_feasibility.
+# reach_band_unified`` sampled through ``anchors.node_bands``) is the
+# nearest-visible-centerline serving-line scan.  The serving line is spatially
+# coherent, so instead of scanning per node, spatially bucket the consuming
+# nodes, run the scan ONCE per bucket (at a representative point), and let every
+# member the representative's line PROVABLY also serves reuse it — computing an
+# EXACT, bit-identical band via the shared line without its own scan (see
+# ``reach_band_unified._batch`` / ``_confirms_line``).  A member the shared line
+# does not provably serve takes the exact per-node scan.  The output is
+# bit-identical to the per-node scan; only the scan work is amortized.  Default
+# ON; ``O4_REACH_BAND_CLUSTERS=0`` restores the per-node scan (byte-inert).
+REACH_BAND_CLUSTERS = (
+    _os_early.environ.get("O4_REACH_BAND_CLUSTERS", "1") == "1")
+
+# Grid bucket side (m) for the reach-band cluster amortization.  ~24 m keeps a
+# bucket small enough that its members share one serving centerline in the
+# common case (so the shared-line reuse fires often) while still amortizing the
+# scan over the tens of apron/taxiway body nodes a bucket holds.
+REACH_BAND_CLUSTER_SIZE_M = 24.0
 
 # Taxi-rect CROSS-section flatness reserve (m): a rect's two flat-cross
 # (cap≈0) edges want their endpoints EQUAL, so a rect certifies its

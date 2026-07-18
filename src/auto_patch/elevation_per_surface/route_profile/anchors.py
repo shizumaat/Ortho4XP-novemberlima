@@ -852,7 +852,23 @@ def node_bands(nodes, band, skip_from=None):
     and there are 45k of them (node_bands ≈ 60 min at KBNA, ~55 min of it the
     zone tail).  Handing those nodes ``None`` (off-net, the honest value for a
     terrain vertex) skips the scan.  ``skip_from=None`` restores the
-    all-nodes scan (the gate-OFF path, byte-inert)."""
+    all-nodes scan (the gate-OFF path, byte-inert).
+
+    CLUSTER AMORTIZATION (Tier 3 wave 1, ``O4_REACH_BAND_CLUSTERS``): when the
+    band closure exposes a ``.batch`` method (``building_feasibility.
+    reach_band_unified``), the per-node serving-centerline scan — the dominant
+    reach-band cost — is amortized across spatial buckets: it runs once per
+    bucket and every member the representative's line PROVABLY also serves
+    reuses it, computing an EXACT, bit-identical band without its own scan (see
+    ``reach_band_unified._batch``).  The result is identical to the per-node
+    scan below; only the scan work is shared.  Gate OFF
+    (``O4_REACH_BAND_CLUSTERS=0``) or a band without ``.batch`` → the exact
+    per-node scan, byte-identical."""
+    from auto_patch.config import REACH_BAND_CLUSTERS
+    batch = getattr(band, "batch", None)
+    if (batch is not None and REACH_BAND_CLUSTERS
+            and _os.environ.get("O4_REACH_BAND_CLUSTERS", "1") == "1"):
+        return batch(nodes, skip_from)
     if skip_from is None:
         return [band(x, y) for (x, y) in nodes]
     out = [None] * len(nodes)
