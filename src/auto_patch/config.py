@@ -1200,6 +1200,44 @@ RASTER_REACH_BAND_MAX_CELLS = 60_000_000
 # the OTHH band-machinery win, 74 s → 1.2 s).
 RASTER_REACH_BAND_GRID_RESIDUAL_M = 0.25
 
+# ── Chromatic (graph-colored) Gauss-Seidel projection (Tier 3 wave 2c,
+# ``O4_CHROMATIC_PROJECTION``) ──────────────────────────────────────────────
+# Replace the feasibility projection's inner sweep (``one_solve.
+# feasibility_project``) with a numpy-vectorized COLORED Gauss-Seidel POCS
+# (routing-survey candidate 1, docs/research/routing_optimization_survey.md).
+# The frozen constraint graph's edges are greedily partitioned into color
+# classes on their WRITTEN endpoints (the moved endpoint(s) of each edge) so
+# that within a class no two edges write the same node — a matching in the
+# write-conflict graph.  A sweep then relaxes each class as ONE vectorized
+# fancy-indexed update (disjoint writes commute) and uses the latest values
+# across classes, so it is a true Gauss-Seidel step (not the stalling
+# degree-normalised Jacobi) done at numpy speed.  Determinism: the coloring
+# processes edges in construction order and picks the smallest free color, and
+# within a class the updates are order-independent by construction — an
+# order-independent fixpoint, the "counts-not-worse" acceptance class (a
+# DIFFERENT legal feasible surface than the scalar worklist, so NOT
+# byte-identical gate-on; validated by ``tools/check_grade.py`` counts, not
+# byte-identity).  It also carries a KKT/dual feasibility certificate: a sweep
+# that applies no correction PROVES every constraint satisfied, so iteration
+# stops on proof and the avoided sweeps (vs the ``max_iters`` cap) are counted.
+# DEFAULT ON.  ``O4_CHROMATIC_PROJECTION=0`` restores the legacy inner sweeps
+# (the scalar worklist for the final projection, the degree-normalised Jacobi
+# for the mid-solve vectorised path) BYTE-IDENTICALLY.
+CHROMATIC_PROJECTION = (
+    _os_early.environ.get("O4_CHROMATIC_PROJECTION", "1") == "1")
+# Closed-form chain pre-pass (routing-survey candidate 2): before the colored
+# sweep, detect 1-D chain substructures (interior nodes free with degree 2 in
+# the regulated symmetric graph, bounded by immovable / branch endpoints —
+# spines, rect couples, service chains) and solve their projection EXACTLY with
+# the two-pass Lipschitz running clamp instead of iterating.  Applied as a
+# warm-start inside the gated path (the colored GS still runs afterward and
+# re-checks everything, so a mis-classified chain can only cost sweeps, never
+# correctness).  ``O4_CHROMATIC_CHAIN_PREPASS=0`` disables the pre-pass (colored
+# GS still runs) — used by the chain-exactness unit tests as the brute-force
+# oracle switch.
+CHROMATIC_CHAIN_PREPASS = (
+    _os_early.environ.get("O4_CHROMATIC_CHAIN_PREPASS", "1") == "1")
+
 # Taxi-rect CROSS-section flatness reserve (m): a rect's two flat-cross
 # (cap≈0) edges want their endpoints EQUAL, so a rect certifies its
 # cross-section as already-flat only when the DEM relief across it is within
