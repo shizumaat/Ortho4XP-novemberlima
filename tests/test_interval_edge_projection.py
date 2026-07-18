@@ -261,6 +261,27 @@ def test_pure_interval_graph_without_symmetric_edges():
     assert elev[2] == pytest.approx(-2.0, abs=1e-3)
 
 
+def test_pure_interval_graph_vectorised_path(monkeypatch):
+    # REGRESSION (EGWN, tile +51-001): the vectorised Jacobi with an
+    # ALL-interval edge set (zero symmetric edges) crashed with
+    # ``Cannot cast ufunc 'add' output from dtype('float64') to
+    # dtype('int64')`` — np.bincount's empty-input fast path returns int64
+    # even with float weights, so the symmetric block's empty bincounts made
+    # ``acc``/``cnt`` int64 and the interval block's ``+=`` raised.  The
+    # accumulators must be born float64 when no symmetric edges exist.
+    monkeypatch.setattr(OS, "_FP_VECTORIZE", True)
+    elev = [0.0, 20.0, -20.0]
+    edges = [(1, 0, None, 2.0),         # z1 ≤ z0 + 2
+             (2, 0, -2.0, None)]        # z2 ≥ z0 − 2
+    rem, bh = OS.feasibility_project(
+        elev, [{"edges": list(edges)}], {0},
+        force_scalar=False, max_iters=4000, tol=1e-3)
+    assert rem == 0 and bh == 0
+    assert elev[0] == 0.0
+    assert elev[1] <= 2.0 + 1e-3
+    assert elev[2] >= -2.0 - 1e-3
+
+
 # ── 8. interval-aware reach envelope + anchor-contradiction break (B3) ────
 # These exercise the DIRECTED reach-envelope propagation over signed slabs
 # (the deferred Stage-B0 concern the Stage-B3 fix delivers): a signed interval
