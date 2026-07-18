@@ -339,7 +339,9 @@ def _discover_sibling_road_networks(
 # pre-screen, composed placement transform, bulk footprint unions) —
 # results are equivalent within float tolerance but must be rebuilt on
 # the new code path.
-_CLASSIFICATION_CACHE_VERSION = 4  # 4: portal-face records (EGGW class)
+_CLASSIFICATION_CACHE_VERSION = 5  # 5: face records grew bridge-shaped
+#    compatibility fields (deck_polygon/frame_origin) — older pickles
+#    lack them and crash pair consumers once face pairs own crossings.
 
 # Sidecar file name prefix; the full name carries the DSF stem
 # (``o4_object_terrain_classification_<dsf-stem>.cache``).  Lives under

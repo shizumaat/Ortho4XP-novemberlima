@@ -655,6 +655,12 @@ class PortalFaceStructure:
     # face-perpendicular-equals-axis.
     face_line_bearing_degrees: float = 0.0
     face_hangs_below: bool = True
+    # BridgeStructure-shaped compatibility fields: once a face pair OWNS
+    # its crossing (ruling 2026-07-18) the record flows through pair
+    # consumers written for bridges — every ``deck_polygon is None``
+    # guard then takes its degenerate branch (a face has no deck).
+    deck_polygon: Polygon | None = None
+    frame_origin_longitude_latitude: tuple[float, float] = (0.0, 0.0)
 
 
 @dataclass(frozen=True)

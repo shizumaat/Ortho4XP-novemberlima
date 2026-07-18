@@ -66,6 +66,7 @@ from .layout import (
     ROLE_RETAINING_WALL,
     ROLE_RUNWAY_CROSSING,
     ROLE_TUNNEL_RAMP,
+    ROLE_TUNNEL_TRENCH,
     SHARED_VERTEX_TOL_M,
 )
 from .pavement.vertices import _snap_polygon_vertices_to_rect_corners
@@ -6848,19 +6849,24 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
         except _GEOM_EXC:
             return None
 
-    def _born_flat(polygon, role, ref, elevation):
+    def _born_flat(polygon, role, ref, elevation, record_pins=True):
         """Bind :func:`born_flat_solver_plate` to this layout (the shared
         R12 flat-plate birth primitive; see its docstring)."""
-        return born_flat_solver_plate(layout, polygon, role, ref, elevation)
+        return born_flat_solver_plate(layout, polygon, role, ref,
+                                      elevation, record_pins=record_pins)
 
-    def _born_graded(polygon, role, ref, altitude_at):
+    def _born_graded(polygon, role, ref, altitude_at, record_pins=True):
         """Like :func:`_born_flat`, but every ring vertex takes its OWN
         law value from ``altitude_at(x, y)`` — a TRANSITION plate (the
         portal collar): crown-high at the object-hidden inner face,
         DEM-low at the exposed outer rim, so its perimeter feathers into
         the surrounding ground instead of standing as a vertical
-        stretched-texture wall.  Each vertex is still registered as a
-        hard solver pin at its own value, exactly like ``_born_flat``."""
+        stretched-texture wall.  With ``record_pins`` (the default) each
+        vertex is registered as a hard solver pin at its own value,
+        exactly like ``_born_flat``; hanging-face portals pass False —
+        their plates are DECOUPLED law plates (the Feature-A lesson:
+        deep pinned plates couple through the one-solve and drag the
+        neighbouring pavement toward the mouth floor)."""
         try:
             dense = polygon.segmentize(3.0)
         except (AttributeError, _GEOM_EXC):
@@ -6878,9 +6884,10 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             vertex_count = len(ring) - 1
         else:
             vertex_count = len(ring)
-        for (x, y), altitude in zip(
-                ring[:vertex_count], node_altitudes[:vertex_count]):
-            _record_pin(layout, x, y, altitude)
+        if record_pins:
+            for (x, y), altitude in zip(
+                    ring[:vertex_count], node_altitudes[:vertex_count]):
+                _record_pin(layout, x, y, altitude)
         layout.shapes.append(BuiltShape(
             polygon=dense,
             role=role,
@@ -7025,6 +7032,17 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                             crown_geometry = None
             except (_GEOM_EXC, KeyError, TypeError):
                 pass
+            # Hanging-face portals emit DECOUPLED law plates (the
+            # Feature-A lesson, measured twice: solver-pinned deep
+            # plates couple through the one-solve and drag the
+            # neighbouring pavement toward the mouth floor — EGGW's
+            # taxiway over the bore solved 2.6 m low with pinned
+            # ROLE_BRIDGE_TRENCH mouths).  ``ROLE_TUNNEL_TRENCH`` is
+            # the decoupled LAW-tier role: decimation-exempt,
+            # force_per_node, never in the solver's pavement set.
+            portal_plate_role = (ROLE_TUNNEL_TRENCH if _face_seated
+                                 else ROLE_BRIDGE_TRENCH)
+            portal_plate_pins = not _face_seated
             if mouth_geometry is None or mouth_geometry.is_empty:
                 # Face-seated portal whose whole footprint became the
                 # crown (thin face footprints): road grade continues in
@@ -7033,8 +7051,9 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             else:
                 try:
                     vertex_count = _born_flat(
-                        mouth_geometry, ROLE_BRIDGE_TRENCH,
-                        "object_tunnel_portal_mouth", mouth_floor)
+                        mouth_geometry, portal_plate_role,
+                        "object_tunnel_portal_mouth", mouth_floor,
+                        record_pins=portal_plate_pins)
                 except _GEOM_EXC:
                     continue
             n_trench += 1
@@ -7154,8 +7173,9 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             )
             try:
                 crown_vertex_count = _born_flat(
-                    crown_geometry, ROLE_BRIDGE_TRENCH,
-                    "object_tunnel_portal_crown", crown_elevation)
+                    crown_geometry, portal_plate_role,
+                    "object_tunnel_portal_crown", crown_elevation,
+                    record_pins=portal_plate_pins)
             except _GEOM_EXC:
                 continue
             # Portal terrain record (user ruling 2026-07-17): the
@@ -7545,8 +7565,9 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             for collar_part in collar_parts:
                 try:
                     part_vertex_count = _born_graded(
-                        collar_part, ROLE_BRIDGE_TRENCH,
-                        "object_tunnel_portal_collar", _collar_alt)
+                        collar_part, portal_plate_role,
+                        "object_tunnel_portal_collar", _collar_alt,
+                        record_pins=portal_plate_pins)
                 except _GEOM_EXC:
                     continue
                 if part_vertex_count > 0:
