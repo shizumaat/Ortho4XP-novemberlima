@@ -6999,7 +6999,8 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             # through the building CLUSTERING passes and may be merged
             # with neighbours.
             plain_mouth_geometry = mouth_geometry
-            anchor_disk = None
+            anchor_seat = None
+            anchor_seat_keep_out = None
             full_footprint = None
             captured_pads = full_footprints_by_bridge_id.get(
                 id(portal["bridge"]), [])
@@ -7042,9 +7043,63 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                 )
                 if _face_seated:
                     if footprint.distance(anchor_point) <= 30.0:
-                        anchor_disk = anchor_point.buffer(5.0)
+                        # FACE-ALIGNED anchor seat (user screenshots
+                        # 2026-07-18b, EGGW): the previous 5 m ROUND
+                        # disk protruded 5 m into the road at deck
+                        # grade, and the mouth hole cut from the SAME
+                        # disk shared its rim coordinates — one ~0.5 m
+                        # mesh bucket per rim node, altitude decided by
+                        # first-writer interning.  Mid-road it rendered
+                        # as a ~10 m arc-shaped tower at both EGGW
+                        # mouths.  Build a rectangle in the FACE frame
+                        # instead — a minimal outward lip so the
+                        # anchor's drape triangle stays wholly at deck
+                        # grade, square edges flush against the face —
+                        # and cut the mouth back an extra clearance
+                        # margin so no seat node shares a bucket with a
+                        # mouth node (the v18 face-meeting trap).
+                        seat_outward = portal.get("outward")
+                        if seat_outward is not None:
+                            along_face = (-seat_outward[1],
+                                          seat_outward[0])
+                            half_width = float(
+                                _CFG.PORTAL_FACE_ANCHOR_SEAT_HALF_WIDTH_M)
+                            outward_lip = float(
+                                _CFG.PORTAL_FACE_ANCHOR_SEAT_OUTWARD_M)
+                            inward_reach = float(
+                                _CFG.PORTAL_FACE_ANCHOR_SEAT_INWARD_M)
+                            front = (
+                                anchor_point.x
+                                + seat_outward[0] * outward_lip,
+                                anchor_point.y
+                                + seat_outward[1] * outward_lip)
+                            back = (
+                                anchor_point.x
+                                - seat_outward[0] * inward_reach,
+                                anchor_point.y
+                                - seat_outward[1] * inward_reach)
+                            anchor_seat = Polygon([
+                                (front[0] + along_face[0] * half_width,
+                                 front[1] + along_face[1] * half_width),
+                                (front[0] - along_face[0] * half_width,
+                                 front[1] - along_face[1] * half_width),
+                                (back[0] - along_face[0] * half_width,
+                                 back[1] - along_face[1] * half_width),
+                                (back[0] + along_face[0] * half_width,
+                                 back[1] + along_face[1] * half_width),
+                            ])
+                            anchor_seat_keep_out = anchor_seat.buffer(
+                                float(_CFG.
+                                      PORTAL_FACE_ANCHOR_SEAT_CLEARANCE_M),
+                                join_style=2, mitre_limit=2.0)
+                        else:
+                            # No face frame to align to — fall back to
+                            # the round seat rather than leave the
+                            # anchor over the road-grade mouth.
+                            anchor_seat = anchor_point.buffer(5.0)
+                            anchor_seat_keep_out = anchor_seat
                         mouth_geometry = mouth_geometry.difference(
-                            anchor_disk)
+                            anchor_seat_keep_out)
                         if mouth_geometry.geom_type != "Polygon":
                             mouth_geometry = max(
                                 (part for part in getattr(
@@ -7054,26 +7109,27 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                                 default=None)
                         if crown_geometry is not None:
                             crown_geometry = unary_union(
-                                [crown_geometry, anchor_disk])
+                                [crown_geometry, anchor_seat])
                             if crown_geometry.geom_type != "Polygon":
                                 crown_geometry = (
                                     crown_geometry.convex_hull)
                         else:
-                            crown_geometry = anchor_disk
+                            crown_geometry = anchor_seat
                         if mouth_geometry is None \
                                 or mouth_geometry.is_empty:
                             mouth_geometry = None
                 elif (not mouth_geometry.covers(anchor_point)
                         and footprint.distance(anchor_point) <= 30.0):
-                    anchor_disk = anchor_point.buffer(5.0)
+                    anchor_seat = anchor_point.buffer(5.0)
+                    anchor_seat_keep_out = anchor_seat
                     mouth_geometry = unary_union(
-                        [mouth_geometry, anchor_disk]
+                        [mouth_geometry, anchor_seat]
                     )
                     if mouth_geometry.geom_type != "Polygon":
                         mouth_geometry = mouth_geometry.convex_hull
                     if crown_geometry is not None:
                         crown_geometry = crown_geometry.difference(
-                            anchor_disk)
+                            anchor_seat)
                         if crown_geometry.geom_type != "Polygon":
                             crown_geometry = max(
                                 (part for part in getattr(
@@ -7283,8 +7339,9 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             #   back side bare at one lateral end (the owner-observed
             #   slivers) while the sweep hugs the band's actual back
             #   edge and wraps the sides;
-            # * subtract the PLAIN mouth half plus the 5 m anchor
-            #   disk (both are the emitted road-grade seat) — never
+            # * subtract the PLAIN mouth half plus the anchor seat
+            #   keep-out (mouth is the emitted road-grade plate; the
+            #   seat is the deck-grade anchor cover) — never
             #   the convex-hull-enlarged mouth, whose hull fill ate
             #   up to 8 m of one collar side;
             # * keep ALL parts >= 4 m² instead of largest-part-only —
@@ -7344,9 +7401,9 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                     .difference(forward_sweep)
                     .difference(plain_mouth_geometry)
                 )
-                if anchor_disk is not None:
+                if anchor_seat_keep_out is not None:
                     collar_geometry = collar_geometry.difference(
-                        anchor_disk)
+                        anchor_seat_keep_out)
                 # Round-8 fact 3 — NO collar part on the ROAD side of
                 # the mouth face (a diagonal lateral lobe can round-
                 # buffer past the forward sweep's end; measured KBNA 02C

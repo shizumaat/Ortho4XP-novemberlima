@@ -213,6 +213,10 @@ __all__ = [
     "TUNNEL_PORTAL_PAIR_BURIED_MARGIN_M",
     "PORTAL_FACE_PLATE_SHOULDER_M",
     "PORTAL_FACE_PLATE_DEPTH_M",
+    "PORTAL_FACE_ANCHOR_SEAT_HALF_WIDTH_M",
+    "PORTAL_FACE_ANCHOR_SEAT_OUTWARD_M",
+    "PORTAL_FACE_ANCHOR_SEAT_INWARD_M",
+    "PORTAL_FACE_ANCHOR_SEAT_CLEARANCE_M",
     "TUNNEL_PORTAL_MOUTH_SAMPLE_RANGE_M",
     "TUNNEL_PORTAL_CROWN",
     "TUNNEL_PORTAL_CROWN_COLLAR_M",
@@ -2560,6 +2564,24 @@ TUNNEL_PORTAL_PAIR_BURIED_MARGIN_M = 1.0
 # (the deck-grade crown half over the buried bore).
 PORTAL_FACE_PLATE_SHOULDER_M = 3.0
 PORTAL_FACE_PLATE_DEPTH_M = 16.0
+# (user screenshots 2026-07-18b, EGGW) A hanging-face portal seats its
+# ANCHOR at deck grade — the object drapes at terrain(anchor) and the
+# face hangs BELOW its origin — but the anchor sits mid-road ON the
+# face line, so the deck-grade seat unavoidably protrudes into the
+# road.  A 5 m ROUND disk there rendered as a ~10 m arc-shaped tower
+# in the middle of the road at both EGGW mouths.  The seat is instead
+# a FACE-ALIGNED rectangle: half-width along the face each side of the
+# anchor, a minimal outward lip (just enough that the anchor's drape
+# triangle is wholly deck-grade), and a deeper inward reach that fuses
+# it with the crown across the crown's 1 m face setback.  The
+# road-grade mouth plate is cut back an extra CLEARANCE margin around
+# the seat so no seat node shares a ~0.5 m mesh node bucket with a
+# mouth node (first-writer interning would otherwise decide the wall
+# height at random — the v18 face-meeting trap).
+PORTAL_FACE_ANCHOR_SEAT_HALF_WIDTH_M = 2.5
+PORTAL_FACE_ANCHOR_SEAT_OUTWARD_M = 1.0
+PORTAL_FACE_ANCHOR_SEAT_INWARD_M = 4.0
+PORTAL_FACE_ANCHOR_SEAT_CLEARANCE_M = 0.9
 # Outward ray from each mouth sampled over this range for the mouth
 # floor (the MINIMUM wins — the descending road's grade at the face,
 # robust against the embankment skirt inflating near samples).  150 m

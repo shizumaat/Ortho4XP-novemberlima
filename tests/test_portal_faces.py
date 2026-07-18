@@ -412,3 +412,103 @@ class TestPortalFacePairing:
         pairs = bridges._detect_tunnel_portal_pairs(
             layout, object(), TILE_LATITUDE, TILE_LONGITUDE)
         assert pairs == []
+
+
+# ---------------------------------------------------------------------------
+# C. portal-face plate emission — the anchor seat
+# ---------------------------------------------------------------------------
+class TestPortalFaceAnchorSeat:
+    """User screenshots 2026-07-18b (EGGW): the deck-grade cover that keeps
+    ``terrain(anchor)`` at the crown for a hanging face was a 5 m ROUND disk
+    centred on the anchor — mid-road it rendered as a ~10 m arc-shaped
+    tower, and the road-grade mouth hole cut from the SAME disk shared its
+    rim coordinates with the crown (one mesh node bucket per rim vertex,
+    altitude decided by first-writer interning).  The seat must be a
+    face-aligned rectangle with a minimal outward lip, and no mouth vertex
+    may share a node bucket with a crown vertex."""
+
+    def _emitted_plates(self, monkeypatch):
+        from auto_patch.layout import ROLE_TUNNEL_TRENCH
+
+        _install_pairing_scene(monkeypatch, mapped_tunnel_between=False)
+        faces = [
+            _face_record(-50.0, 0.0, 0.0, "west_face"),
+            _face_record(50.0, 0.0, 0.0, "east_face"),
+        ]
+        layout = _layout_with_faces(faces)
+        n_trench, n_causeway, _pads = bridges.build_bridge_layout_shapes(
+            layout, object(), TILE_LATITUDE, TILE_LONGITUDE)
+        assert n_causeway == 0 and n_trench >= 2
+        plates = {"mouth": [], "crown": [], "collar": []}
+        for shape in layout.shapes:
+            if getattr(shape, "role", None) != ROLE_TUNNEL_TRENCH:
+                continue
+            for kind in plates:
+                if shape.ref == f"object_tunnel_portal_{kind}":
+                    plates[kind].append(shape)
+        assert len(plates["mouth"]) == 2 and len(plates["crown"]) == 2
+        return layout, plates
+
+    def test_seat_is_a_face_hugging_lip_not_a_disk(self, monkeypatch) -> None:
+        from shapely.geometry import Point
+
+        _layout, plates = self._emitted_plates(monkeypatch)
+        to_meters, _inverse = _to_meters_and_inverse()
+        # Anchors sit on the face lines: ring[0] of each face polygon.
+        # West portal outward is -x (away from the east partner), east
+        # portal outward +x.
+        seat_lip = config.PORTAL_FACE_ANCHOR_SEAT_OUTWARD_M
+        for anchor_east, outward_sign in ((-55.0, -1.0), (45.0, 1.0)):
+            anchor = Point(anchor_east, -5.0)
+            crown = min(
+                plates["crown"],
+                key=lambda shape: shape.polygon.distance(anchor))
+            # The crown still COVERS the anchor (the object drapes at
+            # terrain(anchor) and must read deck grade), with real
+            # margin so the drape triangle is wholly deck-grade.
+            assert crown.polygon.covers(anchor)
+            assert crown.polygon.exterior.distance(anchor) >= 0.5
+            # No crown vertex protrudes past the seat lip into the road
+            # (the old disk reached 5 m outward of the face line).
+            for vertex_x, _vertex_y in crown.polygon.exterior.coords:
+                protrusion = (vertex_x - anchor_east) * outward_sign
+                assert protrusion <= seat_lip + 0.05, (
+                    "crown protrudes into the road past the anchor-seat "
+                    f"lip: {protrusion:.2f} m > {seat_lip:.2f} m")
+
+    def test_mouth_and_crown_share_no_node_bucket(self, monkeypatch) -> None:
+        # The canonical mesh node registry interns coordinates in ~0.5 m
+        # buckets, first writer wins — a mouth vertex and a crown vertex
+        # at the same spot collapse to ONE node whose altitude is
+        # effectively random between road grade and deck grade (the v18
+        # face-meeting trap; the v19 disk shipped exactly that on its
+        # whole rim).
+        _layout, plates = self._emitted_plates(monkeypatch)
+        mouth_vertices = [
+            (x, y) for shape in plates["mouth"]
+            for x, y in shape.polygon.exterior.coords]
+        crown_vertices = [
+            (x, y) for shape in plates["crown"]
+            for x, y in shape.polygon.exterior.coords]
+        assert mouth_vertices and crown_vertices
+        closest = min(
+            ((mx - cx) ** 2 + (my - cy) ** 2) ** 0.5
+            for mx, my in mouth_vertices
+            for cx, cy in crown_vertices)
+        assert closest > 0.55, (
+            "a mouth vertex and a crown vertex fall in the same mesh "
+            f"node bucket (min separation {closest:.3f} m)")
+
+    def test_mouth_plate_leaves_the_anchor_uncovered(
+        self, monkeypatch
+    ) -> None:
+        from shapely.geometry import Point
+
+        _layout, plates = self._emitted_plates(monkeypatch)
+        for anchor_east in (-55.0, 45.0):
+            anchor = Point(anchor_east, -5.0)
+            for mouth in plates["mouth"]:
+                assert not mouth.polygon.covers(anchor), (
+                    "road-grade mouth plate covers the face anchor — the "
+                    "object would drape at road grade and the face would "
+                    "sink by its own height")
