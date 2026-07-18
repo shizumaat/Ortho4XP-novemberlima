@@ -6686,21 +6686,6 @@ def build_airport_pavement(icao: str, xplane_root: str,
         from .geom_guard import insert_probe_nodes
         insert_probe_nodes(layout, _probe_spec)
 
-    # Record this build's actual per-phase and total wall time so the
-    # NEXT build of this (or a similarly-sized) airport starts with a
-    # trustworthy remaining-time estimate.  Skipped under pytest — the
-    # xdist workers run airports under heavy parallel load, which would
-    # poison the calibration with inflated times.
-    if (compute_elevations and _build_features is not None
-            and os.environ.get("PYTEST_CURRENT_TEST") is None):
-        try:
-            from . import build_time_model as _time_model
-            _time_model.record_build(
-                icao, _build_features, _progress.phase_seconds(),
-                time.time() - _build_started_at)
-        except Exception:
-            pass
-
     # ABSOLUTE-LAST EDGE DENSIFY (user in-sim finding 2026-07-09): a
     # post-solve pass after the mid-pipeline densifies still mints
     # over-long pavement chords (CYXY: 1,057 m on junction #101 —
@@ -6747,6 +6732,28 @@ def build_airport_pavement(icao: str, xplane_root: str,
             UI.vprint(1, f"  [pav-builder] WARN {icao}: late final "
                          f"grade projection failed ({_late_fgp_exc!r}) "
                          f"— mid-pipeline projection values kept.")
+
+    # Record this build's actual per-phase and total wall time so the
+    # NEXT build of this (or a similarly-sized) airport starts with a
+    # trustworthy remaining-time estimate.  Must be the LAST thing
+    # before the return: the trailing edge densify and late final
+    # grade projection above are real build cost (measured 2026-07-18:
+    # ~40 s at OTHH for the late projection alone), and recording
+    # before them undercounted the store — and every baseline derived
+    # from it.  The emit-phase timer is still open here, so
+    # ``phase_seconds()`` attributes the tail to the final phase.
+    # Skipped under pytest — the xdist workers run airports under
+    # heavy parallel load, which would poison the calibration with
+    # inflated times.
+    if (compute_elevations and _build_features is not None
+            and os.environ.get("PYTEST_CURRENT_TEST") is None):
+        try:
+            from . import build_time_model as _time_model
+            _time_model.record_build(
+                icao, _build_features, _progress.phase_seconds(),
+                time.time() - _build_started_at)
+        except Exception:
+            pass
 
     return layout
 
