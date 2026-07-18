@@ -1445,6 +1445,115 @@ def _check_adjacent_ground_edges(ways: List[Way],
     return out
 
 
+# ── Cross-shape graded-strip SEAM tear thresholds ───────────────
+# A ``graded_strip`` drapes raw terrain and legitimately has NO
+# within-shape grade cap (``_check_adjacent_ground_edges`` above only
+# proves the SUB-METRE within-shape tear).  The one DEM-free-provable
+# defect that class misses is a large vertical STEP between the nodes of
+# two DIFFERENT strips: a clip / weld seam the in-sim renderer draws as a
+# sharp cliff.  Thresholds chosen from the SPJC inventory, where real
+# seam tears are Δalt 1.8-4.4 m at 1-6 m node spacing — safely above the
+# ~0.3 m steps lawful terracing between adjacent strips produces.
+STRIP_SEAM_TEAR_RADIUS_M = 6.0         # only NEAR-adjacent strip nodes pair
+STRIP_SEAM_TEAR_MIN_STEP_M = 1.0       # Δalt at/under this = lawful terrace / noise
+# Grade floor: steep-relief airports (CYXY) hold LAWFUL >1 m deltas between
+# strips 4-6 m apart (hillside drape, ~30-40 % max); genuine seam cliffs and
+# stacked same-coordinate walls run 100-350 %.  Only steps implying >50 %
+# are tears.  Exactly-interned shared nodes carry ONE value (Δ = 0), so no
+# planar-distance floor is needed — a same-coordinate pair with Δalt > the
+# step floor is a stacked bare wall and MUST be flagged.
+STRIP_SEAM_TEAR_MIN_GRADE = 0.5
+STRIP_SEAM_TEAR_MIN_DISTANCE_M = 0.01  # grade denominator clamp (stacked walls)
+STRIP_SEAM_ROLE = "graded_strip"
+
+
+def _check_strip_seam_tears(
+    vertices: List[Vertex],
+    ways: List[Way],
+    radius_m: float = STRIP_SEAM_TEAR_RADIUS_M,
+    min_step_m: float = STRIP_SEAM_TEAR_MIN_STEP_M,
+    min_distance_m: float = STRIP_SEAM_TEAR_MIN_DISTANCE_M,
+) -> List[Violation]:
+    """DEM-free SEAM-tear sentinel BETWEEN two different ``graded_strip``
+    shapes — the cross-shape twin of ``_check_adjacent_ground_edges``.
+
+    A single strip drapes terrain and carries no lawful grade cap, so a
+    steep edge WITHIN one strip is not provably wrong DEM-free.  But two
+    distinct strips that meet along a seam must AGREE in elevation where
+    their nodes fall near-adjacent: a metre-plus altitude step across a
+    sub-``radius_m`` gap is a clip / weld discontinuity (the in-sim "sharp
+    cliff"), which no lawful terrain drape produces (real terracing steps
+    between neighbouring strips stay ~0.3 m — see the module constants).
+
+    A pair qualifies when the two nodes belong to DIFFERENT strip ways
+    (same-way pairs are the within-shape check's business), their planar
+    distance is under ``radius_m``, their absolute altitude difference is
+    over ``min_step_m``, AND the implied grade exceeds
+    ``STRIP_SEAM_TEAR_MIN_GRADE`` (steep-relief airports hold lawful
+    metre-plus deltas between strips several metres apart — hillside
+    drape — while true seam cliffs run far past 50 %; an exactly-interned
+    shared node carries one value, so a same-coordinate pair with a real
+    delta is a stacked bare WALL and is flagged).  Ways that carry the same
+    ``shapeID`` are treated as one shape (a strip emitted as several ways)
+    and skipped.
+
+    Runs in ~linear time via a spatial grid over the strip nodes (never an
+    O(n^2) all-pairs scan — airports reach ~50k strip nodes).  Returns
+    ``Violation`` rows (``grade_pct`` = the seam's near-vertical grade),
+    worst-step first."""
+    # Restrict to strip vertices carrying a known elevation, keeping a map
+    # back to the global vertex index only for readability of intent.
+    strip_vertices: List[Vertex] = [
+        v for v in vertices
+        if v.elev is not None
+        and ways[v.way_idx].tags.get("role") == STRIP_SEAM_ROLE
+    ]
+    if len(strip_vertices) < 2:
+        return []
+    cell = max(radius_m, 0.5)
+    grid = _bucket_vertices(strip_vertices, cell)
+    out: List[Violation] = []
+    for v_local, v in enumerate(strip_vertices):
+        cx = int(math.floor(v.x / cell))
+        cy = int(math.floor(v.y / cell))
+        for dcx in (-1, 0, 1):
+            for dcy in (-1, 0, 1):
+                bucket = grid.get((cx + dcx, cy + dcy))
+                if not bucket:
+                    continue
+                for u_local in bucket:
+                    if u_local <= v_local:
+                        continue  # each unordered pair considered once
+                    u = strip_vertices[u_local]
+                    if u.way_idx == v.way_idx:
+                        continue  # same strip — within-shape check owns it
+                    way_v = ways[v.way_idx]
+                    way_u = ways[u.way_idx]
+                    shape_v = way_v.tags.get("shapeID")
+                    shape_u = way_u.tags.get("shapeID")
+                    if shape_v is not None and shape_v == shape_u:
+                        continue  # one strip emitted as several ways
+                    d = math.hypot(v.x - u.x, v.y - u.y)
+                    if d >= radius_m:
+                        continue  # too far apart to be a seam
+                    de = abs(v.elev - u.elev)
+                    if de <= min_step_m:
+                        continue  # lawful terrace step / rounding noise
+                    grade = de / max(d, min_distance_m)
+                    if grade < STRIP_SEAM_TEAR_MIN_GRADE:
+                        continue  # steep-terrain drape, not a cliff
+                    out.append(Violation(
+                        grade_pct=grade * 100,
+                        excess_pct=grade * 100,
+                        distance_m=d,
+                        de_m=de,
+                        way_a=way_v, way_b=way_u,
+                        pt_a=(v.x, v.y), pt_b=(u.x, u.y),
+                        elev_a=v.elev, elev_b=u.elev))
+    out.sort(key=lambda v: -v.de_m)
+    return out
+
+
 def _check_within_shape(ways: List[Way],
                         nodes: Dict[str, Tuple[float, float]],
                         ll_to_m,
@@ -2110,6 +2219,14 @@ def run_checks(
     _pv("ADJACENT-GROUND graded-strip TEAR (sub-metre near-vertical edge)",
         adjacent_edges, top_n)
     within = within + adjacent_edges
+
+    strip_seam_tears = _check_strip_seam_tears(vertices, ways)
+    _pv(f"ADJACENT-GROUND strip SEAM tear (cross-shape step, "
+        f"> {STRIP_SEAM_TEAR_MIN_STEP_M:.1f}m at "
+        f"> {STRIP_SEAM_TEAR_MIN_GRADE * 100:.0f}% within "
+        f"{STRIP_SEAM_TEAR_RADIUS_M:.1f}m)",
+        strip_seam_tears, top_n)
+    within = within + strip_seam_tears
 
     cross = _check_cross_shape_proximity(
         vertices, ways, proximity_m, max_grade)
