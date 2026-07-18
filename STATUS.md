@@ -1,4 +1,18 @@
 # ══════════════════════════════════════════════════════════════════
+# 20260718 PM — ≤60 s PROGRAM RETROSPECTIVE + TRACK BOARD OPENED
+# docs/build_time_program_board.md = cross-session continuation point
+# (measured state, 4-audit retrospective condensed, track table T0-T7,
+# verification discipline).  Headlines: ★store UNDERCOUNTS ~40 s
+# (record_build before late FGP — fix in flight, chip session; OTHH
+# true ≈382 s); ★late FGP defers ~nothing because snapshot never
+# recaptured post-mid (T1a in flight); ★wave-2c coloring recomputed
+# 9-12×/build + quadratic at hubs, ~32 s overhead (T2a in flight,
+# byte-identical); ★wave 3 = 1 lever of 4 at 1 site, Θ(n²) intact
+# (T3a in flight); ★Tier 2 structurally NEVER fires at OTHH → owner
+# ruling needed (T7); ★remaining planned work alone lands 150-180 s,
+# NOT 60 — T4 pair-generation collapse + T5 never-planned emitters
+# required.  Profiler phase-boundary drift fixed (b1315e0).
+# ══════════════════════════════════════════════════════════════════
 # 20260718 — BUILD-TIME BASELINES REFRESHED POST WAVES 2c+3
 # tools/build_time_baselines.json re-measured at dev 0834fef (includes
 # projection-wave2c + geometry-wave3 merges): CYXY 40.6 s (was 43.4),

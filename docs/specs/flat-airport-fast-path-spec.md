@@ -170,6 +170,21 @@ the solve's band producer and the validator's
 The wave-1 serving-line amortization shipped byte-identical but
 performance-neutral and is gated OFF by default (kept as scaffolding).
 
+### Retrospective 2026-07-18 — program state moved to the track board
+
+A four-audit retrospective (post waves 2c+3) found this section's
+arithmetic stale: the "~700 s of band machinery" pool was already
+collapsed by the wave-2 raster field (band cost now ~33 s at OTHH),
+Tier 2's refusal set means the whole-airport fast path structurally
+never fires at the OTHH class (§4.4 acceptance unmeetable as written
+— owner ruling pending), and ~100 s of current OTHH cost postdates
+this spec (double final projection, adjacent-ground presolve,
+stitching, gap fill, chromatic coloring overhead). **The live plan,
+measured cost map, and track statuses now live in
+``docs/build_time_program_board.md``** — update that board, not this
+section. This spec remains authoritative for the tier/certificate
+DESIGN and the standing constraints in §2.
+
 ### Enforcement (owner ruling 2026-07-18 — hard law, all sessions)
 
 Canonical text: repo-root CLAUDE.md, working-style item 6 (two budgets
