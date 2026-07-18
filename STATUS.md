@@ -226,6 +226,19 @@
 #    item.
 # ══════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════
+# 20260718 POST-RESTART STATE (Claude app OOM ~200 GB, restarted):
+# inset stream MERGED to dev (8a42ba2: extract-first + DT fill +
+# package-footprint union + batched multi-box fetch; 140 tests).
+# check_build_time gate tool COMMITTED (55b2623; 27 tests).  Wave2c
+# (chromatic GS, ed50292, 14 tests) + wave3 (vectorized hole-router,
+# 423a53c, 22 tests) COMMITTED on their branches; agents died before
+# final A/Bs — lead running CYXY A/B pairs now; merge after verdicts.
+# ══════════════════════════════════════════════════════════════════
+# ★★★ HARD LAW 20260718 (CLAUDE.md item 6, dev 7489fc0): any code
+# that increases build times ⇒ Fable 5 whole-pipeline optimization
+# review; cold build (excl. downloads) over the 60 s target ⇒
+# written explanation + EXPLICIT owner approval.  Binds all sessions.
+# ══════════════════════════════════════════════════════════════════
 # 20260717 LIVE BUILD QUEUE + DYNAMIC ORCHESTRATOR RESOURCES (working
 # tree, uncommitted; separate feature from the auto_patch wave below).
 # WHAT LANDED (unit-tested, NOT yet live-verified with a real build):
@@ -355,7 +368,20 @@
 #    grid residual, tolerance constant 0.25 m documented; OTHH
 #    gate-on 376.6 s.  NEXT: chromatic GS + chains, wave 3
 #    geometry/emit, then branch→dev merge (lead job).
-#    ★TIER 3 HOME = git worktree /Users/noah/Ortho4XP-tier3, branch
+#    ★20260718 MERGED TO DEV: 7 tier-3 commits cherry-picked
+#    (bbad95c..198394b, raster band ON); whole-branch merge rejected
+#    (snapshot pollution); 41 hermetic tests green on dev.  ★INCIDENT:
+#    tracked data-dir symlinks in one pick MATERIALIZED over the real
+#    ignored dirs — OSM_data/Elevation_data/Airport_mod_cache LOST +
+#    RESTORED (20 extracts 6.6 GB re-downloaded, 0 invalid; DEM/mod
+#    caches regenerate lazily).  RULE: never track symlinks at data
+#    paths; audit incoming commits before checkout-class ops.
+#    ★ACTIVE BRANCHES (all forked from dev 198394b, plain-merge back):
+#    projection-wave2c (../Ortho4XP-wave2c: chromatic GS + chains),
+#    geometry-wave3 (../Ortho4XP-wave3: vectorized geometry/emit,
+#    byte-identity), inset-performance (../Ortho4XP-inset: inset
+#    inpaint profiling/optimization).  Old tier3 worktree RETIRED.
+#    ★(historical) TIER 3 HOME was git worktree Ortho4XP-tier3, branch
 #    flat-fast-path-tier3, baseline 92488bf = frozen snapshot of this
 #    tree 20260717 evening (owner ruling: build Tier 3 on a stable
 #    base, unaffected by parallel-session churn).  Data dirs
