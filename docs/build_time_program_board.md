@@ -15,10 +15,12 @@ transcript is needed to continue.
 
 ## 1. Measured state (2026-07-18, dev 0834fef)
 
-**Current baselines (24d36f3, measured at 06f83ab): OTHH 380.5 s
-(solve 222.3, emit-incl-tail 118.9), CYXY 49.2 s.** The store
-undercount (record_build ran before the late projection + densify) is
-FIXED in 06f83ab — the tail now lands in the emit phase.
+**Current baselines (measured at 6810da8, quiet): OTHH 363.3 s
+(solve 217.3, emit-incl-tail 107.2), CYXY 47.0 s** — −17.2 s at OTHH
+vs the 24d36f3 baselines, from the dead-recapture removal (321ad55) +
+T1c vectorization (6810da8). The store undercount (record_build ran
+before the late projection + densify) is FIXED in 06f83ab — the tail
+lands in the emit phase.
 
 **✓ 2026-07-18 PM anomaly RESOLVED (forensic run under X-Plane load —
 counts valid, wall times not; quiet re-baseline still pending).**
@@ -40,6 +42,21 @@ cost — the late `constraints` stage barely moved (16.9 s vs mid
 small aprons. A/B = revert 7617e2e vs HEAD on a quiet machine before
 any further T1a-class investment. Quiet re-baseline of CYXY+OTHH also
 queued (expect OTHH ≈ −4–5 s from the dead-recapture removal).
+
+**HECA quiet data point (2026-07-18 13:03, dev 6810da8 tree):
+798.1 s cold** — the in-engine 18-min run was ~30 % contention, the
+rest is real. HECA = 270k projection nodes (2× OTHH). Projection
+decomposition (O4_PROJ_TIMING): mid 45.3 s = seed 14.6 + constraints
+8.4 + snapshot 14.4 + project only 3.1; late 34.2 s = seed 15.2 +
+constraints 10.7 + snapshot 0.0 (321ad55 verified live) + project 3.4.
+Two verdicts: (a) **the mid-exit recapture cost 14.4 s and bought ONE
+deferred shape at the late call** (`[scoped: 1 deferred]` — the mid
+projection's own writeback churn contaminates everything at this
+class), reinforcing full recapture disable pending the scoped A/B;
+(b) both projection calls are ~90 % fixed overhead (seed + ctx +
+constraints rebuilt from scratch), i.e. T1b (drop the mid call
+outright, ~45 s at HECA) and T4 (share construction) are the levers —
+actual projection work is 3 s per call.
 
 OTHH sampled profile (413 s wall incl. ~8 % sampler overhead; report
 regenerable via `tools/profile_airport_build.py OTHH` — keep its
@@ -128,7 +145,14 @@ items and a pair-generation collapse (§4 tracks T4–T6).
   change that paid for them, explicit paths (`git commit -- <paths>`).
 - Byte-identical changes: same-path stash A/B, foreground. Fixpoint-
   changing changes: counts-not-worse gate via `tools/check_grade.py`
-  on CYXY first (ruled first test airport), then OTHH/HECA/EGLL/SPJC.
+  on CYXY first (ruled first test airport), then OTHH/EGLL/SPJC.
+- **Airport roles (owner 2026-07-18): SPJC = the PROFILING loop**
+  (small, mostly-water tile, fast to build — iterate here), **OTHH =
+  acceptance scale** (final walls are measured here, never gated at
+  small airports — retrospective root cause), **CYXY = correctness
+  first-check**, **HECA = OFF the bench** until the OBJ-based pavement
+  issues are resolved (its numbers are confounded by in-flight
+  breakage).
 - Projection instrumentation exists: `O4_PROJ_TIMING=1` per-stage
   split (`solve.py` `_stage`), `O4_STEP_DEBUG=1` `[fp-chromatic]` and
   `[scoped:]`/`[scoped-scope]` deferral counters.

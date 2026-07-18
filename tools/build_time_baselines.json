@@ -3,30 +3,30 @@
  "airports": {
   "CYXY": {
    "recorded_at": "2026-07-18",
-   "git_commit": "06f83ab",
-   "git_dirty_file_count": 1,
-   "total_seconds": 49.21,
+   "git_commit": "6810da8",
+   "git_dirty_file_count": 2,
+   "total_seconds": 46.98,
    "phase_seconds": {
-    "Loading apt.dat & runway geometry": 0.04,
-    "Assembling pavement & runway shoulders": 0.81,
-    "Building taxiways & terminals": 1.66,
-    "Building taxi rects, junctions & service roads": 0.87,
-    "Solving elevations (FAA grade compliance)": 28.53,
-    "Emitting terrain features & finalizing": 17.33
+    "Loading apt.dat & runway geometry": 0.11,
+    "Assembling pavement & runway shoulders": 0.95,
+    "Building taxiways & terminals": 1.67,
+    "Building taxi rects, junctions & service roads": 0.92,
+    "Solving elevations (FAA grade compliance)": 28.44,
+    "Emitting terrain features & finalizing": 15.01
    }
   },
   "OTHH": {
    "recorded_at": "2026-07-18",
-   "git_commit": "06f83ab",
-   "git_dirty_file_count": 1,
-   "total_seconds": 380.5,
+   "git_commit": "6810da8",
+   "git_dirty_file_count": 2,
+   "total_seconds": 363.28,
    "phase_seconds": {
-    "Loading apt.dat & runway geometry": 1.07,
-    "Assembling pavement & runway shoulders": 1.0,
-    "Building taxiways & terminals": 17.62,
-    "Building taxi rects, junctions & service roads": 20.62,
-    "Solving elevations (FAA grade compliance)": 222.35,
-    "Emitting terrain features & finalizing": 118.91
+    "Loading apt.dat & runway geometry": 1.04,
+    "Assembling pavement & runway shoulders": 1.01,
+    "Building taxiways & terminals": 17.36,
+    "Building taxi rects, junctions & service roads": 20.44,
+    "Solving elevations (FAA grade compliance)": 217.26,
+    "Emitting terrain features & finalizing": 107.22
    }
   }
  },
