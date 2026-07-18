@@ -79,6 +79,7 @@ __all__ = [
     "RASTER_REACH_BAND_OFFNET_RADIUS_M",
     "RASTER_REACH_BAND_MAX_CELLS",
     "RASTER_REACH_BAND_GRID_RESIDUAL_M",
+    "VECTORIZED_GEOMETRY",
     "RECT_CROSS_FLATNESS_TOLERANCE_M",
     "BUILDING_SEAT_FLATNESS_TOLERANCE_M",
     "TAXI_MAX_GRADE",
@@ -1199,6 +1200,19 @@ RASTER_REACH_BAND_MAX_CELLS = 60_000_000
 # emitted-surface check is affected, and the whole point of the raster field is
 # the OTHH band-machinery win, 74 s → 1.2 s).
 RASTER_REACH_BAND_GRID_RESIDUAL_M = 0.25
+
+# ── Vectorized geometry & emission (Wave 3, ``O4_VECTORIZED_GEOMETRY``) ──────
+# Umbrella gate for the terrain-INDEPENDENT geometry + emission acceleration
+# pass (shapely-2 batch predicates, prepared geometries, STRtree bulk queries,
+# numpy-vectorized emit/decimation).  Every optimization under this gate is a
+# BYTE-IDENTITY replacement of a scalar path — gate-on output must equal
+# gate-off on every fixture (geometry is deterministic; there is no tolerance
+# story).  Default ON; ``O4_VECTORIZED_GEOMETRY=0`` selects the scalar
+# reference path for the A/B byte-identity check.  Individual optimizations may
+# add their own finer sub-gates, but all of them are additionally short-circuited
+# to the scalar path when this master gate is off.
+VECTORIZED_GEOMETRY = (
+    _os_early.environ.get("O4_VECTORIZED_GEOMETRY", "1") == "1")
 
 # Taxi-rect CROSS-section flatness reserve (m): a rect's two flat-cross
 # (cap≈0) edges want their endpoints EQUAL, so a rect certifies its

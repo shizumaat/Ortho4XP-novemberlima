@@ -35,11 +35,18 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+import numpy as np
+import shapely
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, Point, Polygon
 from shapely.prepared import prep
 
 _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
+
+# Chunk size for the vectorized all-pairs visibility pass — bounds the transient
+# LineString array to a few hundred MB even on the largest aprons while keeping
+# the shapely C-loop batches large enough to amortize call overhead.
+_VIS_PAIR_CHUNK = 400_000
 
 # Numerical slack: segment endpoints sit on ring vertices, so a "stays inside"
 # test must tolerate float noise at the boundary, and a 1-D overlap shorter
@@ -167,6 +174,128 @@ class VisibilityGraph:
     hole_rings: list[list[int]]             # node idxs per interior ring
 
 
+def _build_adjacency_scalar(nodes, ppoly_buf, boundary, obstacles, eps_m):
+    """Reference O(V^2) adjacency: the original per-pair ``_visible`` double
+    loop.  Kept verbatim as the byte-identity oracle for the vectorized path."""
+    n = len(nodes)
+    adj: list[list[tuple[int, float]]] = [[] for _ in range(n)]
+    for i in range(n):
+        xi, yi = nodes[i]
+        for j in range(i + 1, n):
+            xj, yj = nodes[j]
+            if _visible((xi, yi), (xj, yj), ppoly_buf, boundary,
+                        obstacles, eps_m):
+                d = math.hypot(xi - xj, yi - yj)
+                adj[i].append((j, d))
+                adj[j].append((i, d))
+    return adj
+
+
+def _build_adjacency_vectorized(nodes, buf_poly, boundary, obstacles, eps_m):
+    """Vectorized equivalent of :func:`_build_adjacency_scalar` using shapely-2
+    batch predicates.  Produces a BYTE-IDENTICAL adjacency (same edge set, same
+    per-list order): pairs are enumerated in the identical ascending ``(i, j)``
+    upper-triangle order, and each surviving pair is appended to ``adj[i]`` /
+    ``adj[j]`` in that order — so any equal-cost Dijkstra tie downstream breaks
+    the same way.
+
+    The predicate chain is applied in the SAME sequence as ``_visible``
+    (length > 0, then ``contains`` on the eps-buffered pavement, then the
+    boundary-run rejection, then per-obstacle interior/edge rejection); only the
+    GEOS calls are batched.  ``shapely.contains(buf, segs)`` is elementwise
+    identical to ``prep(buf).contains(seg)`` (GEOS PreparedContains == Contains),
+    verified against the scalar path on real fixture geometry.
+    """
+    n = len(nodes)
+    adj: list[list[tuple[int, float]]] = [[] for _ in range(n)]
+    if n < 2:
+        return adj
+    coords = np.asarray(nodes, dtype=float)          # (n, 2)
+    xs = coords[:, 0]
+    ys = coords[:, 1]
+    # Upper-triangle pair indices in row-major (ascending i, then j) order —
+    # exactly the scalar double-loop order.
+    ii, jj = np.triu_indices(n, k=1)
+    total = ii.shape[0]
+    for start in range(0, total, _VIS_PAIR_CHUNK):
+        stop = min(start + _VIS_PAIR_CHUNK, total)
+        I = ii[start:stop]
+        J = jj[start:stop]
+        ax = xs[I]; ay = ys[I]
+        bx = xs[J]; by = ys[J]
+        length = np.hypot(ax - bx, ay - by)
+        keep = length > 1e-9
+        if not keep.any():
+            continue
+        # Build LineStrings only for the length-positive pairs.
+        sub = np.flatnonzero(keep)
+        seg_coords = np.empty((sub.shape[0], 2, 2), dtype=float)
+        seg_coords[:, 0, 0] = ax[sub]
+        seg_coords[:, 0, 1] = ay[sub]
+        seg_coords[:, 1, 0] = bx[sub]
+        seg_coords[:, 1, 1] = by[sub]
+        segs = shapely.linestrings(seg_coords)
+        # contains on the eps-buffered pavement.
+        alive = shapely.contains(buf_poly, segs)
+        if not alive.any():
+            continue
+        # Boundary-run rejection: reject where the longest 1-D component of the
+        # seg∩boundary exceeds eps (a chord hugging an existing edge).
+        aidx = np.flatnonzero(alive)
+        inter = shapely.intersection(segs[aidx], boundary)
+        for m, geom in zip(aidx, inter):
+            if _max_line_len(geom) > eps_m:
+                alive[m] = False
+        # Obstacle interior/edge rejection, per obstacle, same order/semantics.
+        if obstacles:
+            for ob, _pob, _corners in obstacles:
+                aidx = np.flatnonzero(alive)
+                if aidx.size == 0:
+                    break
+                hit = shapely.intersects(segs[aidx], ob)
+                hidx = aidx[hit]
+                if hidx.size == 0:
+                    continue
+                obinter = shapely.intersection(segs[hidx], ob)
+                for m, geom in zip(hidx, obinter):
+                    if _max_line_len(geom) > eps_m:
+                        alive[m] = False
+        # Emit surviving edges in ascending (i, j) order.  The weight is
+        # recomputed with math.hypot on the node coords — NOT taken from the
+        # numpy ``length`` array — because np.hypot and math.hypot can disagree
+        # in the last ULP, and the scalar path uses math.hypot; byte-identity
+        # of the edge weight (hence of every downstream Dijkstra tie) requires
+        # the identical scalar call.  ``length`` is used only for the coarse
+        # >1e-9 degeneracy mask, which is insensitive to a 1-ULP shift.
+        surv = sub[np.flatnonzero(alive)]
+        for k in surv:
+            i = int(I[k]); j = int(J[k])
+            xi, yi = nodes[i]
+            xj, yj = nodes[j]
+            d = math.hypot(xi - xj, yi - yj)
+            adj[i].append((j, d))
+            adj[j].append((i, d))
+    return adj
+
+
+def _build_adjacency(nodes, buf_poly, ppoly_buf, boundary, obstacles, eps_m):
+    """Adjacency dispatch: vectorized batch predicates when
+    ``config.VECTORIZED_GEOMETRY`` is on (byte-identical to the scalar path),
+    else the reference double loop.  Any failure in the vectorized path falls
+    back to the scalar loop — correctness over speed."""
+    try:
+        from ..config import VECTORIZED_GEOMETRY
+    except Exception:
+        VECTORIZED_GEOMETRY = True
+    if VECTORIZED_GEOMETRY:
+        try:
+            return _build_adjacency_vectorized(
+                nodes, buf_poly, boundary, obstacles, eps_m)
+        except _GEOM_EXC:
+            pass
+    return _build_adjacency_scalar(nodes, ppoly_buf, boundary, obstacles, eps_m)
+
+
 def build_graph(polygon: Polygon, *,
                 obstacles=(),
                 extra_nodes: Sequence[tuple[float, float]] = (),
@@ -190,21 +319,14 @@ def build_graph(polygon: Polygon, *,
     if n < 2:
         return None
     try:
-        ppoly_buf = prep(polygon.buffer(eps_m))
+        buf_poly = polygon.buffer(eps_m)
+        ppoly_buf = prep(buf_poly)
     except _GEOM_EXC:
         return None
     boundary = polygon.boundary
 
-    adj: list[list[tuple[int, float]]] = [[] for _ in range(n)]
-    for i in range(n):
-        xi, yi = nodes[i]
-        for j in range(i + 1, n):
-            xj, yj = nodes[j]
-            if _visible((xi, yi), (xj, yj), ppoly_buf, boundary,
-                        obstacles, eps_m):
-                d = math.hypot(xi - xj, yi - yj)
-                adj[i].append((j, d))
-                adj[j].append((i, d))
+    adj = _build_adjacency(nodes, buf_poly, ppoly_buf,
+                           boundary, obstacles, eps_m)
 
     ext_idx = {k for k in (_node_idx(index, x, y) for x, y in ext_pts)
                if k is not None}
