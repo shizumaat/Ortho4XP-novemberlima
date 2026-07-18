@@ -1145,13 +1145,23 @@ REACH_BAND_CLUSTER_SIZE_M = 24.0
 # This is a DELIBERATE SEMANTIC REPLACEMENT (spec §3.5 "Wave 1 outcome"): the
 # raster field computes the exact envelope over all anchors in the grid metric,
 # where the legacy nearest-band-node evaluation could read a ceiling too high (a
-# recorded latent inexactness).  Acceptance is counts-not-worse, NOT byte
-# identity.  The solve and the validator both consume it through the single
-# producer ``building_feasibility.reach_band_unified``, so they stay aligned.
-# Gate OFF (``O4_RASTER_REACH_BAND=0``) restores the legacy nvc band
-# byte-identically.
+# recorded latent inexactness).  The solve and the validator both consume it
+# through the single producer ``building_feasibility.reach_band_unified``, so
+# they stay aligned.  Gate OFF restores the legacy nvc band byte-identically.
+#
+# DEFAULT OFF (2026-07-18 acceptance finding): gate-on delivers the perf win
+# (OTHH band machinery 74 s -> 1.2 s, nvc 123 s -> 0, wall -29 %) and IMPROVES
+# route_band counts (CYXY -44, HECA -52 vs legacy) with the emitted surface
+# preserved in the mean (|Δelev| ≤ 0.24 m).  BUT the raster envelope is
+# genuinely TIGHTER than the legacy centerline+perp band (legacy over-credits
+# reach), so a handful of aprons clamp ~2 m down to the corrected ceiling and
+# the adjacent-ground graded strips that follow them TEAR (test_pavement_grade
+# CYXY +1, HECA +31 NEW within-shape violations — a near-vertical cliff, a
+# surface DEFECT).  Landing default-on requires reconciling the adjacent-ground
+# zone law to the new (tighter) band first; until then this stays opt-in
+# (``O4_RASTER_REACH_BAND=1``) and gate-off is byte-identical to before.
 RASTER_REACH_BAND = (
-    _os_early.environ.get("O4_RASTER_REACH_BAND", "1") == "1")
+    _os_early.environ.get("O4_RASTER_REACH_BAND", "0") == "1")
 # Cell side (m).  Fine enough that the narrowest real taxiway corridor (≥15 m)
 # spans ≥3 cells and a ½-cell conservative erosion cannot close it; also the
 # nearest-cell query error is ≤ cell/√2.  3 m keeps the OTHH grid at a few

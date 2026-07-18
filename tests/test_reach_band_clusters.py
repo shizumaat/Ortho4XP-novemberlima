@@ -112,6 +112,11 @@ def test_real_batch_matches_per_node(monkeypatch):
     invariant (a shared serving line is only ever reused when it is the
     member's own serving line, else the exact per-point scan runs)."""
     monkeypatch.setenv("O4_REACH_BAND_CLUSTER_QUIET", "1")
+    # The cluster amortization (``.batch``) is a LEGACY-band feature; the raster
+    # reach field (default on) answers every query in O(1) and node_bands never
+    # calls ``.batch``, so this legacy-path invariant is measured with the raster
+    # gate forced off.
+    monkeypatch.setenv("O4_RASTER_REACH_BAND", "0")
     from conftest import cached_airport_layout
     from auto_patch import grade_graph as GG
     from auto_patch.elevation_per_surface.solver_primitives import _build_node_list

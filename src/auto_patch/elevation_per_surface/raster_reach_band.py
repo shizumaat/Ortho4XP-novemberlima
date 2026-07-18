@@ -34,10 +34,10 @@ entry):
    ``APRON_MAX_GRADE × offset``, else returns ``None`` (off-net).
 
 This is a DELIBERATE SEMANTIC REPLACEMENT, gated ``O4_RASTER_REACH_BAND``
-(default on).  It is NOT byte-identical to the legacy band; acceptance is
-counts-not-worse (spec §3.5 "Wave 1 outcome").  The solve and the validator both
-build the band through :func:`reach_band_unified`, so gating there keeps them on
-the same producer.
+(default OFF pending an adjacent-ground reconciliation — see ``config.py``).  It
+is NOT byte-identical to the legacy band.  The solve and the validator both build
+the band through :func:`reach_band_unified`, so gating there keeps them on the
+same producer.
 """
 
 from __future__ import annotations
