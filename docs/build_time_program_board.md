@@ -132,6 +132,15 @@ items and a pair-generation collapse (§4 tracks T4–T6).
 - Projection instrumentation exists: `O4_PROJ_TIMING=1` per-stage
   split (`solve.py` `_stage`), `O4_STEP_DEBUG=1` `[fp-chromatic]` and
   `[scoped:]`/`[scoped-scope]` deferral counters.
+- **Correctness runs are LEDGERED (owner directive 2026-07-18):** run
+  pytest / airport builds / check_grade via `venv/bin/python
+  tools/run_with_ledger.py -- <command>` — results persist in
+  `tools/run_ledger.jsonl` keyed by code-tree hash + argv + `O4_*` env,
+  and an identical already-green run is skipped instead of re-run
+  (`--history N` to inspect; `--artifact <path>` records OSM body
+  hashes so byte-identity A/Bs can compare against the ledger without
+  rebuilding the reference side). Timing runs (`check_build_time
+  --run`, profilers) are NEVER wrapped or cached.
 
 ## 4. Track board
 

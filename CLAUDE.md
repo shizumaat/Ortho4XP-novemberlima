@@ -68,3 +68,12 @@ top-tier-model tokens only where judgment is required:
   fixes only.
 - Tests for new modules are mandatory and must run headless
   (`tmp_path`-based, no network, no X-Plane install required).
+- **Run ledger (owner 2026-07-18):** correctness verification (pytest,
+  airport builds, `check_grade`) goes through `venv/bin/python
+  tools/run_with_ledger.py -- <command>`. Results persist across
+  sessions in a gitignored ledger keyed by code-tree hash + argv +
+  `O4_*` env; an identical already-passing run is reported from the
+  ledger instead of re-executed. Check `--history` before repeating an
+  expensive run another session may have done. Never wrap wall-time
+  benchmarks (`tools/check_build_time.py --run`, profilers) — timing
+  must always be measured fresh.

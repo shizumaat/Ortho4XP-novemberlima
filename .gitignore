@@ -38,3 +38,4 @@ Sessions/
 # Local build/scan caches
 Airport_mod_cache/
 Default_DSF_cache/
+tools/run_ledger.jsonl
