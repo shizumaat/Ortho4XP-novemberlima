@@ -238,10 +238,9 @@ def test_raster_band_covers_band_role_vertices(monkeypatch):
     assert covered / total > 0.95           # near-total coverage
 
 
-def test_offnet_raster_none_then_legacy_fallback(monkeypatch):
-    """Off-net policy (mission item 3): the RASTER field itself returns None far
-    off the mask, and the reach_band_unified wrapper then delegates to the LEGACY
-    band there (which yields a valid — if huge — interval, never a crash)."""
+def test_offnet_returns_none(monkeypatch):
+    """Off-net policy (mission item 3): a point far off the mask returns None
+    (no legacy fallback — that ~74 ms/point path is what the field eliminates)."""
     from auto_patch.elevation_per_surface.building_feasibility import (
         reach_band_unified)
     from auto_patch.elevation_per_surface.raster_reach_band import (
@@ -250,19 +249,16 @@ def test_offnet_raster_none_then_legacy_fallback(monkeypatch):
     monkeypatch.setenv("O4_RASTER_REACH_BAND", "1")
     raster = build_raster_reach_band(layout, G)
     assert raster is not None
-    # 50 km out: the raster field alone returns None (beyond the bounded radius).
+    # 50 km out: beyond the bounded radius (and the grid) → None.
     assert raster(5.0e4, 5.0e4) is None
-    # An on-pavement anchor position: the raster answers with a finite interval.
-    ax, ay = next(iter(G.pos.values()))
-    for i in sorted(G.runway_anchor):
-        ax, ay = G.pos[i]
-        break
-    b = raster(ax, ay)
-    assert b is None or (isinstance(b, tuple) and len(b) == 2)
-    # The wrapper delegates off-net queries to the legacy band (never crashes).
+    # The wrapper returns the raster closure directly (same None off-net).
     wrapped = reach_band_unified(layout, G)
-    far = wrapped(5.0e4, 5.0e4)
-    assert far is None or (isinstance(far, tuple) and len(far) == 2)
+    assert wrapped(5.0e4, 5.0e4) is None
+    # An on-pavement anchor position answers with a finite interval.
+    for i in sorted(G.runway_anchor):
+        b = wrapped(*G.pos[i])
+        assert b is None or (isinstance(b, tuple) and len(b) == 2)
+        break
 
 
 def test_raster_band_deterministic(monkeypatch):

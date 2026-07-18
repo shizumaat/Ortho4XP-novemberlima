@@ -744,37 +744,18 @@ def reach_band_unified(layout, G):
         except Exception:                                      # pragma: no cover
             _raster = None
         if _raster is not None:
-            # OFF-NET POLICY (mission item 3): a query the raster field cannot
-            # answer (off the paved mask beyond the bounded radius, or a paved
-            # component unreachable from any anchor) returns None from the raster.
-            # Rather than leave such a point unconstrained, fall back to the LEGACY
-            # band there — built ONCE, lazily, only if some query actually needs it
-            # (on a fully-covered airport the legacy band is never constructed, so
-            # the full perf win stands).  The legacy band is this same function with
-            # the gate forced off.
-            _legacy_holder = {}
-
-            def _band_with_fallback(x, y):
-                r = _raster(x, y)
-                if r is not None:
-                    return r
-                lb = _legacy_holder.get("band")
-                if lb is None:
-                    prev = os.environ.get("O4_RASTER_REACH_BAND")
-                    os.environ["O4_RASTER_REACH_BAND"] = "0"
-                    try:
-                        lb = reach_band_unified(layout, G)
-                    finally:
-                        if prev is None:
-                            os.environ.pop("O4_RASTER_REACH_BAND", None)
-                        else:
-                            os.environ["O4_RASTER_REACH_BAND"] = prev
-                    _legacy_holder["band"] = lb
-                return lb(x, y)
-
-            _band_with_fallback.raster_meta = getattr(   # type: ignore[attr-defined]
-                _raster, "raster_meta", None)
-            return _band_with_fallback
+            # OFF-NET POLICY (mission item 3): the raster field answers a query
+            # inside the mask directly and a point just off the mask via the
+            # nearest paved cell within ``RASTER_REACH_BAND_OFFNET_RADIUS_M``
+            # (widened by the apron-cap slack); a point beyond that radius, or a
+            # paved component unreachable from any anchor, returns None (off-net —
+            # the local within-shape law governs it, exactly as the zone-node skip
+            # already yields None).  We deliberately do NOT fall back to the legacy
+            # skeleton band for far points: that ~74 ms/point path is precisely the
+            # cost this field eliminates (mission: "the off-net fallback path
+            # disappearing is a big part of the win"), and a point tens of metres
+            # from every paved cell is legitimately off the taxi network.
+            return _raster
 
     # De-crown the runway-join anchor SEEDS into the ONE uncrowned profile
     # space this band is documented to live in (space invariant — see
