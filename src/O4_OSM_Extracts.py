@@ -46,7 +46,7 @@ import O4_UI_Utils as UI
 
 INDEX_URL = "https://download.geofabrik.de/index-v1.json"
 INDEX_REFRESH_DAYS = 7.0
-DEFAULT_EXTRACT_REFRESH_DAYS = 14.0
+DEFAULT_EXTRACT_REFRESH_DAYS = 180.0
 WANTED_RESCAN_SECONDS = 60.0
 DOWNLOAD_CHUNK_BYTES = 1 << 20
 DOWNLOAD_PROGRESS_EVERY_BYTES = 50 << 20
@@ -650,15 +650,32 @@ def _download_extract(region_id: str, pbf_url: str,
 
 
 def _regions_to_refresh() -> list:
-    """[(region_id, url)] of stored extracts past the refresh age."""
-    state = _read_json(_store_path("state.json")) or {}
+    """[(region_id, url)] of stored extracts past the refresh age.
+
+    An entry whose pbf file is gone means the user deleted it (e.g. a
+    multi-gigabyte aggregate made redundant by covering-region pruning):
+    the state entry is dropped, never re-downloaded.  A build that
+    genuinely needs the region again re-acquires it through the
+    wanted-list / foreground-download path.
+    """
+    with _store_lock:
+        state = _read_json(_store_path("state.json")) or {}
+        deleted = [region_id for region_id in state
+                   if not os.path.isfile(_region_file(region_id))]
+        if deleted:
+            for region_id in deleted:
+                del state[region_id]
+            _write_json_atomic(_store_path("state.json"), state)
+            UI.vprint(
+                1,
+                "   Forgetting deleted OSM regional extract(s):",
+                ", ".join(sorted(deleted)),
+            )
     refresh_age_seconds = _extract_refresh_days() * 86400
     now = time.time()
     stale = []
     for region_id, entry in state.items():
-        if not os.path.isfile(_region_file(region_id)):
-            stale.append((region_id, entry.get("url")))
-        elif now - float(entry.get("downloaded_at", 0)) \
+        if now - float(entry.get("downloaded_at", 0)) \
                 > refresh_age_seconds:
             stale.append((region_id, entry.get("url")))
     return stale

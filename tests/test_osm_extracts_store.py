@@ -340,8 +340,12 @@ class TestEntryPoint:
 
 
 class TestRefreshPolicy:
-    def test_stale_and_missing_extracts_are_flagged(self, store,
-                                                    monkeypatch):
+    def test_stale_extracts_are_flagged_deleted_ones_forgotten(
+            self, store, monkeypatch):
+        """An aged extract is refreshed; a deleted one is treated as a
+        deliberate user deletion — its state entry is dropped and it is
+        never re-downloaded (covering-region pruning makes big
+        aggregates like us.osm.pbf obsolete)."""
         monkeypatch.setattr(
             EXTRACTS, "_extract_refresh_days", lambda: 14.0)
         now = time.time()
@@ -356,7 +360,26 @@ class TestRefreshPolicy:
             with open(EXTRACTS._region_file(region_id), "wb") as pbf:
                 pbf.write(_PBF_HEADER)
         stale = dict(EXTRACTS._regions_to_refresh())
-        assert set(stale) == {"stale", "gone"}
+        assert set(stale) == {"stale"}
+        remaining = EXTRACTS._read_json(
+            os.path.join(store, "state.json"))
+        assert set(remaining) == {"fresh", "stale"}
+
+    def test_deleted_stale_extract_is_forgotten_not_refreshed(
+            self, store, monkeypatch):
+        """Deletion wins even when the entry is also past the refresh
+        age — the file's absence is the user's decision."""
+        monkeypatch.setattr(
+            EXTRACTS, "_extract_refresh_days", lambda: 14.0)
+        state = {
+            "gone_and_old": {
+                "downloaded_at": time.time() - 30 * 86400, "url": "u1"},
+        }
+        EXTRACTS._write_json_atomic(
+            os.path.join(store, "state.json"), state)
+        assert EXTRACTS._regions_to_refresh() == []
+        assert EXTRACTS._read_json(
+            os.path.join(store, "state.json")) == {}
 
 
 class TestOverpassWiring:
