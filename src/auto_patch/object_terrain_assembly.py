@@ -1021,6 +1021,16 @@ _TUNNEL_RIM_BAND_WIDTH_M = 0.6
 #   collinear with a building ring minted the EGKR mm-jitter Triangle
 #   failure).
 _TUNNEL_FLOOR_OWNED_CLEARANCE_M = 0.7
+# A Global-Airports tile DSF covers EVERY airport on the tile, so each
+# airport's classifier sees every other airport's objects — without a
+# proximity gate, twelve airports each emitted a jittered copy of the
+# SAME Redhill control-tower trench into their own patches, and the
+# twelve near-identical rings exploded the vector map's edge splitter
+# (Triangle4XP "Unable to locate PSLG vertex", tile +51-001
+# 2026-07-18).  A tunnel body farther than this from the airport's own
+# airside pavement belongs to some other airport (or to nothing) and is
+# never cut here.
+_TUNNEL_MAX_AIRSIDE_DISTANCE_M = 500.0
 
 
 def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
@@ -1179,6 +1189,24 @@ def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
                 "— skipped",
             )
             continue
+        # Airside-proximity gate (Global-Airports tile DSF: every
+        # airport sees every object on the tile — see the constant's
+        # comment).  Gated only when pavement evidence exists; a
+        # pavement-less layout keeps the legacy behaviour.
+        if pavement_union is not None:
+            try:
+                airside_distance = min(
+                    body.distance(pavement_union) for body in body_parts)
+            except Exception:
+                airside_distance = 0.0
+            if airside_distance > _TUNNEL_MAX_AIRSIDE_DISTANCE_M:
+                UI.vprint(
+                    1,
+                    f"   [object-tunnel] {resources}: body "
+                    f"{airside_distance:.0f} m from this airport's "
+                    "airside — another airport's object, skipped",
+                )
+                continue
 
         yielded_area = 0.0
         for body in body_parts:

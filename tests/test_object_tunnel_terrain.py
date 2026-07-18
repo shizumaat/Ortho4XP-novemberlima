@@ -441,6 +441,28 @@ class TestFlushWalls:
                       for a in p.node_altitudes}
         assert all(a == pytest.approx(94.5, abs=0.3) for a in floor_alts)
 
+    def test_remote_tunnel_beyond_airside_gate_is_skipped(self):
+        # Global-Airports tile DSF: every airport's classifier sees every
+        # object on the tile — twelve airports each cut a copy of the SAME
+        # Redhill tower trench 10 km away and the near-identical rings
+        # killed Triangle4XP.  A body farther than the airside gate from
+        # this airport's own pavement is never cut.
+        layout = _FakeLayout()
+        pavement = BuiltShape(
+            polygon=Polygon([(5000.0, -25.0), (5100.0, -25.0),
+                             (5100.0, 25.0), (5000.0, 25.0)]),
+            role=ROLE_JUNCTION, ref="TAXI")
+        layout.shapes.append(pavement)
+        setattr(
+            layout, assembly.CLASSIFICATION_ATTRIBUTE,
+            _Classification([_tunnel(body_depth_m=5.0)]),
+        )
+        floors, rims = assembly.build_tunnel_layout_shapes(
+            layout, _FakeDem(100.0), TILE_LATITUDE, TILE_LONGITUDE
+        )
+        assert floors == 0 and rims == 0
+        assert not _tunnel_plates(layout)
+
     def test_rim_band_yields_to_earlier_shapes_with_setback(self):
         layout, pavement = self._built(with_pavement=True)
         rim_union = unary_union([p.polygon for p in _rim_plates(layout)])
