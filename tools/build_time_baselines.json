@@ -1,5 +1,34 @@
 {
  "_doc": "Committed build-time baselines for the hard-law checker tools/check_build_time.py (canonical law: CLAUDE.md working-style item 6). Cold-equivalent measurements excluding downloads; update via 'venv/bin/python tools/check_build_time.py --run --update-baselines <ICAO ...>' and commit alongside the change that paid for any new numbers.",
- "airports": {},
+ "airports": {
+  "CYXY": {
+   "recorded_at": "2026-07-18",
+   "git_commit": "c136131",
+   "git_dirty_file_count": 1,
+   "total_seconds": 43.37,
+   "phase_seconds": {
+    "Loading apt.dat & runway geometry": 0.03,
+    "Assembling pavement & runway shoulders": 0.86,
+    "Building taxiways & terminals": 1.67,
+    "Building taxi rects, junctions & service roads": 0.87,
+    "Solving elevations (FAA grade compliance)": 30.36,
+    "Emitting terrain features & finalizing": 9.61
+   }
+  },
+  "OTHH": {
+   "recorded_at": "2026-07-18",
+   "git_commit": "c136131",
+   "git_dirty_file_count": 1,
+   "total_seconds": 365.81,
+   "phase_seconds": {
+    "Loading apt.dat & runway geometry": 1.06,
+    "Assembling pavement & runway shoulders": 1.0,
+    "Building taxiways & terminals": 18.25,
+    "Building taxi rects, junctions & service roads": 22.34,
+    "Solving elevations (FAA grade compliance)": 269.42,
+    "Emitting terrain features & finalizing": 54.81
+   }
+  }
+ },
  "tiles": {}
 }
