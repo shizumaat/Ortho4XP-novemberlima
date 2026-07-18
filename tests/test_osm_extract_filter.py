@@ -280,3 +280,51 @@ def test_missing_extract_raises(tmp_path):
         FILTER.filter_extracts_to_osm_xml(
             [missing], ['way["natural"="water"]'], BBOX
         )
+
+
+# ---------------------------------------------------------------------------
+# 8. multi-box: one filtering pass selects elements inside ANY of the given
+#    boxes and nothing between them (a bounding rectangle would leak those).
+# ---------------------------------------------------------------------------
+
+
+def test_multi_box_selects_all_boxes_and_nothing_between(tmp_path):
+    body = (
+        _node(1, "0.2", "0.2")
+        + _node(2, "0.3", "0.3")  # in box A
+        + _node(3, "2.2", "2.2")
+        + _node(4, "2.3", "2.3")  # in box B
+        + _node(5, "1.5", "1.5")
+        + _node(6, "1.6", "1.6")  # between the boxes
+        + _way(10, [1, 2], {"building": "yes"})
+        + _way(20, [3, 4], {"building": "yes"})
+        + _way(30, [5, 6], {"building": "yes"})
+    )
+    path = _write(tmp_path, "a.osm", body)
+
+    boxes = [(0.0, 0.0, 1.0, 1.0), (2.0, 2.0, 3.0, 3.0)]
+    xml = FILTER.filter_extracts_to_osm_xml([path], ['way["building"]'], boxes)
+    nodes, ways, rels = _parse_ids(xml)
+
+    assert 10 in ways and 20 in ways
+    # Inside the boxes' bounding RECTANGLE but outside every box: excluded.
+    assert 30 not in ways
+    assert {1, 2, 3, 4} <= set(nodes)
+    assert 5 not in nodes and 6 not in nodes
+
+
+def test_single_box_tuple_and_one_element_list_are_equivalent(tmp_path):
+    body = (
+        _node(1, "0.5", "0.5")
+        + _node(2, "0.6", "0.6")
+        + _way(10, [1, 2], {"building": "yes"})
+    )
+    path = _write(tmp_path, "a.osm", body)
+
+    as_tuple = FILTER.filter_extracts_to_osm_xml(
+        [path], ['way["building"]'], BBOX
+    )
+    as_list = FILTER.filter_extracts_to_osm_xml(
+        [path], ['way["building"]'], [BBOX]
+    )
+    assert as_tuple == as_list

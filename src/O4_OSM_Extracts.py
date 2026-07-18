@@ -314,6 +314,18 @@ def local_extracts_cover(bounding_box) -> bool:
         return False
 
 
+def _bounding_boxes_list(bounding_box) -> list:
+    """Normalize one ``(lat_min, lon_min, lat_max, lon_max)`` box or a
+    list of such boxes into a list of boxes."""
+    boxes = list(bounding_box)
+    # Multi-box form: the first element is itself a box (a sequence),
+    # not a coordinate scalar.  Sequence detection (rather than scalar
+    # type checks) keeps numpy scalar coordinates classified correctly.
+    if boxes and isinstance(boxes[0], (tuple, list)):
+        return [tuple(box) for box in boxes]
+    return [tuple(boxes)]
+
+
 def osm_xml_from_local_extracts(statements, bounding_box,
                                 request_description="") -> Optional[bytes]:
     """OSM XML bytes for the statements, served from local extracts.
@@ -324,13 +336,30 @@ def osm_xml_from_local_extracts(statements, bounding_box,
     index absent, extracts not downloaded yet (they are recorded as
     wanted for the maintenance thread), or any failure — in which case
     the caller proceeds to Overpass exactly as before.
+
+    ``bounding_box`` may also be a LIST of boxes: the pbf filtering cost
+    is dominated by reading the whole extract file, so serving N disjoint
+    areas in one filtering pass costs one read instead of N (the
+    per-airport inset footprint queries batch this way).  Every box must
+    be extract-servable, and each box's missing regions are queued for
+    download exactly as in the single-box case.
     """
     try:
         if not extracts_enabled():
             return None
-        regions = covering_regions(bounding_box)
-        if regions is None:
+        boxes = _bounding_boxes_list(bounding_box)
+        if not boxes:
             return None
+        regions = []
+        region_ids_seen = set()
+        for box in boxes:
+            box_regions = covering_regions(box)
+            if box_regions is None:
+                return None
+            for region in box_regions:
+                if region[0] not in region_ids_seen:
+                    region_ids_seen.add(region[0])
+                    regions.append(region)
         missing = _stored_regions_missing(regions)
         if missing:
             record_wanted_regions(missing)
@@ -353,7 +382,7 @@ def osm_xml_from_local_extracts(statements, bounding_box,
         return FILTER.filter_extracts_to_osm_xml(
             [_region_file(region_id) for (region_id, _url) in regions],
             statements,
-            bounding_box,
+            boxes,
         )
     except Exception as error:
         UI.vprint(

@@ -252,6 +252,55 @@ class TestEntryPoint:
         assert EXTRACTS._read_json(
             os.path.join(store, "wanted.json")) in (None, [])
 
+    def test_multi_box_unions_regions_and_serves_one_pass(
+        self, store, monkeypatch
+    ):
+        for region in ("portugal", "spain"):
+            with open(EXTRACTS._region_file(region), "wb") as pbf:
+                pbf.write(_PBF_HEADER)
+        captured = {}
+        import types
+        fake_filter = types.SimpleNamespace(
+            filter_extracts_to_osm_xml=lambda paths, statements, bbox:
+                captured.update(paths=list(paths), bbox=bbox) or b"<osm/>")
+        monkeypatch.setitem(
+            sys.modules, "O4_OSM_Extract_Filter", fake_filter)
+        # One box in portugal, one in spain: the region union carries both
+        # extracts and the filter receives the full LIST of boxes.
+        boxes = [(38, -9.5, 39, -8.5), (40, 0.5, 41, 1.5)]
+        result = EXTRACTS.osm_xml_from_local_extracts(
+            ['way["building"]'], boxes)
+        assert result == b"<osm/>"
+        assert captured["bbox"] == [tuple(box) for box in boxes]
+        assert sorted(
+            os.path.basename(path) for path in captured["paths"]
+        ) == ["portugal.osm.pbf", "spain.osm.pbf"]
+
+    def test_multi_box_shared_region_deduplicates(self, store, monkeypatch):
+        with open(EXTRACTS._region_file("portugal"), "wb") as pbf:
+            pbf.write(_PBF_HEADER)
+        captured = {}
+        import types
+        fake_filter = types.SimpleNamespace(
+            filter_extracts_to_osm_xml=lambda paths, statements, bbox:
+                captured.update(paths=list(paths)) or b"<osm/>")
+        monkeypatch.setitem(
+            sys.modules, "O4_OSM_Extract_Filter", fake_filter)
+        # Two disjoint boxes inside the SAME region: one extract, once.
+        boxes = [(38, -9.5, 38.4, -9.0), (38.6, -9.5, 39, -9.0)]
+        assert EXTRACTS.osm_xml_from_local_extracts(
+            ['way["building"]'], boxes) == b"<osm/>"
+        assert [
+            os.path.basename(path) for path in captured["paths"]
+        ] == ["portugal.osm.pbf"]
+
+    def test_multi_box_any_uncovered_box_falls_back(self, store):
+        # Second box is open ocean: the whole batched request reads as
+        # not extract-servable (the caller then goes per-box/Overpass).
+        boxes = [(38, -9.5, 39, -8.5), (20, -40, 21, -39)]
+        assert EXTRACTS.osm_xml_from_local_extracts(
+            ['way["building"]'], boxes) is None
+
 
 class TestRefreshPolicy:
     def test_stale_and_missing_extracts_are_flagged(self, store,
