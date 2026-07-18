@@ -1853,9 +1853,16 @@ def _project_triangle_planes(layout, bucket_to_idx, elev, immovable,
 
 
 def final_grade_projection(layout, icao: str = "", dem=None,
-                           tile_lat: int = 0, tile_lon: int = 0) -> None:
+                           tile_lat: int = 0, tile_lon: int = 0, *,
+                           recapture_snapshot: bool = True) -> None:
     """LAST-WORD grade projection on the FINAL emitted geometry (round 4,
     user 2026-07-03).
+
+    ``recapture_snapshot=False`` skips the exit-time scoped-projection
+    snapshot recapture — pass it at a call no later projection will ever
+    scope against (the snapshot's only reader), where recapturing is pure
+    cost (measured OTHH: the recapture rivals the ``seed`` stage,
+    ~4-5 s at 131k nodes).
 
     Post-solve passes (planarize inserts, final T-vertex weld adoptions,
     merges, clip rebuilds) reshape rings AFTER the elevation solve, so the
@@ -2524,7 +2531,9 @@ def final_grade_projection(layout, icao: str = "", dem=None,
     # the moved nodes from the "unchanged ⇒ already enforced" proof.
     _scoped_projection_gate = (_os.environ.get(
         "O4_SCOPED_FINAL_PROJECTION", "1") == "1")
-    _pre_fairing_elev = list(elev) if _scoped_projection_gate else None
+    _pre_fairing_elev = (list(elev)
+                         if _scoped_projection_gate and recapture_snapshot
+                         else None)
     if _os.environ.get("O4_EDGE_FAIRING", "1") == "1":
         from auto_patch.config import TAXIWAY_MAX_GRADE_CHANGE_PER_M
         from .one_solve import (_build_adjacency, _emit_quantization_margin,
@@ -2581,7 +2590,8 @@ def final_grade_projection(layout, icao: str = "", dem=None,
     # run's sparser envelope cannot un-quarantine an infeasible pocket.
     # A stale snapshot is SAFE (mismatched values ⇒ nothing defers), so a
     # geometry hiccup here simply keeps the previous snapshot.
-    if ((CURVE_NATIVE_SPINE or ROUTE_ARC_SPINE) and _scoped_projection_gate):
+    if ((CURVE_NATIVE_SPINE or ROUTE_ARC_SPINE) and _scoped_projection_gate
+            and recapture_snapshot):
         try:
             _recapture_broken_keys = set(getattr(
                 layout, "_final_projection_broken_keys", None) or set())

@@ -20,23 +20,26 @@ transcript is needed to continue.
 undercount (record_build ran before the late projection + densify) is
 FIXED in 06f83ab — the tail now lands in the emit phase.
 
-**⚠ 2026-07-18 PM anomaly — FIRST TASK for the next session.** The
-24d36f3 baselines were measured WITH T1a/T2a/T3a committed. Net vs the
-pre-optimization true wall (~382 s): only ≈ −2 s. Decomposition:
-solve phase 261.3 → 222.3 (−39 s — T2a+T3a delivered on estimate),
-but emit-incl-tail ≈ +19 s vs the pre-optimization estimate
-(~100 s true → 118.9). Prime suspect: T1a — its snapshot recapture
-cost is paid at BOTH projection calls (~4-5 s each, `_seed_elevations`
-~4.5 s/call at 131k nodes) while the late-call deferral may still not
-be engaging (never verified live). Forensics recipe (quiet machine):
-`O4_STEP_DEBUG=1 O4_PROJ_TIMING=1 venv/bin/python
-tools/full_airport_build.py OTHH` → read the two `[final-projection]
-... [scoped: N deferred]` lines (expect late ≫ 26 if T1a works) and
-the `snapshot=` stage costs; if deferral is NOT engaging, find why
-(defer conditions vs post-mid churn); if it IS, find where the +19 s
-lives (per-stage split). A T1a net-negative verdict ⇒ gate or revert
-the recapture at the LATE call (recapturing there buys nothing — no
-later consumer) and keep only the mid-exit recapture.
+**✓ 2026-07-18 PM anomaly RESOLVED (forensic run under X-Plane load —
+counts valid, wall times not; quiet re-baseline still pending).**
+Verdict: **T1a deferral ENGAGES** — late call `[scoped: 124 deferred,
+23 expanded]` (was 26 pre-T1a); late contamination is bounded and real
+(mid-fairing-moved 3,154 + value-changed 813 + zone halo from only 63
+geometry-changed shapes → 7,628 of 131,864 nodes). Mid call defers
+just 27 (solve→mid churn is huge: 759 geometry-changed shapes,
+31,483 contaminated — expected). **The +19 s lives in the recapture
+itself**: the new `snapshot` stage rivals the `seed` stage per call
+(12.5 s mid + 13.9 s late under load ≈ 4.5–5 s quiet each ⇒ ~9–10 s
+per build). The LATE-call recapture had no consumer (nothing projects
+after it) — **removed** (`recapture_snapshot=False` at the late call
+site, `final_grade_projection` keyword; CYXY stash A/B body
+byte-identical, provenance-timestamp-only diff). Open question for a
+QUIET machine: whether the MID-exit recapture (~5 s) buys back its
+cost — the late `constraints` stage barely moved (16.9 s vs mid
+16.3 s) despite 124 deferrals, i.e. deferred shapes are mostly cheap
+small aprons. A/B = revert 7617e2e vs HEAD on a quiet machine before
+any further T1a-class investment. Quiet re-baseline of CYXY+OTHH also
+queued (expect OTHH ≈ −4–5 s from the dead-recapture removal).
 
 OTHH sampled profile (413 s wall incl. ~8 % sampler overhead; report
 regenerable via `tools/profile_airport_build.py OTHH` — keep its
@@ -138,7 +141,7 @@ QUEUED (specified, not started) / NEEDS RULING.
 | # | Track | Expected at OTHH | Gate | Status |
 |---|---|---|---|---|
 | T0 | Move `record_build` after late projection + re-baseline | measurement integrity | tests + check_build_time | DONE 06f83ab + 24d36f3 (OTHH 380.5 / CYXY 49.2) |
-| T1a | Late-projection deferral fix: recapture snapshot at projection exit (fairing-diff keys + `_capture_projection_snapshot` after `_writeback`, `solve.py` ~2520-2592; new `snapshot` stage in `O4_PROJ_TIMING`) | −12–20 s | counts-not-worse; `[scoped:]` deferral counts before/after (mid line unchanged, late ~26 → majority deferred) | COMMITTED 7617e2e — ⚠ UNVERIFIED live; see §1 anomaly (emit +19 s, deferral engagement unproven; forensics = next session's first task) |
+| T1a | Late-projection deferral fix: recapture snapshot at projection exit (fairing-diff keys + `_capture_projection_snapshot` after `_writeback`, `solve.py` ~2520-2592; new `snapshot` stage in `O4_PROJ_TIMING`) | −12–20 s | counts-not-worse; `[scoped:]` deferral counts before/after (mid line unchanged, late ~26 → majority deferred) | COMMITTED 7617e2e; forensics 2026-07-18 PM (§1): deferral ENGAGES (late 26 → 124 deferred) but the recapture ≈ seed-stage cost ×2 calls explains most of the +19 s; dead LATE-call recapture removed; MID-recapture net value unproven — quiet A/B (revert 7617e2e vs HEAD) queued |
 | T1b | Drop the MID projection behind new `O4_FINAL_PROJECTION_MID` gate (wrap `pipeline.py:6360`); reorder `relevel_pads`/ribbon/groundside fixups after late call | −~20 s if counts hold | one-env-var A/B after T1a lands; watch torn-weld class + frozen-feature bake values | QUEUED |
 | T1c | Vectorize late-only hard-set scans (strip freeze `solve.py:2025-2031`, runway-boundary `2056-2060`) with STRtree `dwithin` | EGLL-class win (late 46–56 s there) | byte-identical | QUEUED |
 | T2a | Chromatic: vectorized feasibility pre-check (skip coloring when already feasible) + exact-greedy hub coloring (per-node next-free counters, identical partition) + vectorized per-color array build (`one_solve.py`) | −25–30 s | byte-identical; oracle equality tests | COMMITTED 101d7b5 (oracle-equality + 60-instance exact A/B, 0 mismatches; hub coloring 876 ms -> 3.9 ms; quiet-machine A/B queued) |

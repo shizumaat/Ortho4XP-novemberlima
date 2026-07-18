@@ -6727,7 +6727,10 @@ def build_airport_pavement(icao: str, xplane_root: str,
         try:
             from .elevation_per_surface.route_profile.solve import (
                 final_grade_projection as _late_fgp)
-            _late_fgp(layout, icao)
+            # No projection ever runs after this call, so the exit-time
+            # scoped-snapshot recapture would have no reader — skip its
+            # ~4-5 s (OTHH-class) of pure cost.
+            _late_fgp(layout, icao, recapture_snapshot=False)
         except _GEOM_EXC as _late_fgp_exc:
             UI.vprint(1, f"  [pav-builder] WARN {icao}: late final "
                          f"grade projection failed ({_late_fgp_exc!r}) "
