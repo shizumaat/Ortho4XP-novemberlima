@@ -1014,11 +1014,13 @@ def _split_annulus_to_simple_parts(geometry) -> list:
 _TUNNEL_WALL_SETBACK_M = 0.6
 # * width of the flat datum band beyond the setback;
 _TUNNEL_RIM_BAND_WIDTH_M = 0.6
-# * where the body abuts airside pavement the wall top is the pavement
-#   edge itself and the floor stays this far from it (slightly over the
-#   setback: pavement edges carry arbitrary authored vertices, not our
-#   own offset curve).
-_TUNNEL_FLOOR_PAVEMENT_CLEARANCE_M = 0.7
+# * where the body abuts ANY earlier-born shape (pavement, building
+#   pads, …) the wall top is that shape's own edge and the floor stays
+#   this far from it (slightly over the setback: foreign edges carry
+#   arbitrary authored vertices, not our own offset curve; a floor edge
+#   collinear with a building ring minted the EGKR mm-jitter Triangle
+#   failure).
+_TUNNEL_FLOOR_OWNED_CLEARANCE_M = 0.7
 
 
 def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
@@ -1050,8 +1052,9 @@ def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
       collar + 1.2 m floor inset left the wall base protruding up to
       1.2 m INTO the shell.  Where the body abuts airside pavement the
       wall top is the pavement edge itself (the outward band yields to
-      every already-born shape) and only there the floor keeps a
-      ``_TUNNEL_FLOOR_PAVEMENT_CLEARANCE_M`` bucket-safe clearance.
+      every already-born shape) and the floor keeps a
+      ``_TUNNEL_FLOOR_OWNED_CLEARANCE_M`` bucket-safe clearance from
+      every earlier-born shape.
     * **PAVEMENT WINS** (rulings R2/R8): the airside pavement union is
       subtracted from the body before birth and the yielded area is logged.
 
@@ -1193,18 +1196,26 @@ def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
             # of poking through its base.  Mitre joins everywhere: round
             # buffer arcs read as curved ridges against the straight
             # object walls (the v19 collar lesson).
+            #
+            # The clearance is kept from EVERY earlier-born shape, not
+            # pavement alone (Triangle4XP failure, tile +51-001
+            # 2026-07-18): the EGKR micro-trench's body outline ran
+            # collinear with its terminal's building-pad ring, and the
+            # un-inset floor edge minted a mm-jittered constraint mess
+            # (125 nodes in half a metre) that killed segment recovery.
             try:
                 floor_geometry = body
-                if pavement_union is not None:
-                    envelope = body.buffer(
-                        _TUNNEL_WALL_SETBACK_M + _TUNNEL_RIM_BAND_WIDTH_M
-                        + 1.0)
-                    pavement_near = pavement_union.intersection(envelope)
-                    if not pavement_near.is_empty:
-                        floor_geometry = body.difference(
-                            pavement_near.buffer(
-                                _TUNNEL_FLOOR_PAVEMENT_CLEARANCE_M,
-                                join_style=2, mitre_limit=2.0))
+                envelope = body.buffer(
+                    _TUNNEL_WALL_SETBACK_M + _TUNNEL_RIM_BAND_WIDTH_M
+                    + 1.0)
+                body_bounds = envelope.bounds
+                owned_near_floor = _owned_near(body_bounds)
+                if owned_near_floor is not None \
+                        and not owned_near_floor.is_empty:
+                    floor_geometry = body.difference(
+                        owned_near_floor.intersection(envelope).buffer(
+                            _TUNNEL_FLOOR_OWNED_CLEARANCE_M,
+                            join_style=2, mitre_limit=2.0))
                 band_inner = body.buffer(
                     _TUNNEL_WALL_SETBACK_M, join_style=2, mitre_limit=2.0)
                 band_geometry = body.buffer(

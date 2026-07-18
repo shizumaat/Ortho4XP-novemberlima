@@ -6910,6 +6910,10 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
     # between the two portals is left UNTOUCHED — the hill carries the
     # runway; the outward road corridor is emitted by the corridors
     # stage (climbing away from the mouth by construction).
+    # Airside pavement union for the FACE-portal plate clips (user JOSM
+    # review 2026-07-18d: at EGGW the crown/collar sat 84-98 % under the
+    # taxiway junctions over the bore — pavement owns its ground, R2).
+    airside_pavement_union = _pavement_union() if portal_pairs else None
     for pair in portal_pairs:
         for portal in pair["portals"]:
             mouth_floor = portal.get("mouth_floor_m")
@@ -7042,7 +7046,22 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                     to_meters(anchor_longitude, anchor_latitude)
                 )
                 if _face_seated:
-                    if footprint.distance(anchor_point) <= 30.0:
+                    # SEAT REDUNDANCY (user JOSM review 2026-07-18d): an
+                    # anchor lying UNDER the airside pavement needs no
+                    # terrain seat at all — the pavement solves at the
+                    # airside level the crown raises to, so the object
+                    # drapes at deck grade off the pavement itself, and
+                    # a seat there would double-grade the junction (the
+                    # last 19-22 m2 plate-vs-pavement overlaps at EGGW).
+                    _anchor_on_pavement = False
+                    if airside_pavement_union is not None:
+                        try:
+                            _anchor_on_pavement = (
+                                airside_pavement_union.covers(anchor_point))
+                        except _GEOM_EXC:
+                            _anchor_on_pavement = False
+                    if (not _anchor_on_pavement
+                            and footprint.distance(anchor_point) <= 30.0):
                         # FACE-ALIGNED anchor seat (user screenshots
                         # 2026-07-18b, EGGW): the previous 5 m ROUND
                         # disk protruded 5 m into the road at deck
@@ -7088,6 +7107,32 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                                 (back[0] + along_face[0] * half_width,
                                  back[1] + along_face[1] * half_width),
                             ])
+                            # An off-pavement anchor near the pavement
+                            # edge: the seat's inward reach may cross
+                            # under the junction — trim it back with the
+                            # 0.6 m node-split margin, UNLESS that would
+                            # take the seat edge within the anchor's own
+                            # drape clearance (coverage beats overlap
+                            # cleanliness; user JOSM review 2026-07-18d).
+                            if airside_pavement_union is not None:
+                                try:
+                                    _seat_trim = anchor_seat.difference(
+                                        airside_pavement_union.buffer(
+                                            0.6, join_style=2,
+                                            mitre_limit=2.0))
+                                    _seat_parts = [
+                                        part for part in getattr(
+                                            _seat_trim, "geoms",
+                                            [_seat_trim])
+                                        if part.geom_type == "Polygon"
+                                        and part.covers(anchor_point)]
+                                    if _seat_parts and (
+                                            _seat_parts[0].exterior
+                                            .distance(anchor_point)
+                                            >= 0.55):
+                                        anchor_seat = _seat_parts[0]
+                                except _GEOM_EXC:
+                                    pass
                             anchor_seat_keep_out = anchor_seat.buffer(
                                 float(_CFG.
                                       PORTAL_FACE_ANCHOR_SEAT_CLEARANCE_M),
@@ -7143,6 +7188,51 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                             crown_geometry = None
             except (_GEOM_EXC, KeyError, TypeError):
                 pass
+            # PAVEMENT WINS over face-portal plates (user JOSM review
+            # 2026-07-18d, ruling R2 applied to the portal family): at
+            # EGGW the synthesized plate rectangles land 84-98 % under
+            # the taxiway junctions crossing the bore — the junctions
+            # own that ground (the raise pass already matches the crown
+            # to the solved airside there), and double-graded ground
+            # rendered as the JOSM overlap mess.  Clip mouth and crown
+            # against the airside union with a 0.6 m node-split margin;
+            # the ANCHOR SEAT is exempt (the object drapes at
+            # terrain(anchor) — it must stay covered at deck grade).
+            # KBNA-class structural portals keep their accepted
+            # geometry (no clip).
+            if (pair.get("is_face")
+                    and airside_pavement_union is not None):
+                try:
+                    _pavement_keep_out = airside_pavement_union.buffer(
+                        0.6, join_style=2, mitre_limit=2.0)
+                    if (mouth_geometry is not None
+                            and not mouth_geometry.is_empty):
+                        _clipped_mouth = mouth_geometry.difference(
+                            _pavement_keep_out)
+                        if anchor_seat_keep_out is not None:
+                            _clipped_mouth = _clipped_mouth.difference(
+                                anchor_seat_keep_out)
+                        _mouth_parts = [
+                            part for part in getattr(
+                                _clipped_mouth, "geoms", [_clipped_mouth])
+                            if part.geom_type == "Polygon"
+                            and part.area >= 4.0]
+                        mouth_geometry = (
+                            max(_mouth_parts, key=lambda p: p.area)
+                            if _mouth_parts else None)
+                    if (crown_geometry is not None
+                            and not crown_geometry.is_empty):
+                        _clipped_crown = crown_geometry.difference(
+                            _pavement_keep_out)
+                        if anchor_seat is not None:
+                            _clipped_crown = unary_union(
+                                [_clipped_crown, anchor_seat])
+                        if _clipped_crown.is_empty:
+                            crown_geometry = None
+                        else:
+                            crown_geometry = _clipped_crown
+                except _GEOM_EXC:
+                    pass
             # Hanging-face portals emit DECOUPLED law plates (the
             # Feature-A lesson, measured twice: solver-pinned deep
             # plates couple through the one-solve and drag the
@@ -7282,12 +7372,31 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                 + f" (mouth {mouth_floor:.2f}, object top "
                 f"{mouth_floor + deck_top_metres:.2f})",
             )
+            # The pavement clip can split the crown into parts (the seat
+            # plus shoulder pieces flanking the taxiway) — birth each
+            # part; the record carries them all for the airside raise.
+            crown_part_list = [
+                part for part in getattr(
+                    crown_geometry, "geoms", [crown_geometry])
+                if part.geom_type == "Polygon" and not part.is_empty
+                and part.area >= 4.0]
+            if not crown_part_list:
+                continue
+            crown_vertex_count = 0
+            crown_shapes = []
             try:
-                crown_vertex_count = _born_flat(
-                    crown_geometry, portal_plate_role,
-                    "object_tunnel_portal_crown", crown_elevation,
-                    record_pins=portal_plate_pins)
+                for crown_part in sorted(
+                        crown_part_list, key=lambda p: -p.area):
+                    part_count = _born_flat(
+                        crown_part, portal_plate_role,
+                        "object_tunnel_portal_crown", crown_elevation,
+                        record_pins=portal_plate_pins)
+                    if part_count:
+                        crown_vertex_count += part_count
+                        crown_shapes.append(layout.shapes[-1])
             except _GEOM_EXC:
+                continue
+            if not crown_shapes:
                 continue
             # Portal terrain record (user ruling 2026-07-17): the
             # post-solve raise pass (``raise_portal_terrain_to_airside``,
@@ -7300,7 +7409,8 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             if not hasattr(layout, "portal_terrain_records"):
                 layout.portal_terrain_records = []
             portal_terrain_record = {
-                "crown_shape": layout.shapes[-1],
+                "crown_shape": crown_shapes[0],
+                "crown_shapes": crown_shapes,
                 "crown_geometry": crown_geometry,
                 "crown_elevation": crown_elevation,
                 "mouth_floor": mouth_floor,
@@ -7404,6 +7514,45 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                 if anchor_seat_keep_out is not None:
                     collar_geometry = collar_geometry.difference(
                         anchor_seat_keep_out)
+                # BACK-ONLY collar for FACE portals (user JOSM review
+                # 2026-07-18d): the collar's job is to hold the ground
+                # at the higher grade BEHIND the portal wall; terrain in
+                # front slopes naturally down to the mouth.  The forward
+                # sweep alone missed oblique roads (EGGW: the road
+                # enters 25 deg off the face normal, and the south
+                # collar's lateral lobe cut into the roadway).  Keep
+                # ONLY the strict back half-plane, 1 m behind the face
+                # line (matching the crown trim so no collar node lands
+                # in the face-line bucket), and yield to airside
+                # pavement with the same 0.6 m node-split margin as the
+                # crown.  KBNA structural portals keep the sweep-based
+                # wrap (accepted state).
+                if pair.get("is_face"):
+                    _face_centre = footprint.centroid
+                    _along_face = (-outward_vector[1], outward_vector[0])
+                    _back_reach = 500.0
+                    _b0 = (_face_centre.x - outward_vector[0] * 1.0,
+                           _face_centre.y - outward_vector[1] * 1.0)
+                    back_half_plane = Polygon([
+                        (_b0[0] + _along_face[0] * _back_reach,
+                         _b0[1] + _along_face[1] * _back_reach),
+                        (_b0[0] - _along_face[0] * _back_reach,
+                         _b0[1] - _along_face[1] * _back_reach),
+                        (_b0[0] - _along_face[0] * _back_reach
+                         - outward_vector[0] * 2.0 * _back_reach,
+                         _b0[1] - _along_face[1] * _back_reach
+                         - outward_vector[1] * 2.0 * _back_reach),
+                        (_b0[0] + _along_face[0] * _back_reach
+                         - outward_vector[0] * 2.0 * _back_reach,
+                         _b0[1] + _along_face[1] * _back_reach
+                         - outward_vector[1] * 2.0 * _back_reach),
+                    ])
+                    collar_geometry = collar_geometry.intersection(
+                        back_half_plane)
+                    if airside_pavement_union is not None:
+                        collar_geometry = collar_geometry.difference(
+                            airside_pavement_union.buffer(
+                                0.6, join_style=2, mitre_limit=2.0))
                 # Round-8 fact 3 — NO collar part on the ROAD side of
                 # the mouth face (a diagonal lateral lobe can round-
                 # buffer past the forward sweep's end; measured KBNA 02C
@@ -7546,14 +7695,17 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             # crown (the ceiling zone never reaches it).
             crown_depth_m = 0.0
             try:
+                # The pavement clip can leave a MultiPolygon crown —
+                # measure the depth across every part's ring.
                 _crown_projections = [
                     (vertex_x * outward_vector[0]
                      + vertex_y * outward_vector[1])
-                    for vertex_x, vertex_y
-                    in crown_geometry.exterior.coords]
+                    for part in getattr(
+                        crown_geometry, "geoms", [crown_geometry])
+                    for vertex_x, vertex_y in part.exterior.coords]
                 crown_depth_m = (max(_crown_projections)
                                  - min(_crown_projections))
-            except _GEOM_EXC:
+            except (_GEOM_EXC, AttributeError, ValueError):
                 crown_depth_m = 0.0
             # Complete the portal terrain record for the post-solve
             # airside raise (its mouth feather guard reuses the same
@@ -8158,32 +8310,42 @@ def raise_portal_terrain_to_airside(layout) -> int:
                 level = None
             if level is not None and level > crown_elevation + 0.05:
                 raised_crown = float(level)
-        crown_shape = record.get("crown_shape")
-        if (raised_crown > crown_elevation + 0.05
-                and crown_shape is not None
-                and crown_shape.polygon is not None
-                and getattr(crown_shape, "node_altitudes", None)):
-            try:
-                crown_ring = list(crown_shape.polygon.exterior.coords)
-            except _GEOM_EXC:
-                crown_ring = []
+        crown_shape_list = [
+            shape for shape in (
+                record.get("crown_shapes") or [record.get("crown_shape")])
+            if shape is not None and shape.polygon is not None
+            and getattr(shape, "node_altitudes", None)]
+        if raised_crown > crown_elevation + 0.05 and crown_shape_list:
+            crown_rings = []
+            for crown_shape in crown_shape_list:
+                try:
+                    crown_rings.append(
+                        list(crown_shape.polygon.exterior.coords))
+                except _GEOM_EXC:
+                    crown_rings.append([])
             # A flat crown clamps as a whole to the tightest ramp-law
             # ceiling among its ramp-coincident ring vertices (rare —
             # ramps attach at the mouth side, the crown is the back
-            # half).
-            for (x, y) in crown_ring:
-                ceiling = ramp_law_ceiling(x, y)
-                if ceiling is not None and raised_crown > ceiling:
-                    raised_crown = max(crown_elevation, ceiling)
-            crown_shape.node_altitudes = (
-                [round(raised_crown, 2)]
-                * len(crown_shape.node_altitudes))
-            open_count = (len(crown_ring) - 1
-                          if crown_ring and crown_ring[0] == crown_ring[-1]
-                          else len(crown_ring))
-            for (x, y) in crown_ring[:open_count]:
-                _record_pin(layout, x, y, raised_crown)
-            n_raised += open_count
+            # half).  All parts share one raised value.
+            for crown_ring in crown_rings:
+                for (x, y) in crown_ring:
+                    ceiling = ramp_law_ceiling(x, y)
+                    if ceiling is not None and raised_crown > ceiling:
+                        raised_crown = max(crown_elevation, ceiling)
+            raised_count = 0
+            for crown_shape, crown_ring in zip(
+                    crown_shape_list, crown_rings):
+                crown_shape.node_altitudes = (
+                    [round(raised_crown, 2)]
+                    * len(crown_shape.node_altitudes))
+                open_count = (
+                    len(crown_ring) - 1
+                    if crown_ring and crown_ring[0] == crown_ring[-1]
+                    else len(crown_ring))
+                for (x, y) in crown_ring[:open_count]:
+                    _record_pin(layout, x, y, raised_crown)
+                raised_count += open_count
+            n_raised += raised_count
             UI.vprint(1,
                 "   [object-tunnel] portal crown raised to airside "
                 f"level {raised_crown:.2f} m (was "

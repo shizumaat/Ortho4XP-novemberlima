@@ -1293,6 +1293,22 @@ class PavementLayout:
                         and _s.role in (ROLE_TAXIWAY_CLEARANCE,
                                         ROLE_RUNWAY_CLEARANCE)))
                 for _t, nid in sorted(hits):
+                    # ZERO-LENGTH GUARD (Triangle4XP fatal, 2026-07-18):
+                    # two coordinate-twin nodes can BOTH hit the same
+                    # edge at the same parameter — inserting the second
+                    # right after the first writes two consecutive ring
+                    # references at one coordinate, which the mesh
+                    # interns into a zero-length constrained segment
+                    # (measured EGGW junction ring: twins 155.60/156.70
+                    # from two adjacent-ground strips).  The mesh welds
+                    # chains by coordinates, so ONE reference suffices —
+                    # skip a hit coincident with the node just appended.
+                    _last_xy = _nid_xy.get(out[-1]) if out else None
+                    _hit_xy = _nid_xy.get(nid)
+                    if (_last_xy is not None and _hit_xy is not None
+                            and abs(_hit_xy[0] - _last_xy[0]) < 0.005
+                            and abs(_hit_xy[1] - _last_xy[1]) < 0.005):
+                        continue
                     # DONOR-GATED DESIGNED WALL (2026-07-17): a SOFT
                     # strip receiving an on-edge node whose authority
                     # claimants are all NON-donors (building pad,

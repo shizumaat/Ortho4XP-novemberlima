@@ -401,7 +401,7 @@ class TestFlushWalls:
             [p.polygon for p in _floor_plates(layout)])
         # Bucket-safe gap where the body abuts pavement...
         assert floor_union.distance(pavement.polygon) >= (
-            assembly._TUNNEL_FLOOR_PAVEMENT_CLEARANCE_M - 0.05)
+            assembly._TUNNEL_FLOOR_OWNED_CLEARANCE_M - 0.05)
         # ...while the free edges stay flush: the floor still reaches the
         # body's outer boundary (y = ±15) away from the pavement band.
         minimum_x, minimum_y, maximum_x, maximum_y = floor_union.bounds
