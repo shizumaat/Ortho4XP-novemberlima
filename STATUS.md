@@ -1,4 +1,15 @@
 # ══════════════════════════════════════════════════════════════════
+# 20260718 — BUILD-TIME BASELINES REFRESHED POST WAVES 2c+3
+# tools/build_time_baselines.json re-measured at dev 0834fef (includes
+# projection-wave2c + geometry-wave3 merges): CYXY 40.6 s (was 43.4),
+# OTHH 343.4 s (was 365.8).  Cold-equivalent per the checker docstring:
+# one warm-up full build per airport, then fresh-interpreter measured
+# run via check_build_time.py --run --update-baselines.  Preconditions
+# verified (no concurrent builds; OSM regional extracts + Elevation_data
+# present).  tests/test_check_build_time.py 27 green; standalone
+# check_build_time.py PASS.  OTHH remains over the 60 s airport budget
+# (approvals file still empty — pre-existing state, improved this round).
+# ══════════════════════════════════════════════════════════════════
 # 20260718 EARLY AM — TWO SUPERVISED AGENT LANDINGS INTEGRATED
 # (same session as the EGGW tunnel fixes below; all uncommitted):
 # 1. RIGID-SEAT SPAN LIMIT (EGGW floating buildings FIXED):
