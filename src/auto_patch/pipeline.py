@@ -6737,6 +6737,30 @@ def build_airport_pavement(icao: str, xplane_root: str,
         except _GEOM_EXC:
             pass
 
+    # Cross-strip SEAM-STEP blend (2026-07-18, SPJC in-sim cliffs): strips
+    # from DIFFERENT emitters (adjacent-ground bands, gap-fill spines)
+    # grading off different hosts hold metre-scale value disagreements at
+    # near-adjacent — or exactly stacked — boundary vertices, emitting
+    # bare terrain cliffs (SPJC: 152 pairs, worst 4.4 m over 1.26 m).
+    # Must run at PIPELINE level over the COMPLETE strip population (the
+    # tearing seams are cross-family) and BEFORE the late projection,
+    # whose strip freeze then anchors the blended values.
+    if compute_elevations:
+        try:
+            from .adjacent_ground import (
+                _raster_reach_band_active, blend_cross_strip_seam_steps)
+            if _raster_reach_band_active():
+                _n_seam_blend = blend_cross_strip_seam_steps(
+                    layout.shapes, layout)
+                if _n_seam_blend:
+                    UI.vprint(1, f"  [pav-builder] {icao}: cross-strip "
+                                 f"seam blend — re-levelled "
+                                 f"{_n_seam_blend} vertex(es) at "
+                                 f"strip-to-strip steps.")
+        except _GEOM_EXC as _seam_blend_exc:
+            UI.vprint(1, f"  [pav-builder] WARN {icao}: cross-strip seam "
+                         f"blend failed ({_seam_blend_exc!r}).")
+
     # ── LATE final grade projection (2026-07-17): the mid-pipeline
     # ``final_grade_projection`` is no longer last — band/gap emission,
     # tile cuts, conformance welds, crown completion and the densify

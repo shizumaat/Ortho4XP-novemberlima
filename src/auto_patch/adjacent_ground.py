@@ -1132,6 +1132,187 @@ def _heal_emitted_band_tears(emitted_shapes, layout):
     return healed
 
 
+# Cross-strip SEAM-STEP blend thresholds (2026-07-18, SPJC east-side
+# cliffs): two strips grading off DIFFERENT host pavements run side by
+# side, and their near-adjacent — but not coordinate-shared — boundary
+# vertices disagree by the host delta.  Measured SPJC: 152 pairs, worst
+# 4.4 m over 1.26 m (348 %), at 1-6 m spacing — ABOVE the sub-metre
+# pinch class ``_heal_emitted_band_tears`` collapses, and invisible to
+# it because each tear spans TWO rings.  Legitimate terracing steps are
+# ~0.3 m, so a 1.0 m step floor cleanly separates the classes.
+SEAM_STEP_RADIUS_M = 6.0
+SEAM_STEP_MIN_DELTA_M = 1.0
+# Grade floor: on steep relief (CYXY) neighbour strips LEGITIMATELY
+# differ by >1 m at 4-6 m spacing — real hillside drape tops out around
+# 30-40 %, while genuine seam cliffs run 100-350 %.  Requiring the step
+# to ALSO imply >50 % keeps lawful terrain-following untouched (measured
+# CYXY without the floor: 1404 vertices moved, 5 new sub-metre pinches
+# minted; with it the blend touches only true cliffs).
+SEAM_STEP_MIN_GRADE = 0.5
+
+
+def blend_cross_strip_seam_steps(strip_shapes, layout):
+    """Reconcile metre-scale value steps between NEAR-ADJACENT vertices of
+    different ``graded_strip`` shapes (2026-07-18, SPJC in-sim cliffs).
+
+    Model: ``to_osm`` interns same-millimetre-key vertices whose values
+    sit within the emit merge tolerance into ONE node, so the blend
+    operates on that LOGICAL node graph — a logical node (the key plus
+    its agreeing twins across strips) moves as a unit; same-key vertices
+    whose spread EXCEEDS the tolerance emit as stacked separate nodes (a
+    bare vertical terrain wall, the SPJC 3.8 m class) and are separate
+    logical nodes that may blend against each other.  Qualifying pairs —
+    planar distance under ``SEAM_STEP_RADIUS_M`` (zero included: the
+    stacked-wall case), altitude delta over ``SEAM_STEP_MIN_DELTA_M``,
+    not both exclusively owned by the same single strip — are clustered
+    by union-find.  Donor-pavement-welded logical nodes are immovable
+    ANCHORS; free logical nodes snap to the anchors\' mean, or to the
+    cluster mean when no anchor exists.  A cluster whose every node is
+    anchored is left alone (a genuine step — retaining-wall territory,
+    never silently flattened).  ``strip_shapes`` must be the COMPLETE
+    final strip population (every emitter: adjacent-ground bands,
+    gap-fill spines) — running per emitter group misses exactly the
+    cross-family seams that tear.  Returns the number of ring vertices
+    re-levelled."""
+    from collections import defaultdict
+    from shapely.strtree import STRtree
+    from .layout import WELD_DONOR_ROLES
+
+    donor_ext = [s.polygon.exterior for s in layout.shapes
+                 if (s.role or "") in WELD_DONOR_ROLES
+                 and s.polygon is not None and not s.polygon.is_empty
+                 and s.polygon.geom_type == "Polygon"]
+    try:
+        donor_tree = STRtree(donor_ext) if donor_ext else None
+    except _GEOM_EXC:
+        donor_tree = None
+
+    # Per-strip vertex tables.
+    entries = []            # (shape, ring, alts) — alts open (no closing twin)
+    by_key: "defaultdict[tuple, list]" = defaultdict(list)
+    for sh in strip_shapes:
+        if ((sh.role or "") != "graded_strip" or sh.polygon is None
+                or sh.polygon.is_empty
+                or sh.polygon.geom_type != "Polygon"
+                or sh.node_altitudes is None):
+            continue
+        try:
+            ring = list(sh.polygon.exterior.coords)[:-1]
+        except _GEOM_EXC:
+            continue
+        alts = [float(a) for a in sh.node_altitudes[:len(ring)]]
+        if len(ring) != len(alts) or len(ring) < 4:
+            continue
+        entry_index = len(entries)
+        entries.append((sh, ring, alts))
+        for position, (vx, vy) in enumerate(ring):
+            by_key[_vertex_key(vx, vy)].append(
+                (entry_index, position, alts[position], vx, vy))
+    if len(entries) < 2:
+        return 0
+
+    # LOGICAL nodes: per key, greedy-cluster members by value within the
+    # merge tolerance (ascending — deterministic).  Same-key groups whose
+    # values disagree beyond it become SEPARATE logical nodes (stacked
+    # wall) and may blend against each other at distance zero.
+    logical = []    # dict: members [(entry,pos)], strips set, value, xy
+    for key in sorted(by_key):
+        members = sorted(by_key[key], key=lambda m: (m[2], m[0], m[1]))
+        group: list = []
+        for member in members:
+            if group and member[2] - group[0][2] > VERTEX_ALT_MERGE_TOL_M:
+                logical.append(group)
+                group = []
+            group.append(member)
+        if group:
+            logical.append(group)
+    node_xy = []
+    node_value = []
+    node_strips = []
+    for group in logical:
+        node_xy.append((group[0][3], group[0][4]))
+        node_value.append(sum(m[2] for m in group) / float(len(group)))
+        node_strips.append({m[0] for m in group})
+
+    def _anchored(node_index):
+        if donor_tree is None:
+            return False
+        (vx, vy) = node_xy[node_index]
+        try:
+            hit = donor_tree.query_nearest(Point(vx, vy), max_distance=0.05)
+        except _GEOM_EXC:
+            return False
+        return len(hit) > 0
+
+    points = [Point(vx, vy) for (vx, vy) in node_xy]
+    try:
+        vertex_tree = STRtree(points)
+        left, right = vertex_tree.query(points, predicate="dwithin",
+                                        distance=SEAM_STEP_RADIUS_M)
+    except _GEOM_EXC:
+        return 0
+    parent = list(range(len(points)))
+
+    def _find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    paired = False
+    for a, b in zip(left.tolist(), right.tolist()):
+        if a >= b:
+            continue
+        delta = abs(node_value[a] - node_value[b])
+        if delta < SEAM_STEP_MIN_DELTA_M:
+            continue
+        (ax, ay), (bx, by) = node_xy[a], node_xy[b]
+        planar = math.hypot(ax - bx, ay - by)
+        if delta < SEAM_STEP_MIN_GRADE * max(planar, 0.01):
+            continue        # steep-terrain drape, not a cliff
+        if (len(node_strips[a]) == 1 and node_strips[a] == node_strips[b]):
+            continue        # within one ring: the pinch healer\'s domain
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+        paired = True
+    if not paired:
+        return 0
+
+    clusters: "defaultdict[int, list]" = defaultdict(list)
+    for node_index in range(len(points)):
+        clusters[_find(node_index)].append(node_index)
+
+    moved = 0
+    changed_entries: set = set()
+    for root in sorted(clusters):
+        members = clusters[root]
+        if len(members) < 2:
+            continue                # never paired: not a seam cluster
+        anchors = [m for m in members if _anchored(m)]
+        free_nodes = [m for m in members if m not in set(anchors)]
+        if not free_nodes:
+            continue                # all anchored: genuine step, leave it
+        source = anchors if anchors else members
+        target = round(
+            sum(node_value[m] for m in source) / float(len(source)), 2)
+        for m in free_nodes:
+            if abs(node_value[m] - target) < 1e-9:
+                continue
+            node_value[m] = target
+            for (entry_index, position, _a, _x, _y) in logical[m]:
+                entries[entry_index][2][position] = target
+                changed_entries.add(entry_index)
+                moved += 1
+    # Write back ONLY the touched strips — untouched shapes keep their
+    # exact original altitude lists (byte-identity everywhere no seam
+    # cluster exists).
+    for entry_index in sorted(changed_entries):
+        (sh, _ring, alts) = entries[entry_index]
+        sh.node_altitudes = list(alts) + [alts[0]]
+    return moved
+
+
 def _ring_edge_reference(coords, ring_alts):
     """The shared ring linear-reference (code motion out of
     ``_make_edge_projection_resampler``, Slice B stage B3 order 2 — the
@@ -3474,6 +3655,9 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
         # the raster reach band (the path this reconciles): gate-OFF keeps its
         # established byte-identical baseline — the legacy band does not drop
         # aprons, so the pinch class does not arise there.
+        # (The cross-strip SEAM-STEP blend runs at PIPELINE level, after
+        # every strip emitter — this group is only one strip family, and
+        # the tearing seams are precisely the cross-family ones.)
         _n_final_heal = (_heal_emitted_band_tears(emitted_shapes, layout)
                          if _raster_reach_band_active() else 0)
         if _n_final_heal:
