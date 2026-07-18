@@ -106,6 +106,36 @@ def _parse_statements(statements: Iterable[str]) -> _Matchers:
     return matchers
 
 
+_BoundingBox = Tuple[float, float, float, float]  # (lat_min, lon_min, lat_max, lon_max)
+
+
+def _normalize_bounding_boxes(bounding_box) -> List[_BoundingBox]:
+    """Accept one ``(lat_min, lon_min, lat_max, lon_max)`` box or a list
+    of them; always return a list.
+
+    The multi-box form exists because the osmium passes read the WHOLE
+    extract file regardless of box size — one pass selecting against N
+    boxes costs the same as one pass against one box, while N separate
+    calls cost N full reads.  Callers with several disjoint areas (the
+    per-airport inset footprint queries) pass the list; a single bounding
+    RECTANGLE over disjoint areas would be wrong, sweeping up everything
+    between them.
+    """
+    boxes = list(bounding_box)
+    if not boxes:
+        return []
+    # Multi-box form: the first element is itself a box (a sequence),
+    # not a coordinate scalar.  Sequence detection (rather than scalar
+    # type checks) keeps numpy scalar coordinates classified correctly.
+    if isinstance(boxes[0], (tuple, list)):
+        return [tuple(float(value) for value in box) for box in boxes]
+    if len(boxes) != 4:
+        raise ExtractFilterError(
+            "bounding_box must be a 4-tuple or a list of 4-tuples"
+        )
+    return [tuple(float(value) for value in boxes)]
+
+
 def _tags_match(tags: "osmium.osm.TagList", matchers: List[_Matcher]) -> bool:
     """True when any matcher's key is present (and its value equals, when
     the matcher carries one)."""
@@ -121,10 +151,10 @@ def _tags_match(tags: "osmium.osm.TagList", matchers: List[_Matcher]) -> bool:
 class _SelectionHandler(osmium.SimpleHandler):
     """Pass 1 — decide selected elements and seed the closure sets."""
 
-    def __init__(self, matchers: _Matchers, bounding_box: Tuple[float, float, float, float]):
+    def __init__(self, matchers: _Matchers, bounding_boxes: List[_BoundingBox]):
         super().__init__()
         self._matchers = matchers
-        (self._lat_min, self._lon_min, self._lat_max, self._lon_max) = bounding_box
+        self._boxes = list(bounding_boxes)
         # Shared state consumed by later passes.
         self.nodes_in_bbox: set = set()
         self.ways_touching: set = set()
@@ -133,10 +163,10 @@ class _SelectionHandler(osmium.SimpleHandler):
         self.selected_rels: Dict[int, _RelData] = {}
 
     def _in_bbox(self, lat: float, lon: float) -> bool:
-        return (
-            self._lat_min <= lat <= self._lat_max
-            and self._lon_min <= lon <= self._lon_max
-        )
+        for (lat_min, lon_min, lat_max, lon_max) in self._boxes:
+            if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max:
+                return True
+        return False
 
     def node(self, n: "osmium.osm.Node") -> None:
         loc = n.location
@@ -216,7 +246,7 @@ class _NodeGatherHandler(osmium.SimpleHandler):
 def _process_extract(
     path: str,
     matchers: _Matchers,
-    bounding_box: Tuple[float, float, float, float],
+    bounding_boxes: List[_BoundingBox],
 ) -> Tuple[Dict[int, _NodeData], Dict[int, _WayData], Dict[int, _RelData]]:
     """Run the three passes over one extract file and return its selected +
     closure nodes, ways and relations.  Ways whose nodes are not all present
@@ -224,7 +254,7 @@ def _process_extract(
     if not os.path.isfile(path):
         raise ExtractFilterError("extract file not found: " + str(path))
     try:
-        selection = _SelectionHandler(matchers, bounding_box)
+        selection = _SelectionHandler(matchers, bounding_boxes)
         selection.apply_file(path)
 
         way_gather = _WayGatherHandler(
@@ -354,7 +384,10 @@ def filter_extracts_to_osm_xml(
         O4_Vector_Map, e.g. ``way["natural"="water"]``,
         ``rel["waterway"="riverbank"]``, ``node["aeroway"]`` (value part
         optional -> key-existence match).
-    bounding_box: ``(lat_min, lon_min, lat_max, lon_max)`` in degrees.
+    bounding_box: ``(lat_min, lon_min, lat_max, lon_max)`` in degrees, or
+        a LIST of such boxes — one filtering pass then selects elements
+        inside ANY of the boxes (see :func:`_normalize_bounding_boxes` for
+        why that beats one call per box).
 
     Returns utf-8 XML bytes: an ``<osm version="0.6" generator="...">``
     document containing nodes first, then ways, then relations, with the full
@@ -365,13 +398,14 @@ def filter_extracts_to_osm_xml(
     missing/unreadable.
     """
     matchers = _parse_statements(statements)
+    bounding_boxes = _normalize_bounding_boxes(bounding_box)
 
     merged_nodes: Dict[int, _NodeData] = {}
     merged_ways: Dict[int, _WayData] = {}
     merged_rels: Dict[int, _RelData] = {}
 
     for path in extract_paths:
-        nodes, ways, rels = _process_extract(path, matchers, bounding_box)
+        nodes, ways, rels = _process_extract(path, matchers, bounding_boxes)
         # First file wins: setdefault only fills ids not already present.
         for node_id, data in nodes.items():
             merged_nodes.setdefault(node_id, data)

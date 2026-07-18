@@ -462,7 +462,11 @@ def register_access_strategy(name):
 
 
 def fetch_inset(
-    definition, bounding_box_wgs84, target_resolution_m, destination_path
+    definition,
+    bounding_box_wgs84,
+    target_resolution_m,
+    destination_path,
+    footprint_prefetch=None,
 ):
     """Dispatch a fetch to the strategy named by the provider definition.
 
@@ -470,6 +474,10 @@ def fetch_inset(
     caching, index, provenance, composite assembly, bake) calls only this
     function and never mentions a concrete strategy.  A new strategy plugs
     in by registering itself; nothing here changes.
+
+    ``footprint_prefetch`` (optional :class:`TileBuildingFootprintPrefetch`)
+    is handed to the surface-model masking pass so a multi-airport tile
+    shares one building-footprint extract pass instead of one per airport.
 
     Returns the provenance metadata dictionary produced by the strategy, or
     ``None`` when the strategy reports no usable coverage.
@@ -502,7 +510,10 @@ def fetch_inset(
     ):
         provenance[SURFACE_MODEL_BUILDING_MASKING] = (
             mask_building_footprints_in_surface_model(
-                destination_path, bounding_box_wgs84, definition
+                destination_path,
+                bounding_box_wgs84,
+                definition,
+                footprint_prefetch=footprint_prefetch,
             )
         )
     return provenance
@@ -4580,46 +4591,140 @@ SURFACE_MODEL_BUILDING_MASKING = "surface_model_building_masking"
 # its walls, so the mask must reach past the mapped footprint.
 DEFAULT_FOOTPRINT_MASK_BUFFER_M = 35.0
 
-# Upper bound, in pixels, on how far the inpainting looks for valid
-# ground values.  100 pixels at a 30 m grid is 3 km -- beyond any single
-# terminal complex while keeping gdal.FillNodata cheap.
+# Upper bound, in pixels, on how far the legacy gdal.FillNodata inpainting
+# looks for valid ground values.  100 pixels at a 30 m grid is 3 km --
+# beyond any single terminal complex while keeping gdal.FillNodata cheap.
 DEFAULT_FOOTPRINT_FILL_SEARCH_PIXELS = 100
 
+# The masked-hole fill algorithm.  The default vectorized distance-transform
+# fill replaces every masked (building) cell with the value of its nearest
+# trusted-ground cell in one O(N) exact-Euclidean pass, then applies a fixed
+# number of deterministic masked smoothing passes -- reproducing what
+# gdal.FillNodata does (interpolate holes from surrounding ground) as a
+# single deterministic array operation instead of an iterative search whose
+# cost grows with maxSearchDist.  The result is exactly reproducible (no
+# floating iteration-order dependence) and never touches unmasked cells.
+INSET_FILL_METHOD_DISTANCE_TRANSFORM = "distance_transform"
+INSET_FILL_METHOD_LEGACY = "gdal_fillnodata"
 
-def openstreetmap_building_footprints(bounding_box_wgs84):
-    """Absolute-WGS84 building footprint polygons from OpenStreetMap.
+# Smoothing passes applied to the filled cells only, matching the legacy
+# gdal.FillNodata(smoothingIterations=2) so the two paths stay comparable.
+DEFAULT_FILL_SMOOTHING_ITERATIONS = 2
 
-    Queries Overpass for every ``building`` way and relation in the box
-    and returns a list of shapely polygons in plain (longitude, latitude)
-    coordinates (``OSM_to_MultiPolygon`` with a zero origin, so nothing
-    here is tile-relative).  Returns ``[]`` on any failure -- the caller
-    then skips the masking pass rather than failing the fetch: an
-    uncorrected surface-model inset is still better than no inset.
 
-    Deliberately NOT cached on disk: an inset fetch is already a rare,
-    cached event, and reusing a footprint file fetched for a smaller
-    margin would silently miss buildings in the enlarged ring (the exact
-    staleness class the margin-aware inset cache invalidation fixed).
+def _inset_fill_method():
+    """The masked-hole fill method, environment-overridable (default-on).
+
+    ``O4_INSET_FILL_METHOD=gdal_fillnodata`` restores the legacy in-place
+    ``gdal.FillNodata`` inpaint (the byte-for-byte fallback); any other or
+    absent value selects the vectorized distance-transform fill.
+    """
+    value = os.environ.get("O4_INSET_FILL_METHOD", "").strip().lower()
+    if value == INSET_FILL_METHOD_LEGACY:
+        return INSET_FILL_METHOD_LEGACY
+    return INSET_FILL_METHOD_DISTANCE_TRANSFORM
+
+
+def _fill_masked_by_distance_transform(
+    values, source_mask, smoothing_iterations=DEFAULT_FILL_SMOOTHING_ITERATIONS
+):
+    """Fill every non-source cell from its nearest trusted-ground cell.
+
+    SOURCE-AGNOSTIC by contract: it takes a boolean ``source_mask`` marking
+    the cells whose values are trusted ground, and knows nothing about where
+    the holes came from (building footprints, package objects, both).  Every
+    cell outside ``source_mask`` is overwritten with the value of the nearest
+    source cell in exact Euclidean distance (``scipy.ndimage`` distance
+    transform with ``return_indices``); the ground under an airport terminal
+    is nearly planar, so a nearest-ground value is an excellent estimate --
+    the same assumption the legacy fill relied on.  ``smoothing_iterations``
+    deterministic 3x3 masked-mean passes then soften the piecewise-constant
+    Voronoi seams; each pass only ever writes non-source cells, so every
+    source (unmasked) cell stays byte-identical.
+
+    Returns a new float64 array; ``values`` is not mutated.  The caller
+    restores genuine nodata afterwards, exactly as with gdal.FillNodata
+    (which also fills every non-source cell and lets the caller re-stamp the
+    sentinel).  Determinism: the distance transform and the fixed-count
+    box-mean passes have no iteration-order or thread dependence.
+    """
+    from scipy import ndimage
+
+    filled = numpy.asarray(values, dtype=numpy.float64).copy()
+    source_mask = numpy.asarray(source_mask, dtype=bool)
+    fill_mask = ~source_mask
+    if not source_mask.any() or not fill_mask.any():
+        # No trusted ground to source from, or nothing to fill: unchanged.
+        return filled
+    # Nearest source-cell index for every cell (exact Euclidean).  The EDT
+    # runs on the complement of the source mask, so each cell's returned
+    # index is that of the closest source cell.
+    nearest_indices = ndimage.distance_transform_edt(
+        fill_mask, return_distances=False, return_indices=True
+    )
+    nearest_values = filled[tuple(nearest_indices)]
+    filled[fill_mask] = nearest_values[fill_mask]
+    # Masked smoothing: average over a 3x3 window but write only the filled
+    # cells, so source cells (and thus every unmasked pixel) are untouched.
+    for _ in range(int(smoothing_iterations)):
+        blurred = ndimage.uniform_filter(filled, size=3, mode="nearest")
+        filled[fill_mask] = blurred[fill_mask]
+    return filled
+
+
+_BUILDING_QUERY_STATEMENTS = ['way["building"]', 'rel["building"]']
+
+
+def _load_building_layer_from_extracts(osm_layer, bbox_south_west_north_east):
+    """Populate ``osm_layer`` with buildings from local Geofabrik extracts.
+
+    ``bbox_south_west_north_east`` may also be a LIST of such boxes; the
+    extracts backend then serves all of them in one filtering pass (the
+    tile-level footprint prefetch batches every airport's box this way).
+
+    The airport-inset footprint query previously went straight to Overpass,
+    bypassing the regional-extract accelerator the tile vector pipeline
+    already uses -- and for a large airport box that meant multi-minute
+    Overpass queue waits (the profiled dominant cost of a cold inset build).
+    When the downloaded extracts cover the box (the common airport case),
+    the ``building`` ways/relations are filtered out of the local pbf
+    instead, which is bounded by local disk I/O.  Returns ``True`` when the
+    layer was populated locally, ``False`` to fall through to Overpass --
+    the accelerator is never a dependency (missing index, region not stored
+    yet, or any failure all read as ``False``).
+    """
+    try:
+        import O4_OSM_Extracts as EXTRACTS
+    except Exception:
+        return False
+    try:
+        xml_bytes = EXTRACTS.osm_xml_from_local_extracts(
+            _BUILDING_QUERY_STATEMENTS,
+            bbox_south_west_north_east,
+            request_description="inset_buildings",
+        )
+    except Exception:
+        return False
+    if not xml_bytes:
+        return False
+    # Mirror OSM_query_to_OSM_layer's tag setup for this fixed query so
+    # update_dicosm keeps every building way/relation and its child nodes.
+    building_tags = {"n": [], "w": [("building", "")], "r": [("building", "")]}
+    try:
+        osm_layer.update_dicosm(xml_bytes, building_tags, building_tags)
+    except Exception:
+        return False
+    return True
+
+
+def _building_footprint_polygons_from_layer(osm_layer):
+    """Convert a populated building OSM layer to shapely polygons.
+
+    Plain (longitude, latitude) coordinates (``OSM_to_MultiPolygon`` with
+    a zero origin, so nothing here is tile-relative); ``[]`` on failure.
     """
     import O4_OSM_Utils as OSM
 
-    (west, south, east, north) = bounding_box_wgs84
-    osm_layer = OSM.OSM_layer()
-    try:
-        queried = OSM.OSM_query_to_OSM_layer(
-            ['way["building"]', 'rel["building"]'],
-            (south, west, north, east),
-            osm_layer,
-        )
-    except Exception as error:
-        UI.vprint(
-            1,
-            "   WARNING: OpenStreetMap building query failed:",
-            str(error),
-        )
-        return []
-    if not queried:
-        return []
     try:
         footprints = OSM.OSM_to_MultiPolygon(osm_layer, 0, 0)
     except Exception as error:
@@ -4630,6 +4735,402 @@ def openstreetmap_building_footprints(bounding_box_wgs84):
         )
         return []
     return [polygon for polygon in getattr(footprints, "geoms", []) if polygon.area]
+
+
+def openstreetmap_building_footprints(
+    bounding_box_wgs84, footprint_prefetch=None
+):
+    """Absolute-WGS84 building footprint polygons from OpenStreetMap.
+
+    Returns a list of shapely polygons in plain (longitude, latitude)
+    coordinates for every ``building`` way and relation in the box
+    (``OSM_to_MultiPolygon`` with a zero origin, so nothing here is
+    tile-relative).  The data is served from the local Geofabrik regional
+    extracts when they cover the box, and from Overpass otherwise; returns
+    ``[]`` on any failure -- the caller then skips the masking pass rather
+    than failing the fetch: an uncorrected surface-model inset is still
+    better than no inset.
+
+    When ``footprint_prefetch`` (a :class:`TileBuildingFootprintPrefetch`)
+    can serve the box, the polygons come from its one shared extract pass
+    instead of a fresh per-box pass -- the per-box pbf filtering cost is
+    box-size-INDEPENDENT (three full osmium reads of the regional
+    extract), so a tile with N airports otherwise pays that read N times.
+    A prefetch answer of ``None`` (box not covered, extracts unable to
+    serve) falls through to the unchanged per-box path.
+
+    Deliberately NOT cached on disk: an inset fetch is already a rare,
+    cached event, and reusing a footprint file fetched for a smaller
+    margin would silently miss buildings in the enlarged ring (the exact
+    staleness class the margin-aware inset cache invalidation fixed).
+    """
+    if footprint_prefetch is not None:
+        prefetched = footprint_prefetch.footprints_intersecting_box(
+            bounding_box_wgs84
+        )
+        if prefetched is not None:
+            return prefetched
+    import O4_OSM_Utils as OSM
+
+    (west, south, east, north) = bounding_box_wgs84
+    bbox = (south, west, north, east)
+    osm_layer = OSM.OSM_layer()
+    if not _load_building_layer_from_extracts(osm_layer, bbox):
+        try:
+            queried = OSM.OSM_query_to_OSM_layer(
+                _BUILDING_QUERY_STATEMENTS, bbox, osm_layer,
+            )
+        except Exception as error:
+            UI.vprint(
+                1,
+                "   WARNING: OpenStreetMap building query failed:",
+                str(error),
+            )
+            return []
+        if not queried:
+            return []
+    return _building_footprint_polygons_from_layer(osm_layer)
+
+
+class TileBuildingFootprintPrefetch:
+    """ONE regional-extract pass serving every airport's footprint query.
+
+    Each per-airport OpenStreetMap building query independently filters
+    the ENTIRE regional pbf (three osmium passes over hundreds of
+    megabytes), and that cost does not depend on the box size -- so a
+    tile with N airports paid the full read N times (93% of the profiled
+    cold +25+051 inset build).  This prefetch runs the filter once with
+    the full LIST of airport boxes -- never their bounding rectangle,
+    which would sweep up every building between airports in a metro tile
+    -- and answers each airport's query by clipping in memory.
+
+    Lazy: nothing is read until the first query, so builds that never
+    reach a masking pass (warm caches, no surface-model provider) never
+    pay the extract pass.  Failure-neutral: when the extracts cannot
+    serve (backend disabled, region not downloaded, osmium missing),
+    every query returns ``None`` and the caller falls back to the
+    unchanged per-box path (extracts, then Overpass).  Margin semantics
+    are preserved because the boxes given here are the same margin-grown
+    boxes each per-airport fetch would have queried with.
+    """
+
+    def __init__(self, bounding_boxes_wgs84):
+        """``bounding_boxes_wgs84``: iterable of (west, south, east,
+        north) boxes, one per airport."""
+        self._boxes = [
+            tuple(float(value) for value in box)
+            for box in bounding_boxes_wgs84
+        ]
+        self._load_attempted = False
+        # None until a successful load; a list afterwards.
+        self._footprints = None
+
+    def _box_is_covered(self, bounding_box_wgs84):
+        """True when the request sits inside one of the construction
+        boxes (tolerance for float round-trips)."""
+        (west, south, east, north) = (
+            float(value) for value in bounding_box_wgs84
+        )
+        epsilon = 1e-9
+        for (p_west, p_south, p_east, p_north) in self._boxes:
+            if (
+                west >= p_west - epsilon
+                and south >= p_south - epsilon
+                and east <= p_east + epsilon
+                and north <= p_north + epsilon
+            ):
+                return True
+        return False
+
+    def _load_once(self):
+        if self._load_attempted:
+            return
+        self._load_attempted = True
+        import O4_OSM_Utils as OSM
+
+        osm_layer = OSM.OSM_layer()
+        boxes_south_west_north_east = [
+            (south, west, north, east)
+            for (west, south, east, north) in self._boxes
+        ]
+        if not _load_building_layer_from_extracts(
+            osm_layer, boxes_south_west_north_east
+        ):
+            return
+        self._footprints = _building_footprint_polygons_from_layer(osm_layer)
+
+    def footprints_intersecting_box(self, bounding_box_wgs84):
+        """Prefetched footprints intersecting the box, or ``None`` when
+        the prefetch cannot serve it (caller falls back per-box)."""
+        if not self._boxes or not self._box_is_covered(bounding_box_wgs84):
+            return None
+        self._load_once()
+        if self._footprints is None:
+            return None
+        from shapely.geometry import box as shapely_box
+
+        (west, south, east, north) = bounding_box_wgs84
+        clip_box = shapely_box(west, south, east, north)
+        selected = []
+        for polygon in self._footprints:
+            (b_west, b_south, b_east, b_north) = polygon.bounds
+            if (
+                b_east < west
+                or b_west > east
+                or b_north < south
+                or b_south > north
+            ):
+                continue
+            if polygon.intersects(clip_box):
+                selected.append(polygon)
+        return selected
+
+
+def _xplane_root_for_package_footprints():
+    """X-Plane installation root from download-time configuration.
+
+    The inset fetch runs at step 1, before any DSF is read, so there is no
+    build context to hand a pack root in -- the root has to come from plain
+    configuration.  The resolution order mirrors what ``O4_Vector_Map``
+    already does to locate CIFP data (the reverse direction of the same
+    derivation): ``cifp_data_path`` walked up two levels via
+    ``auto_patch.cifp_reader.xplane_root_from_cifp_path``, then the parent
+    of ``custom_scenery_dir``.  A CIFP path pointing outside an X-Plane
+    install (a Navigraph folder) is rejected by requiring ``Custom
+    Scenery`` under the derived root, and falls through to the next source.
+
+    The config module is fetched through ``sys.modules`` (the established
+    core-module idiom, see ``O4_OSM_Extracts``): this module must not
+    import ``O4_Config_Utils`` at top level, and when it was never loaded
+    (unit tests, library use) there is simply no root.  Returns ``None``
+    when no root is resolvable.
+    """
+    import sys
+
+    configuration = sys.modules.get("O4_Config_Utils")
+    if configuration is None:
+        return None
+    cifp_path = getattr(configuration, "cifp_data_path", "") or ""
+    if cifp_path:
+        try:
+            from auto_patch.cifp_reader import xplane_root_from_cifp_path
+
+            root = xplane_root_from_cifp_path(cifp_path)
+        except Exception:
+            root = None
+        if root and os.path.isdir(os.path.join(root, "Custom Scenery")):
+            return root
+    custom_scenery_directory = (
+        getattr(configuration, "custom_scenery_dir", "") or ""
+    )
+    if custom_scenery_directory and os.path.isdir(custom_scenery_directory):
+        return os.path.dirname(os.path.normpath(custom_scenery_directory))
+    return None
+
+
+def _dsf_tile_coordinates_for_bounding_box(bounding_box_wgs84):
+    """Integer (latitude, longitude) of every 1x1 degree DSF tile the box
+    touches -- usually one, up to four when an airport straddles a tile
+    corner (the margin ring routinely crosses a tile edge)."""
+    import math
+
+    (west, south, east, north) = bounding_box_wgs84
+    return [
+        (tile_latitude, tile_longitude)
+        for tile_latitude in range(
+            int(math.floor(south)), int(math.floor(north)) + 1
+        )
+        for tile_longitude in range(
+            int(math.floor(west)), int(math.floor(east)) + 1
+        )
+    ]
+
+
+def _disabled_custom_scenery_pack_names(custom_scenery_directory):
+    """Pack directory names marked SCENERY_PACK_DISABLED in
+    ``scenery_packs.ini``.  A disabled pack does not render, so its object
+    footprints are not authoritative for the mask (the whole point of the
+    package source is matching what renders in the simulator)."""
+    disabled = set()
+    ini_path = os.path.join(custom_scenery_directory, "scenery_packs.ini")
+    try:
+        with open(
+            ini_path, "r", encoding="utf-8", errors="replace"
+        ) as handle:
+            for line in handle:
+                line = line.strip()
+                if not line.startswith("SCENERY_PACK_DISABLED"):
+                    continue
+                rest = line.split(None, 1)[1] if " " in line else ""
+                if rest:
+                    disabled.add(
+                        os.path.basename(rest.strip().rstrip("/"))
+                    )
+    except OSError:
+        pass
+    return disabled
+
+
+def _airport_pack_dsf_paths(xplane_root, bounding_box_wgs84):
+    """Overlay DSFs of installed AIRPORT packs covering the box's tile(s).
+
+    Candidate packs are ``Custom Scenery`` entries that carry an ``Earth
+    nav data/apt.dat`` -- the marker of an airport pack, which keeps ortho
+    tiles, mesh packs and object libraries out of the scan -- and a tile
+    DSF for a 1x1 degree tile the box touches (a couple of ``os.path``
+    checks per pack, no file is parsed here).  ``Global Airports`` is
+    excluded: its per-tile DSFs cover everywhere, its buildings are
+    library-resolved by the thousand (an expensive cold parse at download
+    time), and the OpenStreetMap side of the union already covers those
+    real-world buildings; per-airport custom packs are the placements this
+    source exists for.  Disabled packs (``scenery_packs.ini``) do not
+    render and are skipped.
+    """
+    custom_scenery_directory = os.path.join(xplane_root, "Custom Scenery")
+    if not os.path.isdir(custom_scenery_directory):
+        return []
+    disabled = _disabled_custom_scenery_pack_names(custom_scenery_directory)
+    tile_relative_paths = [
+        FNAMES.long_latlon(tile_latitude, tile_longitude) + ".dsf"
+        for (tile_latitude, tile_longitude) in (
+            _dsf_tile_coordinates_for_bounding_box(bounding_box_wgs84)
+        )
+    ]
+    dsf_paths = []
+    for pack_name in sorted(os.listdir(custom_scenery_directory)):
+        if pack_name == "Global Airports" or pack_name in disabled:
+            continue
+        nav_data_directory = os.path.join(
+            custom_scenery_directory, pack_name, "Earth nav data"
+        )
+        if not os.path.isfile(os.path.join(nav_data_directory, "apt.dat")):
+            continue
+        for tile_relative_path in tile_relative_paths:
+            candidate = os.path.join(nav_data_directory, tile_relative_path)
+            if os.path.isfile(candidate):
+                dsf_paths.append(candidate)
+    return dsf_paths
+
+
+def package_object_footprints(bounding_box_wgs84, definition):
+    """Authoritative building footprints from installed airport packages.
+
+    The installed airport scenery package's DSF/OBJ8 object placements are
+    the footprints that actually render in the simulator, so they are the
+    PRIMARY footprint source for the inset mask (owner ruling 2026-07-18;
+    OpenStreetMap supplements them, and since the mask is a boolean union
+    precedence never has to be arbitrated).
+
+    Pack resolution is bbox-driven and needs no airport identifier and no
+    build context: the X-Plane root comes from download-time configuration
+    (:func:`_xplane_root_for_package_footprints`), candidate packs from a
+    cheap directory scan (:func:`_airport_pack_dsf_paths`), and each
+    candidate DSF goes through
+    ``auto_patch.dsf_reader.read_dsf_object_buildings`` -- the same reader
+    the build pipeline uses, so the expensive OBJ8 parse + partition is
+    served from (and primes) the shared ``o4_object_footprints_*`` sidecar
+    caches under ``Airport_mod_cache/``.  Rings come back in plain
+    (longitude, latitude); they are repaired like the pipeline's building
+    pool (``buffer(0)``) and clipped to the box.
+
+    Defensive throughout: no configured root, no candidate pack, an
+    unreadable DSF, or any exception all degrade to ``[]`` -- the mask then
+    falls back to OpenStreetMap alone, and an uncorrected inset still beats
+    a failed fetch.  ``O4_INSET_PACKAGE_FOOTPRINTS=0`` disables the source
+    (debug: attribute a bad mask to one side of the union).
+    """
+    if os.environ.get("O4_INSET_PACKAGE_FOOTPRINTS", "1") != "1":
+        return []
+    try:
+        from shapely.geometry import Polygon
+        from shapely.geometry import box as shapely_box
+
+        xplane_root = _xplane_root_for_package_footprints()
+        if not xplane_root:
+            return []
+        dsf_paths = _airport_pack_dsf_paths(xplane_root, bounding_box_wgs84)
+        if not dsf_paths:
+            return []
+        from auto_patch.dsf_reader import read_dsf_object_buildings
+    except Exception as error:
+        UI.vprint(
+            2,
+            "   Package footprint sourcing unavailable:",
+            str(error),
+        )
+        return []
+    (west, south, east, north) = bounding_box_wgs84
+    bounding_geometry = shapely_box(west, south, east, north)
+    footprints = []
+    for dsf_path in dsf_paths:
+        try:
+            buildings = read_dsf_object_buildings(
+                dsf_path, xplane_root=xplane_root
+            )
+        except Exception as error:
+            UI.vprint(
+                2,
+                "   Package footprint read failed for",
+                dsf_path,
+                ":",
+                str(error),
+            )
+            continue
+        for (outer_ring, hole_rings, _role) in buildings:
+            if len(outer_ring) < 3:
+                continue
+            try:
+                polygon = Polygon(
+                    outer_ring,
+                    [ring for ring in hole_rings if len(ring) >= 3],
+                )
+                if not polygon.is_valid:
+                    polygon = polygon.buffer(0)
+                if (
+                    polygon.is_empty
+                    or not polygon.area
+                    or not polygon.intersects(bounding_geometry)
+                ):
+                    continue
+            except Exception:
+                continue
+            footprints.append(polygon)
+    if footprints:
+        UI.vprint(
+            2,
+            "   ",
+            len(footprints),
+            "building footprints from installed airport package(s).",
+        )
+    return footprints
+
+
+def _collect_inset_building_footprints(
+    bounding_box_wgs84, definition, footprint_prefetch=None
+):
+    """UNION of building footprints for the inset mask (package + OSM).
+
+    Package (installed airport scenery) object footprints are authoritative
+    where present; OpenStreetMap footprints supplement them.  The mask built
+    from these is a boolean UNION, so precedence is moot -- a cell is masked
+    if ANY source covers it, and the downstream fill is completely agnostic
+    to which source contributed a polygon (requirement: sourcing rule and
+    fill algorithm stay decoupled).  Either source may be empty.
+
+    Returns ``(footprints, source_label)``.
+    """
+    package = package_object_footprints(bounding_box_wgs84, definition)
+    osm = openstreetmap_building_footprints(
+        bounding_box_wgs84, footprint_prefetch=footprint_prefetch
+    )
+    footprints = list(package) + list(osm)
+    if package and osm:
+        label = "installed package objects + OpenStreetMap footprints"
+    elif package:
+        label = "installed package objects"
+    else:
+        label = "OpenStreetMap building footprints"
+    return footprints, label
 
 
 def _buffer_footprints_in_metres(footprints, buffer_m, centre_latitude):
@@ -4699,7 +5200,7 @@ def _rasterize_footprint_mask(footprints, reference_dataset):
 
 
 def mask_building_footprints_in_surface_model(
-    inset_path, bounding_box_wgs84, definition
+    inset_path, bounding_box_wgs84, definition, footprint_prefetch=None
 ):
     """Replace building-contaminated surface-model pixels by ground.
 
@@ -4721,14 +5222,16 @@ def mask_building_footprints_in_surface_model(
     """
     if not has_gdal:
         return {"skipped": "GDAL unavailable"}
-    footprints = openstreetmap_building_footprints(bounding_box_wgs84)
+    (footprints, footprint_source) = _collect_inset_building_footprints(
+        bounding_box_wgs84, definition, footprint_prefetch=footprint_prefetch
+    )
     buffer_m = _parse_float(
         definition.get("footprint_mask_buffer_m"),
         default=DEFAULT_FOOTPRINT_MASK_BUFFER_M,
     )
     if not footprints:
         return {
-            "skipped": "no OpenStreetMap building footprints in the box",
+            "skipped": "no building footprints in the box",
             "footprint_count": 0,
         }
     (west, south, east, north) = bounding_box_wgs84
@@ -4746,43 +5249,57 @@ def mask_building_footprints_in_surface_model(
         building_mask = _rasterize_footprint_mask(buffered, dataset)
         genuine_nodata = (values == nodata_value) | ~numpy.isfinite(values)
         pixels_to_fill = building_mask & ~genuine_nodata
+        # Trusted-ground sources: every cell that is neither under a
+        # footprint nor genuine nodata (so sentinels are never fill
+        # sources).  Both fill methods fill every non-source cell and let
+        # the caller restore genuine nodata, so only building pixels change.
+        interpolation_sources = ~building_mask & ~genuine_nodata
         if not pixels_to_fill.any():
             dataset = None
             return {
-                "footprint_source": "OpenStreetMap building footprints",
+                "footprint_source": footprint_source,
                 "footprint_count": len(footprints),
                 "masked_pixel_count": 0,
                 "footprint_mask_buffer_m": buffer_m,
+                "fill_method": _inset_fill_method(),
             }
-        # gdal.FillNodata fills every mask==0 pixel from mask!=0 pixels:
-        # zero out buildings AND genuine nodata (so sentinel values are
-        # never interpolation sources), then restore the genuine nodata
-        # afterwards -- only building pixels end up changed.
-        interpolation_sources = ~building_mask & ~genuine_nodata
-        source_mask_raster = gdal.GetDriverByName("MEM").Create(
-            "", dataset.RasterXSize, dataset.RasterYSize, 1, gdal.GDT_Byte
-        )
-        source_mask_raster.SetGeoTransform(dataset.GetGeoTransform())
-        source_mask_band = source_mask_raster.GetRasterBand(1)
-        source_mask_band.WriteArray(
-            interpolation_sources.astype(numpy.uint8) * 255
-        )
-        search_pixels = _parse_float(
-            definition.get("footprint_fill_search_pixels"),
-            default=DEFAULT_FOOTPRINT_FILL_SEARCH_PIXELS,
-        )
-        gdal.FillNodata(
-            targetBand=band,
-            maskBand=source_mask_band,
-            maxSearchDist=float(search_pixels),
-            smoothingIterations=2,
-        )
-        filled_values = band.ReadAsArray()
-        filled_values[genuine_nodata] = nodata_value
-        band.WriteArray(filled_values)
-        band.FlushCache()
-        dataset = None
-        source_mask_raster = None
+        fill_method = _inset_fill_method()
+        if fill_method == INSET_FILL_METHOD_DISTANCE_TRANSFORM:
+            filled_values = _fill_masked_by_distance_transform(
+                values,
+                interpolation_sources,
+                smoothing_iterations=DEFAULT_FILL_SMOOTHING_ITERATIONS,
+            )
+            filled_values[genuine_nodata] = nodata_value
+            band.WriteArray(filled_values)
+            band.FlushCache()
+            dataset = None
+        else:
+            source_mask_raster = gdal.GetDriverByName("MEM").Create(
+                "", dataset.RasterXSize, dataset.RasterYSize, 1,
+                gdal.GDT_Byte,
+            )
+            source_mask_raster.SetGeoTransform(dataset.GetGeoTransform())
+            source_mask_band = source_mask_raster.GetRasterBand(1)
+            source_mask_band.WriteArray(
+                interpolation_sources.astype(numpy.uint8) * 255
+            )
+            search_pixels = _parse_float(
+                definition.get("footprint_fill_search_pixels"),
+                default=DEFAULT_FOOTPRINT_FILL_SEARCH_PIXELS,
+            )
+            gdal.FillNodata(
+                targetBand=band,
+                maskBand=source_mask_band,
+                maxSearchDist=float(search_pixels),
+                smoothingIterations=DEFAULT_FILL_SMOOTHING_ITERATIONS,
+            )
+            filled_values = band.ReadAsArray()
+            filled_values[genuine_nodata] = nodata_value
+            band.WriteArray(filled_values)
+            band.FlushCache()
+            dataset = None
+            source_mask_raster = None
     except Exception as error:
         UI.vprint(
             1,
@@ -4791,13 +5308,14 @@ def mask_building_footprints_in_surface_model(
         )
         return {"skipped": str(error), "footprint_count": len(footprints)}
     return {
-        "footprint_source": "OpenStreetMap building footprints",
+        "footprint_source": footprint_source,
         "footprint_count": len(footprints),
         "masked_pixel_count": int(pixels_to_fill.sum()),
         "masked_fraction": round(
             float(pixels_to_fill.sum()) / float(values.size), 4
         ),
         "footprint_mask_buffer_m": buffer_m,
+        "fill_method": fill_method,
     }
 
 
@@ -4906,6 +5424,13 @@ def ensure_airport_insets(
     """
     index = _read_index(lat, lon)
     checked_stamp = datetime.date.today().isoformat()
+    # One shared, LAZY footprint prefetch for the whole tile: the first
+    # surface-model masking pass triggers a single extract read covering
+    # every airport's box; later airports clip from it in memory.  Tiles
+    # that never reach a masking fetch never pay the read.
+    footprint_prefetch = TileBuildingFootprintPrefetch(
+        airport_bounding_boxes.values()
+    )
     # key=str: callers pass string airport codes, but a mixed-type dict must
     # never abort the whole tile's fetches with an unorderable-keys
     # TypeError (defense in depth behind _airport_bounding_boxes' filter).
@@ -4974,6 +5499,7 @@ def ensure_airport_insets(
                     bounding_box,
                     target_resolution_m,
                     fetch_destination,
+                    footprint_prefetch=footprint_prefetch,
                 )
             except Exception as error:
                 # A raised failure (a network timeout, a server outage, a

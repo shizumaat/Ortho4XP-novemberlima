@@ -3050,7 +3050,11 @@ def test_masking_replaces_building_bump_and_preserves_ground_and_nodata(
     monkeypatch.setattr(
         INSETS,
         "openstreetmap_building_footprints",
-        lambda bounding_box_wgs84: [footprint],
+        lambda bounding_box_wgs84, footprint_prefetch=None: [footprint],
+    )
+    # Hermetic: never scan a real X-Plane install for package footprints.
+    monkeypatch.setattr(
+        INSETS, "package_object_footprints", lambda box, defn: []
     )
 
     definition = {"code": "COPERTEST", "footprint_mask_buffer_m": 35}
@@ -3087,7 +3091,11 @@ def test_masking_skips_when_no_footprints_and_leaves_raster_unchanged(
     monkeypatch.setattr(
         INSETS,
         "openstreetmap_building_footprints",
-        lambda bounding_box_wgs84: [],
+        lambda bounding_box_wgs84, footprint_prefetch=None: [],
+    )
+    # Hermetic: never scan a real X-Plane install for package footprints.
+    monkeypatch.setattr(
+        INSETS, "package_object_footprints", lambda box, defn: []
     )
 
     dataset = gdal.Open(path)
@@ -3116,7 +3124,9 @@ def test_fetch_inset_runs_masking_only_when_flag_true(tmp_path, monkeypatch):
     mask_calls = {"count": 0}
     mask_summary = {"masked_pixel_count": 7, "footprint_count": 1}
 
-    def _fake_mask(inset_path, bounding_box_wgs84, definition):
+    def _fake_mask(
+        inset_path, bounding_box_wgs84, definition, footprint_prefetch=None
+    ):
         mask_calls["count"] += 1
         return mask_summary
 
@@ -3190,3 +3200,501 @@ def test_copernicus_glo30_ships_with_masking_flag_and_ranks_last():
     codes = [definition["code"] for definition in selected]
     assert "COPERNICUSGLO30" in codes
     assert codes[-1] == "COPERNICUSGLO30"
+
+
+# =====================================================================
+# Distance-transform masked-hole fill (vectorized inpaint replacement)
+# =====================================================================
+def test_distance_transform_fill_fills_holes_from_nearest_ground():
+    """Every masked (non-source) cell takes a nearest-ground value; the
+    trusted-ground (source) cells stay byte-identical."""
+    values = numpy.array(
+        [
+            [10.0, 10.0, 10.0, 10.0, 10.0],
+            [10.0, 999.0, 999.0, 999.0, 10.0],
+            [10.0, 999.0, 999.0, 999.0, 10.0],
+            [10.0, 10.0, 10.0, 10.0, 10.0],
+        ]
+    )
+    source_mask = values == 10.0  # the ring of ground; the 999 block is holes
+    filled = INSETS._fill_masked_by_distance_transform(
+        values, source_mask, smoothing_iterations=0
+    )
+    # No sentinel/rooftop value survives anywhere.
+    assert not numpy.any(filled == 999.0)
+    # Holes are filled from the surrounding ground (all 10.0 here).
+    assert numpy.allclose(filled[~source_mask], 10.0)
+    # Source cells are untouched, exactly.
+    assert numpy.array_equal(filled[source_mask], values[source_mask])
+
+
+def test_distance_transform_fill_is_deterministic():
+    rng = numpy.random.default_rng(1234)
+    values = rng.normal(size=(37, 41)) * 5.0 + 100.0
+    source_mask = rng.random((37, 41)) > 0.3  # ~70% ground, 30% holes
+    first = INSETS._fill_masked_by_distance_transform(
+        values, source_mask, smoothing_iterations=2
+    )
+    second = INSETS._fill_masked_by_distance_transform(
+        values, source_mask, smoothing_iterations=2
+    )
+    # Bit-for-bit identical across repeated runs (no order/thread dependence).
+    assert numpy.array_equal(first, second)
+
+
+def test_distance_transform_fill_preserves_source_cells_with_smoothing():
+    """Smoothing passes never modify a single source (unmasked) cell."""
+    rng = numpy.random.default_rng(7)
+    values = rng.normal(size=(25, 25)) + 50.0
+    source_mask = numpy.ones((25, 25), dtype=bool)
+    source_mask[8:16, 8:16] = False  # a central hole
+    filled = INSETS._fill_masked_by_distance_transform(
+        values, source_mask, smoothing_iterations=5
+    )
+    assert numpy.array_equal(filled[source_mask], values[source_mask])
+
+
+def test_distance_transform_fill_stays_within_ground_range():
+    """A nearest-ground fill never overshoots the surrounding ground values
+    (no ringing / no rooftop leakage), even on a sloped ground."""
+    # Ground is a smooth ramp; a rectangular hole sits in the middle.
+    yy, xx = numpy.mgrid[0:30, 0:30]
+    values = 100.0 + 0.5 * xx + 0.3 * yy
+    values_with_holes = values.copy()
+    source_mask = numpy.ones((30, 30), dtype=bool)
+    source_mask[10:20, 10:20] = False
+    values_with_holes[~source_mask] = 5000.0  # rooftop contamination
+    filled = INSETS._fill_masked_by_distance_transform(
+        values_with_holes, source_mask, smoothing_iterations=2
+    )
+    ground_min = values[source_mask].min()
+    ground_max = values[source_mask].max()
+    filled_holes = filled[~source_mask]
+    assert filled_holes.min() >= ground_min - 1e-9
+    assert filled_holes.max() <= ground_max + 1e-9
+
+
+def test_distance_transform_fill_no_sources_returns_unchanged():
+    values = numpy.array([[1.0, 2.0], [3.0, 4.0]])
+    source_mask = numpy.zeros((2, 2), dtype=bool)  # nothing trusted
+    filled = INSETS._fill_masked_by_distance_transform(
+        values, source_mask, smoothing_iterations=2
+    )
+    assert numpy.array_equal(filled, values)
+
+
+def test_inset_fill_method_env_gate(monkeypatch):
+    monkeypatch.delenv("O4_INSET_FILL_METHOD", raising=False)
+    assert (
+        INSETS._inset_fill_method()
+        == INSETS.INSET_FILL_METHOD_DISTANCE_TRANSFORM
+    )
+    monkeypatch.setenv("O4_INSET_FILL_METHOD", "gdal_fillnodata")
+    assert INSETS._inset_fill_method() == INSETS.INSET_FILL_METHOD_LEGACY
+    monkeypatch.setenv("O4_INSET_FILL_METHOD", "distance_transform")
+    assert (
+        INSETS._inset_fill_method()
+        == INSETS.INSET_FILL_METHOD_DISTANCE_TRANSFORM
+    )
+
+
+def test_collect_footprints_is_source_agnostic_union(monkeypatch):
+    """The mask sourcing is a package + OSM union; today package is empty
+    so the union is exactly the OSM set (behaviour preserved), but the
+    collector shape supports the union without touching the fill."""
+    sentinel_osm = ["osm-polygon-a", "osm-polygon-b"]
+    monkeypatch.setattr(
+        INSETS, "openstreetmap_building_footprints",
+        lambda box, footprint_prefetch=None: list(sentinel_osm),
+    )
+    monkeypatch.setattr(
+        INSETS, "package_object_footprints", lambda box, defn: [],
+    )
+    footprints, label = INSETS._collect_inset_building_footprints(
+        (0.0, 0.0, 1.0, 1.0), {"code": "X"}
+    )
+    assert footprints == sentinel_osm
+    assert "OpenStreetMap" in label
+
+    # With a package source present, the union carries both and labels it.
+    monkeypatch.setattr(
+        INSETS, "package_object_footprints",
+        lambda box, defn: ["pkg-1"],
+    )
+    footprints, label = INSETS._collect_inset_building_footprints(
+        (0.0, 0.0, 1.0, 1.0), {"code": "X"}
+    )
+    assert footprints == ["pkg-1"] + sentinel_osm
+    assert "package" in label and "OpenStreetMap" in label
+
+
+# =====================================================================
+# Package (installed airport scenery) object-footprint sourcing
+# =====================================================================
+# A box strictly inside tile (+35, -087): group +30-090.
+_PACK_BOX = (-86.98, 35.90, -86.94, 35.94)
+_PACK_TILE_DSF = os.path.join("+30-090", "+35-087.dsf")
+
+
+def _write_fake_custom_scenery(root):
+    """A fake X-Plane root exercising every pack-scan filter.
+
+    ``Test Airport``: an enabled airport pack (apt.dat + tile DSF) -- the
+    one the scan must select.  ``Disabled Airport``: identical but marked
+    SCENERY_PACK_DISABLED.  ``Ortho Tiles``: a tile DSF but no apt.dat
+    (not an airport pack).  ``Global Airports``: excluded by name.
+    """
+    custom_scenery = os.path.join(root, "Custom Scenery")
+    for pack_name in (
+        "Test Airport",
+        "Disabled Airport",
+        "Ortho Tiles",
+        "Global Airports",
+    ):
+        nav_data = os.path.join(custom_scenery, pack_name, "Earth nav data")
+        os.makedirs(os.path.dirname(os.path.join(nav_data, _PACK_TILE_DSF)))
+        with open(os.path.join(nav_data, _PACK_TILE_DSF), "w") as handle:
+            handle.write("")
+        if pack_name != "Ortho Tiles":
+            with open(os.path.join(nav_data, "apt.dat"), "w") as handle:
+                handle.write("")
+    with open(
+        os.path.join(custom_scenery, "scenery_packs.ini"), "w"
+    ) as handle:
+        handle.write(
+            "I\n1000 Version\nSCENERY\n\n"
+            "SCENERY_PACK Custom Scenery/Test Airport/\n"
+            "SCENERY_PACK_DISABLED Custom Scenery/Disabled Airport/\n"
+        )
+    return custom_scenery
+
+
+def _configuration_module(monkeypatch, **attributes):
+    """Install a stand-in ``O4_Config_Utils`` for the sys.modules idiom."""
+    import sys
+    import types
+
+    values = {"cifp_data_path": "", "custom_scenery_dir": ""}
+    values.update(attributes)
+    module = types.SimpleNamespace(**values)
+    monkeypatch.setitem(sys.modules, "O4_Config_Utils", module)
+    return module
+
+
+def test_airport_pack_scan_selects_enabled_airport_packs(tmp_path):
+    root = str(tmp_path / "X-Plane 12")
+    _write_fake_custom_scenery(root)
+    dsf_paths = INSETS._airport_pack_dsf_paths(root, _PACK_BOX)
+    assert dsf_paths == [
+        os.path.join(
+            root, "Custom Scenery", "Test Airport", "Earth nav data",
+            _PACK_TILE_DSF,
+        )
+    ]
+
+
+def test_dsf_tile_enumeration_covers_corner_straddling_boxes():
+    assert INSETS._dsf_tile_coordinates_for_bounding_box(_PACK_BOX) == [
+        (35, -87)
+    ]
+    # A box across a tile corner touches all four tiles.
+    corner_box = (-87.01, 35.99, -86.99, 36.01)
+    assert sorted(
+        INSETS._dsf_tile_coordinates_for_bounding_box(corner_box)
+    ) == [(35, -88), (35, -87), (36, -88), (36, -87)]
+
+
+def test_xplane_root_resolution_prefers_cifp_then_custom_scenery(
+    tmp_path, monkeypatch
+):
+    root = str(tmp_path / "X-Plane 12")
+    os.makedirs(os.path.join(root, "Custom Scenery"))
+    cifp_directory = os.path.join(root, "Custom Data", "CIFP")
+    os.makedirs(cifp_directory)
+    # CIFP inside the install wins.
+    _configuration_module(monkeypatch, cifp_data_path=cifp_directory)
+    assert INSETS._xplane_root_for_package_footprints() == root
+    # A CIFP folder outside any install (no Custom Scenery two levels up,
+    # e.g. a Navigraph download) falls through to custom_scenery_dir.
+    navigraph_directory = str(tmp_path / "Navigraph" / "CIFP")
+    os.makedirs(navigraph_directory)
+    _configuration_module(
+        monkeypatch,
+        cifp_data_path=navigraph_directory,
+        custom_scenery_dir=os.path.join(root, "Custom Scenery"),
+    )
+    assert INSETS._xplane_root_for_package_footprints() == root
+    # No configuration at all: no root.
+    _configuration_module(monkeypatch)
+    assert INSETS._xplane_root_for_package_footprints() is None
+
+
+def test_package_footprints_read_pack_objects_and_clip_to_box(
+    tmp_path, monkeypatch
+):
+    from shapely.geometry import Polygon
+
+    from auto_patch import dsf_reader
+
+    root = str(tmp_path / "X-Plane 12")
+    _write_fake_custom_scenery(root)
+    _configuration_module(
+        monkeypatch, custom_scenery_dir=os.path.join(root, "Custom Scenery")
+    )
+    inside_ring = [
+        (-86.961, 35.920), (-86.959, 35.920),
+        (-86.959, 35.922), (-86.961, 35.922),
+    ]
+    outside_ring = [
+        (-87.500, 35.500), (-87.499, 35.500),
+        (-87.499, 35.501), (-87.500, 35.501),
+    ]
+    read_paths = []
+
+    def _fake_read(dsf_path, cache_dir=None, xplane_root=None):
+        read_paths.append((dsf_path, xplane_root))
+        return [
+            (inside_ring, [], "object"),
+            (outside_ring, [], "object"),
+            ([], [], "object"),  # degenerate ring: skipped, never raises
+        ]
+
+    monkeypatch.setattr(dsf_reader, "read_dsf_object_buildings", _fake_read)
+    footprints = INSETS.package_object_footprints(_PACK_BOX, {"code": "X"})
+    # Only the enabled airport pack was read, with the resolved root.
+    assert read_paths == [
+        (
+            os.path.join(
+                root, "Custom Scenery", "Test Airport", "Earth nav data",
+                _PACK_TILE_DSF,
+            ),
+            root,
+        )
+    ]
+    # Only the in-box footprint survives, as a plain lon/lat polygon.
+    assert len(footprints) == 1
+    assert footprints[0].equals(Polygon(inside_ring))
+
+
+def test_package_footprints_disabled_by_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("O4_INSET_PACKAGE_FOOTPRINTS", "0")
+
+    def _must_not_run():
+        raise AssertionError("root resolution ran despite the kill switch")
+
+    monkeypatch.setattr(
+        INSETS, "_xplane_root_for_package_footprints", _must_not_run
+    )
+    assert INSETS.package_object_footprints(_PACK_BOX, {"code": "X"}) == []
+
+
+def test_package_footprints_never_fail_the_fetch(tmp_path, monkeypatch):
+    # No configured root: empty, no exception.
+    _configuration_module(monkeypatch)
+    assert INSETS.package_object_footprints(_PACK_BOX, {"code": "X"}) == []
+    # Configured root but the DSF reader blows up: the pack is skipped.
+    from auto_patch import dsf_reader
+
+    root = str(tmp_path / "X-Plane 12")
+    _write_fake_custom_scenery(root)
+    _configuration_module(
+        monkeypatch, custom_scenery_dir=os.path.join(root, "Custom Scenery")
+    )
+
+    def _broken_read(dsf_path, cache_dir=None, xplane_root=None):
+        raise RuntimeError("corrupt DSF")
+
+    monkeypatch.setattr(dsf_reader, "read_dsf_object_buildings", _broken_read)
+    assert INSETS.package_object_footprints(_PACK_BOX, {"code": "X"}) == []
+    # Even the pack scan itself failing degrades to empty.
+    def _broken_scan(xplane_root, bounding_box_wgs84):
+        raise OSError("unreadable Custom Scenery")
+
+    monkeypatch.setattr(INSETS, "_airport_pack_dsf_paths", _broken_scan)
+    assert INSETS.package_object_footprints(_PACK_BOX, {"code": "X"}) == []
+
+
+# =====================================================================
+# Tile-level building-footprint prefetch (one extract pass per tile)
+# =====================================================================
+def _shapely_box(west, south, east, north):
+    from shapely.geometry import box as box_geometry
+
+    return box_geometry(west, south, east, north)
+
+
+def test_prefetch_loads_once_and_clips_per_airport(monkeypatch):
+    """Two airports' queries share ONE extract pass carrying BOTH boxes
+    (never their bounding rectangle), and each query gets only its own
+    box's footprints back."""
+    load_calls = {"count": 0, "boxes": None}
+    building_a = _shapely_box(0.40, 10.40, 0.45, 10.45)  # inside box A
+    building_b = _shapely_box(2.40, 12.40, 2.45, 12.45)  # inside box B
+    between = _shapely_box(1.50, 11.50, 1.55, 11.55)  # in neither box
+
+    def _fake_load(osm_layer, boxes):
+        load_calls["count"] += 1
+        load_calls["boxes"] = boxes
+        return True
+
+    monkeypatch.setattr(
+        INSETS, "_load_building_layer_from_extracts", _fake_load
+    )
+    monkeypatch.setattr(
+        INSETS,
+        "_building_footprint_polygons_from_layer",
+        lambda osm_layer: [building_a, building_b, between],
+    )
+    box_a = (0.0, 10.0, 1.0, 11.0)  # (west, south, east, north)
+    box_b = (2.0, 12.0, 3.0, 13.0)
+    prefetch = INSETS.TileBuildingFootprintPrefetch([box_a, box_b])
+    # Lazy: constructing the prefetch reads nothing.
+    assert load_calls["count"] == 0
+
+    assert prefetch.footprints_intersecting_box(box_a) == [building_a]
+    assert prefetch.footprints_intersecting_box(box_b) == [building_b]
+    # ONE extract pass served both airports...
+    assert load_calls["count"] == 1
+    # ...and it carried BOTH boxes, in the extracts backend's
+    # (south, west, north, east) order.
+    assert load_calls["boxes"] == [
+        (10.0, 0.0, 11.0, 1.0),
+        (12.0, 2.0, 13.0, 3.0),
+    ]
+
+
+def test_prefetch_uncovered_box_answers_none_without_loading(monkeypatch):
+    def _must_not_load(osm_layer, boxes):
+        raise AssertionError("an uncovered box must never trigger a load")
+
+    monkeypatch.setattr(
+        INSETS, "_load_building_layer_from_extracts", _must_not_load
+    )
+    prefetch = INSETS.TileBuildingFootprintPrefetch([(0.0, 10.0, 1.0, 11.0)])
+    assert prefetch.footprints_intersecting_box((5.0, 5.0, 6.0, 6.0)) is None
+
+
+def test_prefetch_failure_falls_back_to_per_box_path(monkeypatch):
+    """When the extracts cannot serve the batched request, the per-box
+    path (extracts, then Overpass) runs exactly as without a prefetch."""
+    import O4_OSM_Utils as OSM
+
+    monkeypatch.setattr(
+        INSETS,
+        "_load_building_layer_from_extracts",
+        lambda osm_layer, boxes: False,
+    )
+    per_box_queries = {"count": 0}
+
+    def _fake_overpass_query(statements, bbox, osm_layer):
+        per_box_queries["count"] += 1
+        return True
+
+    monkeypatch.setattr(OSM, "OSM_query_to_OSM_layer", _fake_overpass_query)
+    sentinel = [_shapely_box(0.4, 10.4, 0.5, 10.5)]
+    monkeypatch.setattr(
+        INSETS,
+        "_building_footprint_polygons_from_layer",
+        lambda osm_layer: list(sentinel),
+    )
+    box = (0.0, 10.0, 1.0, 11.0)
+    prefetch = INSETS.TileBuildingFootprintPrefetch([box])
+    result = INSETS.openstreetmap_building_footprints(
+        box, footprint_prefetch=prefetch
+    )
+    assert result == sentinel
+    assert per_box_queries["count"] == 1
+
+
+def test_prefetch_serves_and_per_box_path_never_runs(monkeypatch):
+    """A served prefetch answer bypasses the per-box fetch entirely."""
+    import O4_OSM_Utils as OSM
+
+    building = _shapely_box(0.40, 10.40, 0.45, 10.45)
+    monkeypatch.setattr(
+        INSETS,
+        "_load_building_layer_from_extracts",
+        lambda osm_layer, boxes: True,
+    )
+    monkeypatch.setattr(
+        INSETS,
+        "_building_footprint_polygons_from_layer",
+        lambda osm_layer: [building],
+    )
+
+    def _must_not_query(statements, bbox, osm_layer):
+        raise AssertionError("per-box Overpass must not run")
+
+    monkeypatch.setattr(OSM, "OSM_query_to_OSM_layer", _must_not_query)
+    box = (0.0, 10.0, 1.0, 11.0)
+    prefetch = INSETS.TileBuildingFootprintPrefetch([box])
+    result = INSETS.openstreetmap_building_footprints(
+        box, footprint_prefetch=prefetch
+    )
+    assert result == [building]
+
+
+def test_ensure_airport_insets_threads_one_prefetch_to_masking(
+    tmp_path, monkeypatch
+):
+    """The orchestration hands the SAME tile-level prefetch (carrying
+    every airport's box) to each airport's masking pass."""
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    seen_prefetches = []
+
+    def _fake_mask(
+        inset_path, bounding_box_wgs84, definition, footprint_prefetch=None
+    ):
+        seen_prefetches.append(footprint_prefetch)
+        return {"masked_pixel_count": 0, "footprint_count": 0}
+
+    monkeypatch.setattr(
+        INSETS, "mask_building_footprints_in_surface_model", _fake_mask
+    )
+
+    @INSETS.register_access_strategy("prefetch_thread_test_strategy")
+    class _Strategy:
+        def discover(self, definition, bounding_box_wgs84):
+            return [{"note": "covers"}]
+
+        def fetch(
+            self,
+            definition,
+            bounding_box_wgs84,
+            target_resolution_m,
+            destination_path,
+        ):
+            os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+            with open(destination_path, "wb") as handle:
+                handle.write(b"synthetic-surface-model")
+            return {"provider": definition["code"]}
+
+    try:
+        definition = {
+            "code": "PREFTEST",
+            "access_strategy": "prefetch_thread_test_strategy",
+            "role": INSETS.ROLE_AIRPORT_INSET,
+            "enabled": True,
+            "priority": 1.0,
+            INSETS.SURFACE_MODEL_BUILDING_MASKING: True,
+        }
+        boxes = {
+            "AAAA": (0.0, 10.0, 1.0, 11.0),
+            "BBBB": (2.0, 12.0, 3.0, 13.0),
+        }
+        INSETS.ensure_airport_insets(10, 0, boxes, [definition], 3.0)
+    finally:
+        INSETS.ACCESS_STRATEGIES.pop("prefetch_thread_test_strategy", None)
+
+    assert len(seen_prefetches) == 2
+    assert all(
+        isinstance(prefetch, INSETS.TileBuildingFootprintPrefetch)
+        for prefetch in seen_prefetches
+    )
+    # ONE shared prefetch, carrying both airports' boxes.
+    assert seen_prefetches[0] is seen_prefetches[1]
+    assert sorted(seen_prefetches[0]._boxes) == [
+        (0.0, 10.0, 1.0, 11.0),
+        (2.0, 12.0, 3.0, 13.0),
+    ]
