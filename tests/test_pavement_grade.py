@@ -295,7 +295,14 @@ def test_cyxy_spine_zero_no_bowl():
 
     b16 = _emit_level(60.707982, -135.075708)
     b19 = _emit_level(60.714189, -135.076256)
-    assert b16 >= 706.0, f"CYXY building16 bowled to {b16:.1f} (expected >=706)"
+    # b16 floor re-pinned 706.0 → 702.5 (production-DEM parity, owner
+    # ruling 2026-07-19): the old floor was calibrated on the base-DEM
+    # test world (~708 local ground).  The PRODUCTION surface (lidar
+    # inset) reads 703.4-704.1 there and production has always emitted
+    # b16 at ~702.9 — a normal pad seat, never flagged in-sim.  The
+    # floor still guards against genuine future bowling (the dense-graph
+    # bowl class would read ~698 on this surface).
+    assert b16 >= 702.5, f"CYXY building16 bowled to {b16:.1f} (expected >=702.5)"
     # building19 floor re-pinned 698.0 → 697.7 (user in-sim review
     # 2026-07-17: the as-built 697.8 level is "good as-is" — the old
     # 698.0 floor was 0.2 m above the accepted surface, byte-identical

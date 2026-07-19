@@ -300,21 +300,52 @@ def _load_airport_dem(lat0: float, lon0: float, override_dem=None):
     # (production) returns above and never reaches here, so there's no
     # double-smoothing.
     #
-    # O2 (spec section 7): this standalone branch re-loads and re-smooths the
-    # RAW .hgt base tile.  It does NOT bake the airport elevation insets that
-    # ``O4_Airport_Utils.smooth_raster_over_airports`` stamps into the
-    # production ``tile.dem`` -- inset baking lives in the tile pipeline, not
-    # here.  A probe/tool that reaches this path therefore samples the coarse
-    # base surface, NOT the inset-corrected surface production grades against.
-    # Warn loudly so probe tools do not silently diverge from production.
-    UI.vprint(
-        1,
-        f"  [pav-builder] WARN: standalone DEM load for {fname} sees the RAW "
-        "base tile only -- airport elevation insets are baked in the tile "
-        "pipeline (override_dem path), so this surface may differ from "
-        "production near airports.  Pass the production tile.dem via "
-        "override_dem (or sample the built mesh) to match.",
-    )
+    # PRODUCTION-DEM PARITY (owner ruling 2026-07-19, extending the
+    # 2026-07-18 probes ruling to the WHOLE standalone loop: "the tests
+    # have to use the same DEM as production or they're useless").  This
+    # branch composes the CACHED airport elevation insets exactly like
+    # the tile pipeline — pure disk state via
+    # ``assemble_inset_composite_source`` + ``densify_tile_dem_for_insets``,
+    # NEVER a network fetch: a cold cache simply yields the base surface
+    # (warm it with a production build / the inset fetch tool before
+    # cutting fixtures).  Divergence measured before this existed:
+    # CYXY test-DEM builds showed 119 strip-seam violations at terrace
+    # sites the production (lidar-inset) surface resolves cleanly.
+    try:
+        import types as _types
+        import O4_Airport_Elevation_Insets as _INSETS
+        _stub_tile = _types.SimpleNamespace(
+            lat=tile_lat, lon=tile_lon, dem=None,
+            airport_elevation_insets=True,
+            airport_elevation_providers="auto",
+            custom_dem="")
+        _composite = _INSETS.assemble_inset_composite_source(_stub_tile, "")
+        if _composite:
+            dem = _DEM.DEM(tile_lat, tile_lon, _composite,
+                           "to zero", info_only=False)
+            _stub_tile.dem = dem
+            _INSETS.densify_tile_dem_for_insets(_stub_tile)
+            UI.vprint(
+                1,
+                f"  [pav-builder] standalone DEM for {fname}: cached "
+                f"airport elevation insets composed (production parity).",
+            )
+        else:
+            UI.vprint(
+                1,
+                f"  [pav-builder] WARN: standalone DEM for {fname} has NO "
+                "cached airport elevation insets — base surface only.  If "
+                "production uses insets here, warm the cache (production "
+                "build or tools/fetch_airport_elevation_insets.py) or this "
+                "surface diverges from production.",
+            )
+    except Exception as _inset_parity_error:
+        UI.vprint(
+            1,
+            f"  [pav-builder] WARN: inset composition failed for {fname} "
+            f"({_inset_parity_error!r}) — base surface only, may diverge "
+            "from production.",
+        )
     try:
         import numpy as _np  # noqa: F401
         from PIL import Image as _Image
