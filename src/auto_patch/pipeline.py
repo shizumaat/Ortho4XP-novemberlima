@@ -970,6 +970,11 @@ def build_airport_pavement(icao: str, xplane_root: str,
         n_dsf_kept = 0
         n_dsf_dropped_overlay = 0
         n_dsf_dropped_far = 0
+        n_dsf_dropped_vehicle = 0
+        dsf_vehicle_area_m2 = 0.0
+        from .config import (
+            DSF_OBJECT_PAVEMENT_MIN_AIRCRAFT_WIDTH_M
+            as _OBJ_PAV_MIN_AIRCRAFT_WIDTH_M)
         # Third-party .pol pavement (tier-2 reader admissions, e.g.
         # ZDP_Library concrete at KPHX): real base pavement for
         # coverage purposes, but excluded from apron-merge semantics
@@ -1050,6 +1055,26 @@ def build_airport_pavement(icao: str, xplane_root: str,
                                 or py_min > apt_bbox_m[3]):
                             n_dsf_dropped_far += 1
                             continue
+                    # VEHICLE-PAVEMENT admission filter (owner direction
+                    # 2026-07-18): an OBJECT-sourced ground-paint patch
+                    # that is nowhere as wide as aircraft pavement
+                    # (erosion by half the minimum aircraft width leaves
+                    # nothing) is a painted service road / drainage
+                    # channel.  Drop it HERE — before the union — so it
+                    # never enters slicing/welding/solving and simply
+                    # rides the DEM.  See config
+                    # DSF_OBJECT_PAVEMENT_MIN_AIRCRAFT_WIDTH_M.
+                    if (_OBJ_PAV_MIN_AIRCRAFT_WIDTH_M > 0.0
+                            and def_path.lower().endswith(".obj")):
+                        try:
+                            if pm.buffer(
+                                    -0.5 * _OBJ_PAV_MIN_AIRCRAFT_WIDTH_M
+                                    ).is_empty:
+                                n_dsf_dropped_vehicle += 1
+                                dsf_vehicle_area_m2 += pm.area
+                                continue
+                        except _GEOM_EXC:
+                            pass
                     # Boundary gate: clip the DSF polygon to this
                     # airport's row-130 boundary so nothing outside it
                     # (a neighbouring airport's pavement) is pulled in.
@@ -1184,12 +1209,18 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     _collect_dsf_object_building_footprints(
                         dsf, xplane_root, _admit)
         if (n_dsf_kept or n_dsf_dropped_overlay
-                or n_dsf_dropped_far):
+                or n_dsf_dropped_far or n_dsf_dropped_vehicle):
             try:
                 msg = (f"  [pav-builder] {icao}: DSF pavement: "
                        f"{n_dsf_kept} kept, "
                        f"{n_dsf_dropped_overlay} dropped as overlay, "
                        f"{n_dsf_dropped_far} dropped as off-airport")
+                if n_dsf_dropped_vehicle:
+                    msg += (f", {n_dsf_dropped_vehicle} object patch(es) "
+                            f"({dsf_vehicle_area_m2 / 1e4:.1f} ha) dropped "
+                            f"as vehicle/drainage paint (nowhere "
+                            f">= {_OBJ_PAV_MIN_AIRCRAFT_WIDTH_M:.0f} m "
+                            f"wide - rides the DEM)")
                 UI.vprint(1, msg + ".")
             except _GEOM_EXC:
                 pass
@@ -6357,18 +6388,17 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     _projection_tile_lon = int(math.floor(layout.anchor[1]))
             except _GEOM_EXC:
                 _projection_dem = None
-        # T1b (board): DEFAULT FLIPPED OFF 2026-07-18 on owner order,
-        # pending an in-sim ruling. The LATE projection re-runs on the
-        # truly final geometry and absorbs the mid call's work — quiet
-        # A/B with the pass reorder below: OTHH 299.2 s (−64), CYXY
-        # 39.8 s (−22), SPJC 87.7 s (−13); all real law classes
-        # identical; the by-design break-region class grows (CYXY
-        # 239→400 pairs — solver-declared contained blends, not new
-        # violations). O4_FINAL_PROJECTION_MID=1 restores the historic
-        # double projection; the conformance passes below then run here
-        # against mid-projected values exactly as before.
+        # T1b (board): OWNER RULING 2026-07-18 late — default stays ON.
+        # The in-sim comparison showed no visual difference either way,
+        # and the owner chose the historic double projection over the
+        # measured wall saving (mid-off quiet A/B: OTHH 299.2 s vs
+        # 363.3, CYXY 39.8 s (−22), SPJC 87.7 s (−13); real law classes
+        # identical; by-design break-region pairs grow, CYXY 239→400).
+        # O4_FINAL_PROJECTION_MID=0 re-enables the experiment; the
+        # conformance passes below then defer past the LATE projection
+        # via the reorder machinery, which stays in place.
         _mid_projection_on = (
-            os.environ.get("O4_FINAL_PROJECTION_MID", "0") == "1")
+            os.environ.get("O4_FINAL_PROJECTION_MID", "1") == "1")
         if _mid_projection_on:
             final_grade_projection(layout, icao, dem=_projection_dem,
                                    tile_lat=_projection_tile_lat,
