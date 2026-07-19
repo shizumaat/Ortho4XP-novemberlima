@@ -1176,6 +1176,7 @@ def blend_cross_strip_seam_steps(strip_shapes, layout):
     re-levelled."""
     from collections import defaultdict
     from shapely.strtree import STRtree
+    from .crown import _point_in_seam_band
     from .layout import WELD_DONOR_ROLES
 
     donor_ext = [s.polygon.exterior for s in layout.shapes
@@ -1235,9 +1236,18 @@ def blend_cross_strip_seam_steps(strip_shapes, layout):
         node_strips.append({m[0] for m in group})
 
     def _anchored(node_index):
+        (vx, vy) = node_xy[node_index]
+        # TILE-SEAM protection (2026-07-18 SPLP regression): seam-band
+        # vertices are cross-tile terrain contracts — each tile builds
+        # independently with a different strip population, so a blended
+        # seam value diverges between neighbour tiles and emits a step
+        # AT the tile boundary (measured: two -78-side vertices moved
+        # +2.00 m against the immutable seam DEM).  Same predicate the
+        # crown and tile_cut use.
+        if _point_in_seam_band(layout, vx, vy):
+            return True
         if donor_tree is None:
             return False
-        (vx, vy) = node_xy[node_index]
         try:
             hit = donor_tree.query_nearest(Point(vx, vy), max_distance=0.05)
         except _GEOM_EXC:
