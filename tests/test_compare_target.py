@@ -214,15 +214,23 @@ SPJC_BASELINE_TOTAL = 736  # int(0.95 * 775) of 775 current (emitted)
 # RE-CUT 2026-07-17 (wave 3; see the SPJC note): graded_strip 64 → 75
 # (donor gate + heal re-deconflict reshaped the band pieces),
 # taxiway_clearance role GONE (rows removed, not floored at 0).
+# RE-CUT 2026-07-19 (seam-blend pipeline d2b9f42 + production-DEM
+# parity e91a166/v2): runway_clearance 5 → 2 (the tile-seam-band
+# anchor blend reshaped the runway-end pieces on this half) — the
+# stale floor of 4 was the "SPLP -77 drift" false alarm: matching was
+# PERFECT (every role target=out=matched, two consecutive builds
+# byte-identical), the fixture's own count had simply dropped below
+# the uncalibrated floor.  graded_strip 75 → 85.  Floors
+# = int(0.95 * current), runway EXACT, same convention.
 SPLP_BASELINE_TILE_M77: Dict[str, int] = {
     "apron":               9,   # of  10 current
     "building":            2,   # of   3 current
-    "graded_strip":       71,   # of  75 current
+    "graded_strip":       80,   # of  85 current
     "junction":           25,   # of  27 current
     "runway":              1,   # of   1 current (deterministic, exact)
-    "runway_clearance":    4,   # of   5 current
+    "runway_clearance":    1,   # of   2 current
 }
-SPLP_BASELINE_TILE_M77_TOTAL = 114  # int(0.95 * 121) of 121 current (emitted)
+SPLP_BASELINE_TILE_M77_TOTAL = 121  # int(0.95 * 128) of 128 current (emitted)
 
 # RE-CUT 2026-07-05 (curve-native global slice default; see the SPJC
 # re-cut note above) — floors = int(0.95 * current fixture count).

@@ -922,8 +922,15 @@ def build_airport_array(tile, dico_airports):
     return airport_array
 
 ################################################################################
-def smooth_raster_over_airports(tile, dico_airports, preserve_boundary=True):
+def smooth_raster_over_airports(
+    tile, dico_airports, preserve_boundary=True, write_alt_file=True
+):
     """Blur the working raster over each airport, THEN bake elevation insets.
+
+    ``write_alt_file=False`` skips the final ``.alt`` write into the tile
+    build directory: the standalone production-parity DEM loader
+    (``auto_patch.elevation._load_airport_dem``) runs this smoothing
+    in-memory for tests/probes and must not touch build state.
 
     ORDER CONTRACT (spec section 7 / item O1 -- verified 2026-07-11):
 
@@ -961,7 +968,8 @@ def smooth_raster_over_airports(tile, dico_airports, preserve_boundary=True):
         # Bake airport elevation insets into the raster the mesher reads
         # (see O4_Airport_Elevation_Insets G2 note); no-op when disabled.
         INSETS.bake_airport_insets_into_alt_dem(tile)
-        tile.dem.write_to_file(FNAMES.alt_file(tile))
+        if write_alt_file:
+            tile.dem.write_to_file(FNAMES.alt_file(tile))
         return
     if preserve_boundary:
         up = numpy.array(tile.dem.alt_dem[:max_pix])
@@ -1088,7 +1096,8 @@ def smooth_raster_over_airports(tile, dico_airports, preserve_boundary=True):
     # Bake airport elevation insets into the raster the mesher reads (see
     # O4_Airport_Elevation_Insets G2 note); no-op when the feature is off.
     INSETS.bake_airport_insets_into_alt_dem(tile)
-    tile.dem.write_to_file(FNAMES.alt_file(tile))
+    if write_alt_file:
+        tile.dem.write_to_file(FNAMES.alt_file(tile))
     return
 
 ################################################################################

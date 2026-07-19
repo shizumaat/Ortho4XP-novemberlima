@@ -261,124 +261,96 @@ def _load_airport_dem(lat0: float, lon0: float, override_dem=None):
     hem_ns = "S" if tile_lat < 0 else "N"
     hem_ew = "W" if tile_lon < 0 else "E"
     fname = f"{hem_ns}{abs(tile_lat):02d}{hem_ew}{abs(tile_lon):03d}{DEM_SUFFIX}"
-    # Ortho4XP lays out by 10° group.
-    group_lat = (tile_lat // 10) * 10
-    group_lon = (tile_lon // 10) * 10
-    group_dir = (f"{'+' if group_lat >= 0 else '-'}{abs(group_lat):02d}"
-                 f"{'+' if group_lon >= 0 else '-'}{abs(group_lon):03d}")
-    dem_path = os.path.join("Elevation_data", group_dir, fname)
-    try:
-        import O4_DEM_Utils as _DEM
-        if os.path.isfile(dem_path):
-            dem = _DEM.DEM(tile_lat, tile_lon, source=dem_path)
-        else:
-            # Download via Ortho4XP's default DEM source chain
-            # (SRTM/View — DEM.load_data calls ensure_elevation
-            # internally).  Same path Ortho4XP's main pipeline
-            # uses for the elevation data step.
-            try:
-                UI.vprint(1,
-                    f"  [pav-builder] {fname} missing; downloading "
-                    f"DEM tile via Ortho4XP elevation provider...")
-            except _GEOM_EXC:
-                pass
-            dem = _DEM.DEM(tile_lat, tile_lon)
-    except _GEOM_EXC as exc:
-        UI.vprint(1,
-            f"  [pav-builder] WARN: DEM load/download failed for "
-            f"{fname}: {exc}")
-        _DEM_CACHE[key] = None
-        return None
-    # Standalone path only (tests, tools/build_target_osm): Ortho4XP's
-    # ``smooth_raster_over_airports`` never ran on this freshly-loaded
-    # raw .hgt, so the airport-area altitudes are the noisy raw HGT
-    # pixels.  In production auto_patch instead receives ``tile.dem``
-    # via ``override_dem`` AFTER that smoothing (O4_Vector_Map runs it
-    # before generate_auto_patches), so this branch must replicate it
-    # to match — otherwise seam / cut-edge anchors pick raw-pixel spikes
-    # that the production smoothed surface doesn't have.  ``override_dem``
-    # (production) returns above and never reaches here, so there's no
-    # double-smoothing.
+    # Standalone path only (tests, tools/build_target_osm): production
+    # auto_patch receives Ortho4XP's fully-prepared ``tile.dem`` via
+    # ``override_dem`` (returned above), so this branch must produce the
+    # SAME surface for tests and lab probes.
     #
-    # PRODUCTION-DEM PARITY (owner ruling 2026-07-19, extending the
+    # PRODUCTION-DEM PARITY V2 (owner ruling 2026-07-19, extending the
     # 2026-07-18 probes ruling to the WHOLE standalone loop: "the tests
-    # have to use the same DEM as production or they're useless").  This
-    # branch composes the CACHED airport elevation insets exactly like
-    # the tile pipeline — pure disk state via
-    # ``assemble_inset_composite_source`` + ``densify_tile_dem_for_insets``,
-    # NEVER a network fetch: a cold cache simply yields the base surface
-    # (warm it with a production build / the inset fetch tool before
-    # cutting fixtures).  Divergence measured before this existed:
-    # CYXY test-DEM builds showed 119 strip-seam violations at terrace
-    # sites the production (lidar-inset) surface resolves cleanly.
+    # have to use the same DEM as production or they're useless").
+    # Parity v1 composed the cached insets but still REPLICATED the
+    # airport smoothing (whole-raster PIL blur) and skipped the
+    # elevation-level overlay bake — ~1 m residuals vs true production.
+    # Now this branch runs the production DEM-prep code itself
+    # (``O4_Vector_Map.compose_tile_dem_from_disk``: composite assembly,
+    # densification, tile-overlay bake, ``smooth_raster_over_airports``
+    # with the real per-airport masks/radii, post-smoothing inset bake)
+    # over a real ``CFG.Tile`` — pure disk state, NEVER a network fetch
+    # for insets/overlay/airports (the base raster still auto-downloads
+    # via the DEM provider chain, the legacy standalone behaviour).  A
+    # cold cache degrades to the base surface with a loud warning (warm
+    # it with a production build or
+    # ``tools/fetch_airport_elevation_insets.py`` before cutting
+    # fixtures).
     try:
-        import types as _types
-        import O4_Airport_Elevation_Insets as _INSETS
-        _stub_tile = _types.SimpleNamespace(
-            lat=tile_lat, lon=tile_lon, dem=None,
-            airport_elevation_insets=True,
-            airport_elevation_providers="auto",
-            custom_dem="")
-        _composite = _INSETS.assemble_inset_composite_source(_stub_tile, "")
-        if _composite:
-            dem = _DEM.DEM(tile_lat, tile_lon, _composite,
-                           "to zero", info_only=False)
-            _stub_tile.dem = dem
-            _INSETS.densify_tile_dem_for_insets(_stub_tile)
-            UI.vprint(
-                1,
-                f"  [pav-builder] standalone DEM for {fname}: cached "
-                f"airport elevation insets composed (production parity).",
+        import O4_Config_Utils as _CFG
+        import O4_File_Names as _FNAMES
+        import O4_OSM_Utils as _OSM
+        import O4_Vector_Map as _VMAP
+
+        _tile = _CFG.Tile(tile_lat, tile_lon, "")
+        try:
+            # Per-tile cfg when present, else global cfg — the same
+            # settings (apt_smoothing_pix, custom_dem, elevation_level,
+            # inset gates) production reads.  A missing cfg leaves the
+            # constructor defaults (headless tests).
+            _tile.read_from_config()
+        except Exception:
+            pass
+        _dico_airports = {}
+        _airports_cache = _FNAMES.osm_cached(tile_lat, tile_lon, "airports")
+        if os.path.isfile(_airports_cache):
+            # Cached-layer load (the existence gate above keeps this
+            # branch network-free) + the production airport-dictionary
+            # chain — the smoothing masks and per-airport radii need it.
+            _airport_layer = _OSM.OSM_layer()
+            _OSM.OSM_queries_to_OSM_layer(
+                _VMAP.AIRPORTS_QUERIES,
+                _airport_layer,
+                tile_lat,
+                tile_lon,
+                ["all"],
+                cached_suffix="airports",
             )
+            _dico_airports = _VMAP.build_airports_dico(_tile, _airport_layer)
         else:
             UI.vprint(
                 1,
                 f"  [pav-builder] WARN: standalone DEM for {fname} has NO "
+                "cached airports OSM layer — airport smoothing masks "
+                "unavailable, surface stays unsmoothed and diverges from "
+                "production.  Warm the cache with a production build.",
+            )
+        dem = _VMAP.compose_tile_dem_from_disk(
+            _tile, _dico_airports, write_alt_file=False
+        )
+        _baked_insets = getattr(dem, "airport_inset_provenance", None)
+        if _baked_insets:
+            UI.vprint(
+                1,
+                f"  [pav-builder] standalone DEM for {fname}: production "
+                f"DEM-prep composed from disk ({len(_baked_insets)} cached "
+                f"airport elevation inset(s), {len(_dico_airports)} "
+                "airport(s) smoothed).",
+            )
+        else:
+            UI.vprint(
+                1,
+                f"  [pav-builder] WARN: standalone DEM for {fname} baked NO "
                 "cached airport elevation insets — base surface only.  If "
                 "production uses insets here, warm the cache (production "
                 "build or tools/fetch_airport_elevation_insets.py) or this "
                 "surface diverges from production.",
             )
-    except Exception as _inset_parity_error:
+    except Exception as exc:
         UI.vprint(
             1,
-            f"  [pav-builder] WARN: inset composition failed for {fname} "
-            f"({_inset_parity_error!r}) — base surface only, may diverge "
-            "from production.",
+            f"  [pav-builder] WARN: production-parity DEM prep failed for "
+            f"{fname}: {exc!r}",
         )
-    try:
-        import numpy as _np  # noqa: F401
-        from PIL import Image as _Image
-        # apt_smoothing_pix: this standalone branch (override_dem is None)
-        # must blur with the SAME radius Ortho4XP used to smooth the
-        # tile.dem it normally passes in — otherwise a non-default config
-        # (e.g. apt_smoothing_pix=4) gives the standalone path a smoother
-        # surface than production, changing the grade (and grade-driven
-        # geometry).  Read the live O4_Config_Utils value, with an env
-        # override for tests/probes; default 8 only when no config is
-        # loaded.
-        import os as _os_pix
-        pix = None
-        _pix_env = _os_pix.environ.get("O4_APT_SMOOTHING_PIX")
-        if _pix_env is not None:
-            try:
-                pix = int(_pix_env)
-            except ValueError:
-                pix = None
-        if pix is None:
-            try:
-                import O4_Config_Utils as _CFG_pix
-                pix = int(getattr(_CFG_pix, "apt_smoothing_pix", 8))
-            except Exception:
-                pix = 8
-        ny, nx = dem.alt_dem.shape
-        mask = _Image.new("L", (nx, ny), 255)
-        dem.alt_dem = _DEM.smoothen(
-            dem.alt_dem, pix, mask, preserve_boundary=True
-        ).astype(dem.alt_dem.dtype)
-    except _GEOM_EXC as exc:
-        UI.vprint(1, f"  [pav-builder] WARN: apt DEM smoothing skipped "
-                      f"for {fname}: {exc}")
+        _DEM_CACHE[key] = None
+        return None
     _DEM_CACHE[key] = dem
     return dem
 

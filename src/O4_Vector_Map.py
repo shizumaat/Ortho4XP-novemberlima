@@ -446,15 +446,7 @@ def load_airports_and_prepare_dem(tile):
     # build time, so without this the roads would arrive too late on a
     # freshly built tile.)
     start_background_osm_prefetch(tile)
-    dico_airports = {}
-    APT.discover_airport_names(airport_layer, dico_airports)
-    APT.attach_surfaces_to_airports(airport_layer, dico_airports)
-    APT.sort_and_reconstruct_runways(tile, airport_layer, dico_airports)
-    APT.discard_unwanted_airports(tile, dico_airports)
-    APT.build_hangar_areas(tile, airport_layer, dico_airports)
-    APT.build_apron_areas(tile, airport_layer, dico_airports)
-    APT.build_taxiway_areas(tile, airport_layer, dico_airports)
-    APT.update_airport_boundaries(tile, dico_airports)
+    dico_airports = build_airports_dico(tile, airport_layer)
     APT.list_airports_and_runways(dico_airports)
     UI.vprint(1, "   Loading elevation data and smoothing it over airports.")
     # Airport elevation insets (spec section 3.3): fetch meter-class public
@@ -470,6 +462,45 @@ def load_airports_and_prepare_dem(tile):
     # approach-visibility ladder). No-op -- and a byte-identical build --
     # on the default "auto".
     ELEVATION_LEVEL.ensure_tile_overlay(tile, dico_airports)
+    compose_tile_dem_from_disk(tile, dico_airports)
+    return (airport_layer, dico_airports)
+
+
+################################################################################
+def build_airports_dico(tile, airport_layer):
+    """The tile build's airport-dictionary chain, exactly as
+    ``load_airports_and_prepare_dem`` runs it (discovery, surfaces,
+    runway reconstruction, discards, hangar/apron/taxiway areas,
+    boundaries).  Factored out (2026-07-19, production-DEM parity v2)
+    so the standalone DEM loader in ``auto_patch.elevation`` can build
+    the same ``dico_airports`` the production airport smoothing uses.
+    Pure compute over the already-loaded layer — no network."""
+    dico_airports = {}
+    APT.discover_airport_names(airport_layer, dico_airports)
+    APT.attach_surfaces_to_airports(airport_layer, dico_airports)
+    APT.sort_and_reconstruct_runways(tile, airport_layer, dico_airports)
+    APT.discard_unwanted_airports(tile, dico_airports)
+    APT.build_hangar_areas(tile, airport_layer, dico_airports)
+    APT.build_apron_areas(tile, airport_layer, dico_airports)
+    APT.build_taxiway_areas(tile, airport_layer, dico_airports)
+    APT.update_airport_boundaries(tile, dico_airports)
+    return dico_airports
+
+
+################################################################################
+def compose_tile_dem_from_disk(tile, dico_airports, write_alt_file=True):
+    """DEM construction from CACHED disk state: composite assembly,
+    densification, tile-overlay bake, airport smoothing + inset bake.
+
+    This is the tail of the production DEM prelude, after the two
+    network ``ensure_*`` fetch steps — everything here reads only what
+    is already on disk.  Factored out (2026-07-19, owner ruling: "the
+    tests have to use the same DEM as production or they're useless")
+    so the standalone loader ``auto_patch.elevation._load_airport_dem``
+    runs the IDENTICAL code over the cached state instead of a
+    replication.  ``write_alt_file=False`` keeps the result in memory
+    (tests/probes must not write tile build state).  Sets ``tile.dem``
+    and returns it."""
     dem_source = INSETS.assemble_inset_composite_source(tile, tile.custom_dem)
     tile.dem = DEM.DEM(
         tile.lat,
@@ -486,8 +517,10 @@ def load_airports_and_prepare_dem(tile):
     # The tile-wide overlay is base terrain: bake it BEFORE the airport
     # smoothing pass (airport insets keep baking last, after smoothing).
     ELEVATION_LEVEL.bake_tile_overlay_into_alt_dem(tile)
-    APT.smooth_raster_over_airports(tile, dico_airports)
-    return (airport_layer, dico_airports)
+    APT.smooth_raster_over_airports(
+        tile, dico_airports, write_alt_file=write_alt_file
+    )
+    return tile.dem
 
 
 ################################################################################
