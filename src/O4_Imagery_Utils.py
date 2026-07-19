@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from math import ceil, log, pi, tan
 from pathlib import Path
 
@@ -31,18 +32,20 @@ try:
     import O4_Custom_URL as URL
 
     has_URL = True
-except:
+except ImportError:
     try:
-        # module loaded from a subdirectory of Extent for extent creation
-        sys.path.append(os.path.join("../../Providers"))
+        # Providers/ is only on sys.path when launched via Ortho4XP.py;
+        # other entry points (tests, tools, extent creation) land here.
+        sys.path.append(FNAMES.Provider_dir)
         import O4_Custom_URL as URL
 
         has_URL = True
-    except:
+    except Exception:
         print(
             "ERROR: Providers/O4_Custom_URL.py contains invalid code.",
             "The corresponding providers won't probably work.",
         )
+        traceback.print_exc()
 
 http_timeout = 10
 check_tms_response = False
