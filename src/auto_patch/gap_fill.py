@@ -60,6 +60,7 @@ _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 from .config import (
     ADJACENT_GROUND_LIP_WIDTH_M,
     APRON_SHOULDER_WIDTH_M,
+    GAP_FILL_INTERIOR_FLOOR_DEPTH_M,
     GAP_FILL_INTERIOR_RINGS_ENABLED,
     GAP_FILL_MAX_WIDTH_M,
     GAP_FILL_MIN_AREA_M2,
@@ -97,6 +98,9 @@ from .geom_safe import min_rotated_rect
 __all__ = ["emit_gap_fill_spines", "construct_gap_fill_presolve"]
 
 _GAP_FILL_REF = "gap_fill_spine"
+# Pit-fill patches from the enclosed-pocket interior depth floor
+# (``emit_gap_interior_floor``, owner ruling 2026-07-19).
+_GAP_PIT_FLOOR_REF = "gap_pit_floor"
 # Open-frontage corridor faces carry their OWN ref so they are
 # distinguishable from enclosed-gap faces and from the legacy
 # ``adjacent_ground`` bands they supersede (the DEM-free tear sentinel
@@ -1973,6 +1977,168 @@ def emit_gap_fill_spines(layout, dem, tile_lat, tile_lon,
                      f"{len(_grings_total)} chain(s), "
                      f"{sum(len(_gp) for _gp, _ga in _grings_total)} "
                      f"node(s) (gate O4_GAP_FILL_INTERIOR_RINGS).")
+    return emitted
+
+
+def emit_gap_interior_floor(layout, dem, tile_lat, tile_lon) -> int:
+    """Clamp enclosed-pocket interiors to a drainage-depth floor (owner
+    ruling 2026-07-19; gate ``GAP_FILL_INTERIOR_FLOOR_DEPTH_M`` > 0).
+
+    Runs AFTER ``emit_gap_fill_spines``: a treated gap is covered by its
+    emitted ``graded_strip`` face and skips this pass by coverage; the
+    pass targets the pockets the emitter lawfully SKIPPED (wider than
+    ``GAP_FILL_MAX_WIDTH_M``, foreign shape inside, parent straddle),
+    whose interiors ride raw DEM.  For each such pocket:
+
+    * lip = median solved pavement value at the pocket's own ring
+      vertices (the enclosing pavement edge);
+    * floor = lip − ``GAP_FILL_INTERIOR_FLOOR_DEPTH_M``;
+    * grid-sample the DEM inside the pocket; union the violating cells
+      (DEM < floor) into pit regions, clear of every existing shape;
+    * emit each pit region as a FLAT ``graded_strip`` patch at the floor
+      value (ref ``gap_pit_floor``).
+
+    No-op economy: a pocket whose terrain never drops below the floor
+    emits nothing — large infields keep following terrain, down to
+    drainage depth.  Mutates ``layout.shapes``; returns the number of
+    pit patches emitted.
+    """
+    depth = GAP_FILL_INTERIOR_FLOOR_DEPTH_M
+    if depth <= 0.0 or dem is None:
+        return 0
+    airside = _airside_shapes(layout)
+    if len(airside) < 2:
+        return 0
+    try:
+        union = unary_union([s.polygon for s in airside])
+    except _GEOM_EXC:
+        return 0
+    if union.is_empty:
+        return 0
+    comps = ([union] if union.geom_type == "Polygon"
+             else [g for g in getattr(union, "geoms", [])
+                   if g.geom_type == "Polygon"])
+
+    # Solved pavement value at every airside ring vertex (mm key).
+    registry: dict[tuple[int, int], float] = {}
+    for s in airside:
+        na = s.node_altitudes
+        try:
+            coords = list(s.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        for i, (vx, vy) in enumerate(coords):
+            if na and i < len(na) and na[i] is not None:
+                registry.setdefault(_key(vx, vy), float(na[i]))
+            elif not na and s.altitude is not None:
+                registry.setdefault(_key(vx, vy), float(s.altitude))
+
+    # Every OTHER shape (emitted gap faces, bands, groundside, parents,
+    # …): coverage test + keep-clear region for the pit patches.
+    airside_ids = {id(s) for s in airside}
+    other_polys = [s.polygon for s in layout.shapes
+                   if id(s) not in airside_ids
+                   and s.polygon is not None and not s.polygon.is_empty
+                   and s.polygon.geom_type in ("Polygon", "MultiPolygon")]
+
+    from .elevation import _sample_dem
+
+    def _dem_at(px: float, py: float):
+        lat, lon = layout.m_to_ll(px, py)
+        return _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+
+    emitted = 0
+    for comp in comps:
+        for interior in comp.interiors:
+            try:
+                gap_poly = Polygon(list(interior.coords))
+            except _GEOM_EXC:
+                continue
+            if (gap_poly.is_empty or not gap_poly.is_valid
+                    or gap_poly.area < GAP_FILL_MIN_AREA_M2):
+                continue
+            # Treated gaps are covered by their emitted faces — skip any
+            # pocket mostly covered by existing non-airside shapes.
+            try:
+                covered = sum(
+                    gap_poly.intersection(op).area
+                    for op in other_polys
+                    if op.intersects(gap_poly))
+            except _GEOM_EXC:
+                covered = 0.0
+            if covered >= 0.4 * gap_poly.area:
+                continue
+            # Pavement lip at THIS pocket's ring.
+            lip_values = [registry[k] for k in
+                          (_key(vx, vy) for vx, vy in interior.coords)
+                          if k in registry]
+            if len(lip_values) < 3:
+                _c = gap_poly.centroid
+                UI.vprint(1, f"  [gap-floor] pocket at ({_c.x:.0f},"
+                             f"{_c.y:.0f}) has no pavement values on "
+                             f"its ring — skipped.")
+                continue
+            lip_values.sort()
+            lip = lip_values[len(lip_values) // 2]
+            floor = lip - depth
+            # Grid-sample the interior for violations.
+            minx, miny, maxx, maxy = gap_poly.bounds
+            span = max(maxx - minx, maxy - miny)
+            cell = max(8.0, span / 150.0)
+            violating_cells = []
+            y = miny
+            while y < maxy:
+                x = minx
+                while x < maxx:
+                    cx, cy = x + 0.5 * cell, y + 0.5 * cell
+                    if gap_poly.contains(Point(cx, cy)):
+                        alt = _dem_at(cx, cy)
+                        if alt is not None and alt < floor:
+                            violating_cells.append(Polygon([
+                                (x, y), (x + cell, y),
+                                (x + cell, y + cell), (x, y + cell)]))
+                    x += cell
+                y += cell
+            if not violating_cells:
+                continue
+            try:
+                pit_region = unary_union(violating_cells).simplify(
+                    1.0, preserve_topology=True)
+                pit_region = pit_region.intersection(
+                    gap_poly.buffer(-0.5))
+                for op in other_polys:
+                    if op.intersects(pit_region):
+                        pit_region = pit_region.difference(
+                            op.buffer(0.25))
+            except _GEOM_EXC:
+                continue
+            parts = ([pit_region] if pit_region.geom_type == "Polygon"
+                     else [g for g in getattr(pit_region, "geoms", [])
+                           if g.geom_type == "Polygon"])
+            n_pocket = 0
+            pocket_area = 0.0
+            for part in parts:
+                if part.is_empty or part.area < 25.0:
+                    continue
+                ring = _open_coords(part)
+                if len(ring) < 3:
+                    continue
+                alts = [round(floor, 2)] * len(ring)
+                layout.shapes.append(BuiltShape(
+                    polygon=part, role=ROLE_GRADED_STRIP,
+                    ref=_GAP_PIT_FLOOR_REF,
+                    node_altitudes=alts + [alts[0]]))
+                n_pocket += 1
+                pocket_area += part.area
+            if n_pocket:
+                emitted += n_pocket
+                _c = gap_poly.centroid
+                UI.vprint(1,
+                    f"  [gap-floor] pocket at ({_c.x:.0f},{_c.y:.0f}) "
+                    f"area={gap_poly.area:.0f} m2: {n_pocket} pit "
+                    f"patch(es) totalling {pocket_area:.0f} m2 clamped "
+                    f"to floor {floor:.1f} m (lip {lip:.1f} - "
+                    f"{depth:.1f}).")
     return emitted
 
 

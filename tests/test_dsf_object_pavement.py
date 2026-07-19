@@ -595,3 +595,37 @@ class TestIsVehiclePavementPatch:
 
         assert object_footprints.is_vehicle_pavement_patch(
             ExplodingPolygon(), self.WIDTH_M, self.RATIO) is False
+
+
+class TestAbuttingContactRatio:
+    """``object_footprints.abutting_contact_ratio`` — the edge-contact
+    measure that readmits painted taxiway SHOULDERS (which fail the
+    width test exactly like roads) into the pavement union."""
+
+    def test_abutting_shoulder_scores_about_one(self):
+        taxiway = Polygon([(0, 0), (400, 0), (400, 23), (0, 23)])
+        # 6 m shoulder sharing the taxiway's full north edge.
+        shoulder = Polygon([(0, 23), (400, 23), (400, 29), (0, 29)])
+        ratio = object_footprints.abutting_contact_ratio(
+            shoulder, [taxiway])
+        assert 0.9 <= ratio <= 1.2
+
+    def test_sandwiched_strip_scores_about_two(self):
+        south = Polygon([(0, 0), (400, 0), (400, 23), (0, 23)])
+        north = Polygon([(0, 29), (400, 29), (400, 60), (0, 60)])
+        strip = Polygon([(0, 23), (400, 23), (400, 29), (0, 29)])
+        ratio = object_footprints.abutting_contact_ratio(
+            strip, [south, north])
+        assert ratio >= 1.8
+
+    def test_offset_drainage_or_road_scores_low(self):
+        taxiway = Polygon([(0, 0), (400, 0), (400, 23), (0, 23)])
+        # Strip 3 m clear of the pavement edge (grass verge between).
+        offset = Polygon([(0, 26), (400, 26), (400, 32), (0, 32)])
+        ratio = object_footprints.abutting_contact_ratio(
+            offset, [taxiway])
+        assert ratio < 0.1
+
+    def test_no_neighbours_scores_zero(self):
+        strip = Polygon([(0, 0), (400, 0), (400, 6), (0, 6)])
+        assert object_footprints.abutting_contact_ratio(strip, []) == 0.0

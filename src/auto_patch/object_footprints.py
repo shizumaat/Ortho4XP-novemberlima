@@ -313,6 +313,39 @@ def is_vehicle_pavement_patch(
         return False
 
 
+def abutting_contact_ratio(
+    patch_polygon_metres,
+    neighbour_polygons_metres,
+    contact_tolerance_metres: float = 0.5,
+) -> float:
+    """Fraction of a patch's LONG side in edge-contact with neighbour
+    pavement: shared-boundary length / half the patch perimeter.
+
+    A taxiway SHOULDER abuts the pavement it serves for its whole run
+    (ratio ~1.0 one-sided, ~2.0 sandwiched between two pavements); a
+    perimeter road or an offset strip only meets pavement at crossings
+    (measured HECA: roads <= 0.32, abutting strips >= 0.58 — a clean
+    gap).  Used by the pipeline's vehicle-pavement admission filter to
+    READMIT narrow object patches that are really shoulders.  Geometry
+    errors return 0.0 (no readmission claim).
+    """
+    try:
+        exterior = patch_polygon_metres.exterior
+        half_perimeter = 0.5 * exterior.length
+        if half_perimeter <= 0.0:
+            return 0.0
+        contact_length = 0.0
+        for neighbour in neighbour_polygons_metres:
+            try:
+                contact_length += exterior.intersection(
+                    neighbour.buffer(contact_tolerance_metres)).length
+            except (ValueError, _GEOS_EXCEPTION):
+                continue
+        return contact_length / half_perimeter
+    except (ValueError, _GEOS_EXCEPTION):
+        return 0.0
+
+
 def structure_ring(
     structure: Structure,
     geometry_by_resource: dict[str, ObjectGeometry],

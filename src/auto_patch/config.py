@@ -1879,6 +1879,21 @@ DSF_OBJECT_PAVEMENT_MIN_AIRCRAFT_WIDTH_M = float(
     _os.environ.get("O4_DSF_OBJECT_PAVEMENT_MIN_AIRCRAFT_WIDTH_M", "11"))
 DSF_OBJECT_PAVEMENT_OPENING_RATIO = float(
     _os.environ.get("O4_DSF_OBJECT_PAVEMENT_OPENING_RATIO", "0.35"))
+# SHOULDER readmission (owner in-sim report 2026-07-18, HECA round 2):
+# ground-paint packs also paint taxiway SHOULDERS as narrow strips, and
+# the width test alone reads them as vehicle pavement — dropped, they
+# ride the DEM and mint sharp protrusions against the graded taxiway
+# beside them.  A shoulder is distinguishable from a road by EDGE
+# CONTACT: it abuts the pavement it serves for its whole run, so its
+# shared-boundary length is ~its own long side (ratio ~1.0, ~2.0 when
+# sandwiched between two pavements), while a road/offset strip only
+# meets pavement at crossings (measured HECA: roads <= 0.32, abutting
+# strips >= 0.58).  A vehicle-classified patch with contact ratio at or
+# above this threshold is READMITTED to the pavement union (absorbed as
+# airside shoulder; its grade is anchored by the pavement it abuts).
+# See object_footprints.abutting_contact_ratio.
+DSF_OBJECT_PAVEMENT_SHOULDER_CONTACT_RATIO = float(
+    _os.environ.get("O4_DSF_OBJECT_PAVEMENT_SHOULDER_CONTACT_RATIO", "0.5"))
 
 # ── CONNECTOR pre-filter (defect 2026-07-17, UK payware co-baked airports) ──
 # A scenery pack that bakes a whole airport as many ``.obj`` files sharing
@@ -2854,6 +2869,21 @@ GAP_FILL_SPINE_STEP_M = 15.0
 # legitimately ungoverned terrain).
 GAP_FILL_MAX_WIDTH_M = 175.0
 GAP_FILL_MIN_AREA_M2 = 100.0
+# ENCLOSED-POCKET INTERIOR DEPTH FLOOR (owner ruling 2026-07-19, HECA
+# round 2 "steep pits in enclosed pavement areas"): pockets the gap-fill
+# emitter SKIPS (wider than GAP_FILL_MAX_WIDTH_M, foreign shape inside,
+# parent straddle) ride raw DEM — and at HECA the DEM inside enclosed
+# infields carries surface-model pits down to 13.9 m below the pavement
+# lip (measured survey 2026-07-19: 131 pockets, worst -13.88 m over a
+# 3.4 km2 infield).  Flat desert infields do not genuinely drop that
+# far; these are artifacts.  ``emit_gap_interior_floor`` clamps pocket
+# interiors to no lower than (pavement-lip median - this depth),
+# emitting flat pit-fill patches ONLY where the DEM actually violates
+# the floor (no-op economy: lawful terrain rides the ground untouched,
+# so the owner's "large infields follow terrain" ruling holds down to
+# drainage depth).  0 disables the pass entirely.
+GAP_FILL_INTERIOR_FLOOR_DEPTH_M = float(
+    _os.environ.get("O4_GAP_FILL_INTERIOR_FLOOR_DEPTH_M", "2.5"))
 
 # GAP INTERIOR RINGS (ratified design 2026-07-11, STATUS commit
 # dde6d3c; REVISED per Noah's in-sim round-8 ruling): a single mid-gap

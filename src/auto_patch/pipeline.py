@@ -976,8 +976,16 @@ def build_airport_pavement(icao: str, xplane_root: str,
             DSF_OBJECT_PAVEMENT_MIN_AIRCRAFT_WIDTH_M
             as _OBJ_PAV_MIN_AIRCRAFT_WIDTH_M,
             DSF_OBJECT_PAVEMENT_OPENING_RATIO
-            as _OBJ_PAV_OPENING_RATIO)
+            as _OBJ_PAV_OPENING_RATIO,
+            DSF_OBJECT_PAVEMENT_SHOULDER_CONTACT_RATIO
+            as _OBJ_PAV_SHOULDER_CONTACT)
         from . import object_footprints as _OBJ_FOOTPRINTS
+        # Vehicle-classified object patches are DEFERRED, not dropped:
+        # after the sweep (when every kept pavement polygon exists) the
+        # shoulder pass readmits the ones in edge-contact with kept
+        # pavement — a painted taxiway shoulder fails the width test
+        # exactly like a road, and only contact separates them.
+        deferred_vehicle_patches: List[Tuple[Polygon, str]] = []
         # Third-party .pol pavement (tier-2 reader admissions, e.g.
         # ZDP_Library concrete at KPHX): real base pavement for
         # coverage purposes, but excluded from apron-merge semantics
@@ -1077,8 +1085,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
                             and _OBJ_FOOTPRINTS.is_vehicle_pavement_patch(
                                 pm, _OBJ_PAV_MIN_AIRCRAFT_WIDTH_M,
                                 _OBJ_PAV_OPENING_RATIO)):
-                        n_dsf_dropped_vehicle += 1
-                        dsf_vehicle_area_m2 += pm.area
+                        deferred_vehicle_patches.append((pm, def_path))
                         continue
                     # Boundary gate: clip the DSF polygon to this
                     # airport's row-130 boundary so nothing outside it
@@ -1213,6 +1220,38 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 n_dsf_object_buildings += \
                     _collect_dsf_object_building_footprints(
                         dsf, xplane_root, _admit)
+        # ── SHOULDER readmission (owner in-sim report 2026-07-18) ──
+        # Runs after the whole sweep so the contact test sees EVERY
+        # kept pavement polygon (apt.dat row-110 + .pol + wide object
+        # sheets).  A vehicle-classified strip in edge-contact with
+        # kept pavement for at least half its long side is a painted
+        # taxiway shoulder — absorb it (third-party marked like every
+        # object patch); the rest stay dropped and ride the DEM.
+        n_dsf_shoulder_readmitted = 0
+        if deferred_vehicle_patches:
+            try:
+                from shapely.strtree import STRtree
+                _shoulder_tree = STRtree(pav_polys)
+                for _vp, _vp_def in deferred_vehicle_patches:
+                    try:
+                        _near = [pav_polys[i] for i in
+                                 _shoulder_tree.query(_vp)]
+                    except _GEOM_EXC:
+                        _near = list(pav_polys)
+                    _contact = _OBJ_FOOTPRINTS.abutting_contact_ratio(
+                        _vp, _near)
+                    if _contact >= _OBJ_PAV_SHOULDER_CONTACT:
+                        pav_polys.append(_vp)
+                        third_party_pav_ids.add(id(_vp))
+                        n_dsf_kept += 1
+                        n_dsf_shoulder_readmitted += 1
+                    else:
+                        n_dsf_dropped_vehicle += 1
+                        dsf_vehicle_area_m2 += _vp.area
+            except _GEOM_EXC:
+                for _vp, _vp_def in deferred_vehicle_patches:
+                    n_dsf_dropped_vehicle += 1
+                    dsf_vehicle_area_m2 += _vp.area
         if (n_dsf_kept or n_dsf_dropped_overlay
                 or n_dsf_dropped_far or n_dsf_dropped_vehicle):
             try:
@@ -1226,6 +1265,9 @@ def build_airport_pavement(icao: str, xplane_root: str,
                             f"as vehicle/drainage paint (nowhere "
                             f">= {_OBJ_PAV_MIN_AIRCRAFT_WIDTH_M:.0f} m "
                             f"wide - rides the DEM)")
+                if n_dsf_shoulder_readmitted:
+                    msg += (f", {n_dsf_shoulder_readmitted} narrow "
+                            f"patch(es) readmitted as abutting shoulders")
                 UI.vprint(1, msg + ".")
             except _GEOM_EXC:
                 pass
@@ -6597,6 +6639,28 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     f"spine face(s) (enclosed between-pavement ground).")
         except _GEOM_EXC as exc:
             UI.vprint(1, f"  [pav-builder] {icao}: gap-fill spine "
+                         f"emission FAILED: {exc!r}")
+
+        # ── ENCLOSED-POCKET INTERIOR DEPTH FLOOR (owner ruling
+        # 2026-07-19) ───────────────────────────────────────────────────
+        # Pockets the gap-fill emitter SKIPPED (over-width, foreign
+        # shape, parent straddle) ride raw DEM; clamp their interiors to
+        # (pavement lip − GAP_FILL_INTERIOR_FLOOR_DEPTH_M), emitting
+        # flat pit-fill patches only where the DEM actually violates.
+        # ORDERING: after the spine emission (treated gaps are covered
+        # by their faces and skip by coverage) and before the
+        # adjacent-ground bands (pit patches join the static union).
+        try:
+            from .gap_fill import emit_gap_interior_floor
+            n_pit = emit_gap_interior_floor(
+                layout, _projection_dem,
+                _projection_tile_lat, _projection_tile_lon)
+            if n_pit:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: emitted {n_pit} enclosed-"
+                    f"pocket pit-floor patch(es).")
+        except _GEOM_EXC as exc:
+            UI.vprint(1, f"  [pav-builder] {icao}: pocket pit-floor "
                          f"emission FAILED: {exc!r}")
 
         # ── Adjacent-ground LATERAL grade law (slice 3, gate
