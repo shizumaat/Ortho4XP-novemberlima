@@ -179,22 +179,49 @@ class TestSidecarUpgradeDetection:
             lambda lat, lon, icao, code: str(sidecar),
         )
 
-    def test_pre_residual_sidecar_reads_stale(self, tmp_path, monkeypatch):
+    def test_gate_on_pre_residual_sidecar_reads_stale(
+            self, tmp_path, monkeypatch):
         self._write_sidecar(
             tmp_path, monkeypatch,
             {INSETS.SURFACE_MODEL_BUILDING_MASKING: {
                 "masked_pixel_count": 10}},
         )
-        assert INSETS._sidecar_lacks_residual_masking(0, 0, "TEST", "P")
+        assert INSETS._sidecar_residual_masking_mismatch(
+            0, 0, "TEST", "P", True)
 
-    def test_residual_sidecar_reads_current(self, tmp_path, monkeypatch):
+    def test_gate_on_residual_sidecar_reads_current(
+            self, tmp_path, monkeypatch):
         self._write_sidecar(
             tmp_path, monkeypatch,
             {INSETS.SURFACE_MODEL_BUILDING_MASKING: {
                 "masked_pixel_count": 10,
                 "residual_masked_pixel_count": 0}},
         )
-        assert not INSETS._sidecar_lacks_residual_masking(0, 0, "TEST", "P")
+        assert not INSETS._sidecar_residual_masking_mismatch(
+            0, 0, "TEST", "P", True)
+
+    def test_gate_off_damaged_sidecar_reads_stale(
+            self, tmp_path, monkeypatch):
+        # The 2026-07-18 live-regression caches: residual pixels were
+        # masked but the gate is now OFF — must regenerate clean.
+        self._write_sidecar(
+            tmp_path, monkeypatch,
+            {INSETS.SURFACE_MODEL_BUILDING_MASKING: {
+                "masked_pixel_count": 10,
+                "residual_masked_pixel_count": 12345}},
+        )
+        assert INSETS._sidecar_residual_masking_mismatch(
+            0, 0, "TEST", "P", False)
+
+    def test_gate_off_clean_sidecar_reads_current(
+            self, tmp_path, monkeypatch):
+        self._write_sidecar(
+            tmp_path, monkeypatch,
+            {INSETS.SURFACE_MODEL_BUILDING_MASKING: {
+                "masked_pixel_count": 10}},
+        )
+        assert not INSETS._sidecar_residual_masking_mismatch(
+            0, 0, "TEST", "P", False)
 
     def test_missing_sidecar_reads_current(self, tmp_path, monkeypatch):
         import O4_File_Names as FNAMES
@@ -204,4 +231,5 @@ class TestSidecarUpgradeDetection:
             "airport_inset_provenance",
             lambda lat, lon, icao, code: str(tmp_path / "absent.json"),
         )
-        assert not INSETS._sidecar_lacks_residual_masking(0, 0, "TEST", "P")
+        assert not INSETS._sidecar_residual_masking_mismatch(
+            0, 0, "TEST", "P", True)

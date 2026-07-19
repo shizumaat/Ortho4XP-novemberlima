@@ -259,10 +259,18 @@ def initialize_elevation_providers_dict(providers_directory=None):
         definition[SURFACE_MODEL_BUILDING_MASKING] = _parse_boolean(
             definition.get(SURFACE_MODEL_BUILDING_MASKING, "False")
         )
-        # Residual structure masking rides the same pass (default ON for
-        # surface models; an .elv may set residual_structure_masking=False).
+        # Residual structure masking rides the same pass.  DEFAULT OFF
+        # (2026-07-18 late: live SPJC regression — the airfield itself
+        # fits the estimator's bite profile, a flat plateau with lower
+        # coastal land in the wide window and a scarp at its edge, and
+        # sea reads as exact 0.0 ground; the mask pulled the runway-mid
+        # DEM from ~28 m to ~19.6 m while runways anchor to CIFP/apt.dat
+        # elevations, tearing every taxiway between the two — plus
+        # coastal city substituted toward sea level).  Re-enable per
+        # provider with residual_structure_masking=True once the
+        # airport-region protection and water exclusion are designed.
         definition[RESIDUAL_STRUCTURE_MASKING] = _parse_boolean(
-            definition.get(RESIDUAL_STRUCTURE_MASKING, "True")
+            definition.get(RESIDUAL_STRUCTURE_MASKING, "False")
         )
         # Base-tier (role=base) fields, spec section 3.6.
         if "resolution_arc_seconds" in definition:
@@ -5571,11 +5579,15 @@ def _bounding_box_extends_beyond(
     )
 
 
-def _sidecar_lacks_residual_masking(lat, lon, icao, provider_code):
-    """True when the cached sidecar's masking summary predates residual
-    structure masking (no ``residual_masked_pixel_count`` field).  A
-    missing or unreadable sidecar reads as False — pre-sidecar caches
-    keep the established leave-alone policy."""
+def _sidecar_residual_masking_mismatch(lat, lon, icao, provider_code,
+                                       residual_masking_wanted):
+    """True when the cached inset was produced with a DIFFERENT residual
+    structure-masking configuration than the provider now wants — both
+    directions: an inset built without it while the gate is ON, and an
+    inset carrying residual-masked pixels while the gate is OFF (the
+    2026-07-18 live regression left damaged caches that must regenerate
+    clean).  A missing or unreadable sidecar reads as False —
+    pre-sidecar caches keep the established leave-alone policy."""
     provenance_path = FNAMES.airport_inset_provenance(
         lat, lon, icao, provider_code
     )
@@ -5587,7 +5599,9 @@ def _sidecar_lacks_residual_masking(lat, lon, icao, provider_code):
     summary = provenance.get(SURFACE_MODEL_BUILDING_MASKING)
     if not isinstance(summary, dict):
         return False
-    return "residual_masked_pixel_count" not in summary
+    if residual_masking_wanted:
+        return "residual_masked_pixel_count" not in summary
+    return bool(summary.get("residual_masked_pixel_count"))
 
 
 def _fetched_bounding_box(lat, lon, icao, provider_code):
@@ -5677,14 +5691,14 @@ def ensure_airport_insets(
                 )
                 if (not cached_inset_is_stale
                         and definition.get(SURFACE_MODEL_BUILDING_MASKING)
-                        and definition.get(RESIDUAL_STRUCTURE_MASKING)
-                        and _sidecar_lacks_residual_masking(
-                            lat, lon, icao, code)):
-                    # One-time upgrade (2026-07-18): surface-model insets
-                    # cached before residual structure masking still carry
-                    # unmapped-building bumps (the SPJC east-side mounds) —
-                    # refetch them once; the sidecar then records the
-                    # residual fields and this branch never fires again.
+                        and _sidecar_residual_masking_mismatch(
+                            lat, lon, icao, code,
+                            definition.get(RESIDUAL_STRUCTURE_MASKING))):
+                    # One-time reconcile (2026-07-18): the cached inset was
+                    # produced under the OTHER residual-masking setting —
+                    # either it predates the feature while the gate is on,
+                    # or it carries residual-masked pixels while the gate
+                    # is off (the live-regression caches) — refetch once.
                     cached_inset_is_stale = True
                     UI.vprint(
                         1,
@@ -5692,7 +5706,8 @@ def ensure_airport_insets(
                         icao,
                         "from",
                         code,
-                        "predates residual structure masking - refetching.",
+                        "was built with a different residual-masking"
+                        " setting - refetching.",
                     )
                 if not cached_inset_is_stale:
                     airport_record[code] = airport_record.get(code) or "ok"
