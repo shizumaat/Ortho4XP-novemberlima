@@ -245,6 +245,7 @@ def _decode_accessor(
     document: Dict[str, Any],
     buffers: List[bytes],
     accessor_index: int,
+    semantic: str = "",
 ) -> List[List[float]]:
     """Decode an accessor into a list of component tuples (as float lists).
 
@@ -255,6 +256,19 @@ def _decode_accessor(
     if "sparse" in accessor:
         raise ValueError("sparse accessors are not supported")
     component_format, component_size = _COMPONENT_TYPES[accessor["componentType"]]
+    # ASOBO deviation (MSFS package-optimizer output, verified empirically
+    # 2026-07-19; matches the FSDeveloper MDL wiki's "half-precision
+    # texture coords"): TEXCOORD accessors are declared componentType
+    # 5122 (SHORT, non-normalized) but the stored 16-bit words are
+    # FLOAT16 bit patterns. Spec-conformant files never use
+    # non-normalized SHORT for TEXCOORD, so the combination is
+    # unambiguous and reinterpreted as binary16.
+    if (
+        semantic.startswith("TEXCOORD")
+        and accessor["componentType"] == 5122
+        and not accessor.get("normalized", False)
+    ):
+        component_format = "e"
     component_count = _TYPE_COMPONENT_COUNTS[accessor["type"]]
     element_count = accessor["count"]
     accessor_offset = accessor.get("byteOffset", 0)
@@ -632,11 +646,24 @@ def _emit_mesh_primitives(
                 raw_normals = _decode_accessor(
                     document, buffers, attributes["NORMAL"]
                 )
+                # ASOBO-optimized content quantizes normals to raw int8;
+                # renormalize so OBJ8 output carries unit normals.
+                for normal in raw_normals:
+                    length = (
+                        normal[0] * normal[0]
+                        + normal[1] * normal[1]
+                        + normal[2] * normal[2]
+                    ) ** 0.5
+                    if length > 1e-9 and abs(length - 1.0) > 1e-3:
+                        normal[0] /= length
+                        normal[1] /= length
+                        normal[2] /= length
             else:
                 raw_normals = None
             if "TEXCOORD_0" in attributes:
                 raw_texcoords = _decode_accessor(
-                    document, buffers, attributes["TEXCOORD_0"]
+                    document, buffers, attributes["TEXCOORD_0"],
+                    semantic="TEXCOORD_0",
                 )
             else:
                 raw_texcoords = None
