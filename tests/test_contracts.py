@@ -158,10 +158,18 @@ def test_object_geometry_fields():
         # ATTR_hard / ATTR_hard_deck state, parallel to solid_triangles;
         # immutable "" default so pre-change callers are unaffected.
         "solid_triangle_hardness",
+        # Object-pavement classifier: the draped draw layer declared by
+        # ``ATTR_layer_group_draped <group> <offset>``, or None when the
+        # file declares none.
+        "draped_layer_group",
     )
     assert (
         obj8_reader.ObjectGeometry._field_defaults["solid_triangle_hardness"]
         == ()
+    )
+    assert (
+        obj8_reader.ObjectGeometry._field_defaults["draped_layer_group"]
+        is None
     )
     assert callable(obj8_reader.ObjectGeometry.hard_deck_solid_triangles)
     assert isinstance(
