@@ -1851,6 +1851,34 @@ DSF_OBJECT_PAVEMENT_MAX_LAYER_OFFSET = int(
 # the pavement pool with noise.
 DSF_OBJECT_PAVEMENT_MIN_PATCH_M2 = float(
     _os.environ.get("O4_DSF_OBJECT_PAVEMENT_MIN_PATCH_M2", "20"))
+# VEHICLE-PAVEMENT admission filter (owner direction 2026-07-18, HECA
+# Tai Models): ground-paint packs paint the airport's SERVICE-ROAD grid
+# and drainage channels at the same base layer as the real asphalt
+# (HECA road.obj: one 165,820 m2 connected patch spanning 2.7 x 7.4 km
+# at ~6 m corridor width — ~27 km of road).  Admitted into the pavement
+# union those corridors can only classify as junction/apron (no taxi or
+# 1206 route rides them) and drag miles of 1 %-capped airside pavement
+# across open terrain (HECA retaining walls 21→332).  Aircraft-capable
+# pavement is essentially everywhere wider than any vehicle road; the
+# test is a MORPHOLOGICAL OPENING RATIO, not erosion-to-empty: a road
+# NETWORK patch has occasional wide pockets (intersections, small
+# plazas) that survive plain erosion, so the whole connected snake
+# passes an ``is_empty`` test (measured: HECA road.obj kept its
+# 165,820 m2 patch on erosion alone).  ``buffer(-w/2).buffer(+w/2)``
+# recovers the aircraft-capable cores at full extent; the surviving
+# area fraction separates cleanly at HECA (vehicle/drainage <= 0.29,
+# real pavement >= 0.37 with the bulk >= 0.96), so 0.35 sits in the
+# gap.  A low-ratio patch is vehicle/drainage paint and is dropped at
+# ADMISSION (before the union, so it never costs slice/weld/solve
+# work; it simply rides the DEM the way the pack renders in stock
+# X-Plane).  11 m sits above painted roads (~6 m) and drainage
+# (~10 m) and below any real taxiway-with-shoulders at packs of this
+# class.  Applies to OBJECT-sourced patches only (apt.dat / ``.pol``
+# pavement untouched).  Width 0 disables.
+DSF_OBJECT_PAVEMENT_MIN_AIRCRAFT_WIDTH_M = float(
+    _os.environ.get("O4_DSF_OBJECT_PAVEMENT_MIN_AIRCRAFT_WIDTH_M", "11"))
+DSF_OBJECT_PAVEMENT_OPENING_RATIO = float(
+    _os.environ.get("O4_DSF_OBJECT_PAVEMENT_OPENING_RATIO", "0.35"))
 
 # ── CONNECTOR pre-filter (defect 2026-07-17, UK payware co-baked airports) ──
 # A scenery pack that bakes a whole airport as many ``.obj`` files sharing
