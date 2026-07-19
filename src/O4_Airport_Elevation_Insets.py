@@ -5922,6 +5922,12 @@ INSET_WATER_FACILITY_QUERIES = (
     'way["landuse"="basin"]',
     'way["landuse"="reservoir"]',
 )
+# Schema stamp written into the supplement's ``generator`` attribute.
+# Bump it whenever the detection rules change: a cached supplement can
+# be NEWER than its rasters yet written under wrong rules (the
+# 2026-07-18 SPJC regression left supplements with 1060 phantom urban
+# basins), and mtime comparison alone would keep it forever.
+INSET_WATER_SUPPLEMENT_SCHEMA = "hydro-flat-2026-07-18"
 
 
 def detect_hydro_flat_water_rings(
@@ -6213,16 +6219,77 @@ def _facility_restrict_mask(polygons, values_shape, geotransform):
     return mask if mask.any() else None
 
 
+def _water_detection_trusts_inset_raster(inset_path):
+    """Whether hydro-flat water detection may read this inset raster.
+
+    The detector's physical premise is a MEASURED surface at the
+    working resolution: lidar reads real water as hydro-flat plateaus
+    while dry ground keeps centimetre texture in every 3-by-3
+    neighbourhood.  Two raster classes break that premise and are
+    skipped outright (live SPJC regression 2026-07-18: 1060 phantom
+    basins over urban Lima and Callao):
+
+    * surface models with building-footprint masking — the masked
+      pixels are ``gdal.FillNodata`` interpolation, synthetic smooth
+      "ground" that reads as hydro-flat across whole city blocks
+      (the SPJC GLO-30 inset had 29% of its pixels interpolated);
+    * rasters upsampled beyond their native resolution (Copernicus
+      GLO-30's 30 m cells fetched at 3 m) — every 3-by-3 window then
+      samples one native cell's resampling ramp, so the flatness
+      measure reads interpolation smoothness, not surface texture.
+
+    A missing or unreadable provenance sidecar reads as trusted:
+    pre-sidecar caches are the established lidar providers.
+    """
+    provenance_path = os.path.splitext(inset_path)[0] + ".json"
+    try:
+        with open(provenance_path, "r") as handle:
+            provenance = json.load(handle)
+    except (OSError, ValueError):
+        return True
+    if isinstance(provenance.get(SURFACE_MODEL_BUILDING_MASKING), dict):
+        return False
+    native_resolution_m = _parse_float(
+        provenance.get("native_resolution_m"), default=None
+    )
+    fetched_resolution_m = _parse_float(
+        provenance.get("resolution_m"), default=None
+    )
+    if (native_resolution_m is not None
+            and fetched_resolution_m is not None
+            and native_resolution_m > fetched_resolution_m):
+        return False
+    return True
+
+
+def _inset_water_supplement_schema_current(supplement_path):
+    """Whether a cached supplement was written under the current
+    detection schema (the stamp lives in its ``generator`` attribute).
+    Old-schema files regenerate even when newer than their rasters —
+    their RULES were wrong when they were written, which mtime
+    comparison cannot see.  Unreadable files read as stale."""
+    import bz2
+
+    try:
+        with bz2.open(supplement_path, "rt", encoding="utf-8") as handle:
+            handle.readline()
+            return INSET_WATER_SUPPLEMENT_SCHEMA in handle.readline()
+    except OSError:
+        return False
+
+
 def ensure_inset_water_supplement(lat, lon):
     """Write (or refresh) the per-tile inset-water OSM supplement and
     return its path, or ``None`` when no basin qualifies.
 
     Derived from every cached inset GeoTIFF for the tile
-    (``list_cached_inset_dems``); regenerated when missing or older
-    than any raster, removed when stale rasters leave nothing behind.
-    The fragment is standard OSM XML (closed ``natural=water`` ways
-    with negative identifiers), consumed additively by
-    ``include_water``.
+    (``list_cached_inset_dems``) whose provenance passes
+    :func:`_water_detection_trusts_inset_raster`; regenerated when
+    missing, older than any raster, or written under an older
+    detection schema; removed when the qualifying rasters leave
+    nothing behind.  The fragment is standard OSM XML (closed
+    ``natural=water`` ways with negative identifiers), consumed
+    additively by ``include_water``.
     """
     import bz2
 
@@ -6234,12 +6301,21 @@ def ensure_inset_water_supplement(lat, lon):
         return None
     newest_raster = max(os.path.getmtime(path) for path in inset_paths)
     if (os.path.isfile(supplement_path)
-            and os.path.getmtime(supplement_path) >= newest_raster):
+            and os.path.getmtime(supplement_path) >= newest_raster
+            and _inset_water_supplement_schema_current(supplement_path)):
         return supplement_path
 
     facility_polygons = _facility_outline_polygons(lat, lon)
     all_rings = []
     for inset_path in inset_paths:
+        if not _water_detection_trusts_inset_raster(inset_path):
+            UI.vprint(
+                2,
+                "   Inset water detection skips "
+                + os.path.basename(inset_path)
+                + " (surface model or upsampled raster).",
+            )
+            continue
         loaded = _load_inset_raster(inset_path)
         if loaded is None:
             continue
@@ -6275,7 +6351,8 @@ def ensure_inset_water_supplement(lat, lon):
         return None
 
     lines = ['<?xml version="1.0" encoding="UTF-8"?>',
-             '<osm version="0.6" generator="O4_Airport_Elevation_Insets">']
+             '<osm version="0.6" generator="O4_Airport_Elevation_Insets '
+             + INSET_WATER_SUPPLEMENT_SCHEMA + '">']
     node_identifier = -1
     way_identifier = -1
     for ring, water_elevation, inset_path in all_rings:

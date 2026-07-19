@@ -16,6 +16,7 @@ Covered:
   * the ``.alt`` raster bake with a feathered blend band (the G2 proof).
 """
 
+import json
 import os
 
 import numpy
@@ -1343,6 +1344,86 @@ def test_supplement_written_and_cached(tmp_path, monkeypatch):
     first_mtime = os.path.getmtime(supplement)
     assert INSETS.ensure_inset_water_supplement(36, -87) == supplement
     assert os.path.getmtime(supplement) == first_mtime
+
+
+@requires_gdal
+def test_supplement_refuses_surface_model_and_upsampled_rasters(
+        tmp_path, monkeypatch):
+    """The SPJC live regression (2026-07-18): Copernicus GLO-30 insets —
+    a 30 m surface model fetched at 3 m with building footprints
+    interpolated away — produced 1060 phantom water basins over urban
+    Lima and Callao.  A raster whose provenance sidecar declares
+    surface-model building masking, or an upsampled fetch (native
+    resolution coarser than the fetched one), is excluded from water
+    detection outright; a downsampled lidar raster keeps it."""
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    monkeypatch.setattr(
+        INSETS, "_facility_outline_polygons", lambda lat, lon: [])
+    directory = FNAMES.airport_inset_directory(36, -87)
+    os.makedirs(directory)
+    tif_path = os.path.join(directory, "KTST_provider.tif")
+    sidecar_path = os.path.join(directory, "KTST_provider.json")
+    _write_terrain_geotiff(
+        tif_path, -87.001, 36.099, -86.999, 36.101, _basin_terrain())
+
+    # Surface-model building masking declared: refused.
+    with open(sidecar_path, "w") as handle:
+        json.dump({INSETS.SURFACE_MODEL_BUILDING_MASKING: {
+            "masked_fraction": 0.29}}, handle)
+    assert not INSETS._water_detection_trusts_inset_raster(tif_path)
+    assert INSETS.ensure_inset_water_supplement(36, -87) is None
+    assert not os.path.isfile(FNAMES.inset_water(36, -87))
+
+    # Upsampled fetch (30 m native at 3 m): refused.
+    with open(sidecar_path, "w") as handle:
+        json.dump({"native_resolution_m": 30.0, "resolution_m": 3.0},
+                  handle)
+    assert not INSETS._water_detection_trusts_inset_raster(tif_path)
+    assert INSETS.ensure_inset_water_supplement(36, -87) is None
+
+    # Downsampled lidar (1 m native at 3 m): trusted, basin detected.
+    with open(sidecar_path, "w") as handle:
+        json.dump({"native_resolution_m": 1.0, "resolution_m": 3.0},
+                  handle)
+    assert INSETS._water_detection_trusts_inset_raster(tif_path)
+    assert INSETS.ensure_inset_water_supplement(36, -87) is not None
+
+
+@requires_gdal
+def test_old_schema_supplement_regenerates_despite_fresh_mtime(
+        tmp_path, monkeypatch):
+    """A poisoned supplement written UNDER OLD RULES can be newer than
+    every raster (it is written after them in the same build) — the
+    schema stamp in the generator attribute must force regeneration."""
+    import bz2
+
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    monkeypatch.setattr(
+        INSETS, "_facility_outline_polygons", lambda lat, lon: [])
+    directory = FNAMES.airport_inset_directory(36, -87)
+    os.makedirs(directory)
+    tif_path = os.path.join(directory, "KTST_provider.tif")
+    _write_terrain_geotiff(
+        tif_path, -87.001, 36.099, -86.999, 36.101, _basin_terrain())
+    # A pre-schema supplement carrying a phantom ring, newer than the
+    # raster.
+    supplement_path = FNAMES.inset_water(36, -87)
+    with bz2.open(supplement_path, "wt", encoding="utf-8") as handle:
+        handle.write(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<osm version="0.6" generator="O4_Airport_Elevation_Insets">\n'
+            "</osm>\n")
+    assert not INSETS._inset_water_supplement_schema_current(
+        supplement_path)
+    regenerated = INSETS.ensure_inset_water_supplement(36, -87)
+    assert regenerated == supplement_path
+    content = bz2.open(supplement_path, "rt").read()
+    assert INSETS.INSET_WATER_SUPPLEMENT_SCHEMA in content
+    assert content.count("<way") == 1
+    # And the freshly written schema-current supplement is reused as-is.
+    first_mtime = os.path.getmtime(supplement_path)
+    assert INSETS.ensure_inset_water_supplement(36, -87) == supplement_path
+    assert os.path.getmtime(supplement_path) == first_mtime
 
 
 @requires_gdal
