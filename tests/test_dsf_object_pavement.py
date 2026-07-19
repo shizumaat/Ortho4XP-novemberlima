@@ -540,3 +540,58 @@ class TestObjectPavementSidecarCache:
         # With the gate off no sidecar is written.
         assert not os.path.isfile(
             self._sidecar_path(tmp_path, dsf_path, pack_root))
+
+
+# ── F. vehicle-pavement admission classifier ─────────────────────────
+
+class TestIsVehiclePavementPatch:
+    """``object_footprints.is_vehicle_pavement_patch`` — the opening-ratio
+    test that keeps painted service roads / drainage channels (HECA Tai
+    Models ``road.obj``: ~6 m corridors over kilometres) out of the
+    aircraft pavement union at admission.  Width/ratio arguments are
+    passed explicitly, mirroring the pipeline call site."""
+
+    WIDTH_M = 11.0
+    RATIO = 0.35
+
+    def _classify(self, polygon):
+        return object_footprints.is_vehicle_pavement_patch(
+            polygon, self.WIDTH_M, self.RATIO)
+
+    def test_narrow_road_corridor_is_vehicle(self):
+        # A 6 m x 800 m straight road: erosion by 5.5 m leaves nothing.
+        road = Polygon([(0, 0), (800, 0), (800, 6), (0, 6)])
+        assert self._classify(road) is True
+
+    def test_wide_apron_sheet_is_not_vehicle(self):
+        apron = Polygon([(0, 0), (200, 0), (200, 60), (0, 60)])
+        assert self._classify(apron) is False
+
+    def test_road_network_with_wide_pockets_is_still_vehicle(self):
+        # The HECA road.obj failure mode for plain erosion-to-empty: a
+        # long 6 m corridor with an occasional wide plaza.  The plaza
+        # survives erosion (so ``buffer(-5.5).is_empty`` is False), but
+        # the OPENED area is a small fraction of the whole patch.
+        road = Polygon([(0, 0), (1500, 0), (1500, 6), (0, 6)])
+        plaza = Polygon([(700, -12), (730, -12), (730, 18), (700, 18)])
+        network = road.union(plaza)
+        assert network.geom_type == "Polygon"
+        eroded = network.buffer(-0.5 * self.WIDTH_M)
+        assert not eroded.is_empty  # the pocket survives plain erosion
+        assert self._classify(network) is True
+
+    def test_taxiway_width_corridor_is_kept(self):
+        # A 23 m corridor (code-C taxiway with shoulders) opens to
+        # nearly its full area — aircraft pavement, kept.
+        taxiway = Polygon([(0, 0), (400, 0), (400, 23), (0, 23)])
+        assert self._classify(taxiway) is False
+
+    def test_geometry_error_fails_open(self):
+        class ExplodingPolygon:
+            area = 100.0
+
+            def buffer(self, *_arguments, **_keyword_arguments):
+                raise ValueError("bad geometry")
+
+        assert object_footprints.is_vehicle_pavement_patch(
+            ExplodingPolygon(), self.WIDTH_M, self.RATIO) is False

@@ -974,7 +974,10 @@ def build_airport_pavement(icao: str, xplane_root: str,
         dsf_vehicle_area_m2 = 0.0
         from .config import (
             DSF_OBJECT_PAVEMENT_MIN_AIRCRAFT_WIDTH_M
-            as _OBJ_PAV_MIN_AIRCRAFT_WIDTH_M)
+            as _OBJ_PAV_MIN_AIRCRAFT_WIDTH_M,
+            DSF_OBJECT_PAVEMENT_OPENING_RATIO
+            as _OBJ_PAV_OPENING_RATIO)
+        from . import object_footprints as _OBJ_FOOTPRINTS
         # Third-party .pol pavement (tier-2 reader admissions, e.g.
         # ZDP_Library concrete at KPHX): real base pavement for
         # coverage purposes, but excluded from apron-merge semantics
@@ -1057,24 +1060,26 @@ def build_airport_pavement(icao: str, xplane_root: str,
                             continue
                     # VEHICLE-PAVEMENT admission filter (owner direction
                     # 2026-07-18): an OBJECT-sourced ground-paint patch
-                    # that is nowhere as wide as aircraft pavement
-                    # (erosion by half the minimum aircraft width leaves
-                    # nothing) is a painted service road / drainage
-                    # channel.  Drop it HERE — before the union — so it
-                    # never enters slicing/welding/solving and simply
-                    # rides the DEM.  See config
-                    # DSF_OBJECT_PAVEMENT_MIN_AIRCRAFT_WIDTH_M.
+                    # that is essentially nowhere as wide as aircraft
+                    # pavement is a painted service road / drainage
+                    # channel.  Morphological opening (erode by half the
+                    # minimum aircraft width, dilate back) recovers the
+                    # aircraft-capable cores; a low surviving-area ratio
+                    # marks a vehicle corridor even when wide pockets
+                    # (road intersections/plazas) survive plain erosion.
+                    # Drop it HERE — before the union — so it never
+                    # costs slice/weld/solve work and simply rides the
+                    # DEM.  See config
+                    # DSF_OBJECT_PAVEMENT_MIN_AIRCRAFT_WIDTH_M and
+                    # object_footprints.is_vehicle_pavement_patch.
                     if (_OBJ_PAV_MIN_AIRCRAFT_WIDTH_M > 0.0
-                            and def_path.lower().endswith(".obj")):
-                        try:
-                            if pm.buffer(
-                                    -0.5 * _OBJ_PAV_MIN_AIRCRAFT_WIDTH_M
-                                    ).is_empty:
-                                n_dsf_dropped_vehicle += 1
-                                dsf_vehicle_area_m2 += pm.area
-                                continue
-                        except _GEOM_EXC:
-                            pass
+                            and def_path.lower().endswith(".obj")
+                            and _OBJ_FOOTPRINTS.is_vehicle_pavement_patch(
+                                pm, _OBJ_PAV_MIN_AIRCRAFT_WIDTH_M,
+                                _OBJ_PAV_OPENING_RATIO)):
+                        n_dsf_dropped_vehicle += 1
+                        dsf_vehicle_area_m2 += pm.area
+                        continue
                     # Boundary gate: clip the DSF polygon to this
                     # airport's row-130 boundary so nothing outside it
                     # (a neighbouring airport's pavement) is pulled in.

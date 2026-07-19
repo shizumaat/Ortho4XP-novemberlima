@@ -277,6 +277,42 @@ def draped_pavement_patches(
     return out
 
 
+def is_vehicle_pavement_patch(
+    patch_polygon_metres,
+    minimum_aircraft_width_metres: float,
+    opening_area_ratio: float,
+) -> bool:
+    """True when a ground-paint pavement patch is vehicle/drainage paint
+    rather than aircraft-capable pavement (owner direction 2026-07-18).
+
+    The test is a morphological OPENING RATIO: erode the patch by half
+    ``minimum_aircraft_width_metres``, dilate back, and compare the
+    surviving area to the original.  A painted service road or drainage
+    channel is a long corridor narrower than any aircraft pavement, so
+    almost nothing survives — but plain erosion-to-empty is NOT enough:
+    a road NETWORK patch has occasional wide pockets (intersections,
+    small plazas) that survive erosion and would keep the whole
+    connected snake (measured: HECA ``road.obj``'s 165,820 m² patch,
+    ~6 m corridors over a 2.7 × 7.4 km span, survived plain erosion).
+    Opening recovers the aircraft-capable cores at full extent, and the
+    area fraction separates cleanly (HECA: vehicle/drainage ≤ 0.29,
+    real pavement ≥ 0.37, bulk ≥ 0.96).
+
+    The caller gates on ``minimum_aircraft_width_metres > 0`` (0 =
+    filter disabled) and on the patch being OBJECT-sourced.  Geometry
+    errors classify as NOT vehicle (keep the patch — admission must
+    fail open, never silently drop real pavement).
+    """
+    try:
+        half_width = 0.5 * minimum_aircraft_width_metres
+        eroded = patch_polygon_metres.buffer(-half_width)
+        opened_area = (0.0 if eroded.is_empty
+                       else eroded.buffer(half_width).area)
+        return opened_area < opening_area_ratio * patch_polygon_metres.area
+    except (ValueError, _GEOS_EXCEPTION):
+        return False
+
+
 def structure_ring(
     structure: Structure,
     geometry_by_resource: dict[str, ObjectGeometry],
