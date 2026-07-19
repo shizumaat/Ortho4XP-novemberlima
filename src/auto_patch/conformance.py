@@ -476,8 +476,13 @@ def enforce_conformance(layout: "PavementLayout",
         # Rebuild the polygon; bail (leave shape untouched) if invalid —
         # LOUDLY: a bailed shape keeps every T-vertex it should have
         # welded, and the un-welded nodes Ruppert-explode the tile mesh.
+        # Interior rings MUST ride along: an exterior-only rebuild fills
+        # the shape's holes, silently covering whatever shape occupies
+        # them (SPJC: gap_pit_floor over an adjacent_ground strip inside
+        # its hole, 31.86 m² — the zero-tolerance self-overlap invariant).
         try:
-            new_poly = Polygon(new_ring)
+            new_poly = Polygon(new_ring, [list(r.coords)
+                                          for r in s.polygon.interiors])
             if not new_poly.is_valid or new_poly.is_empty:
                 import O4_UI_Utils as UI
                 UI.vprint(1,
@@ -610,7 +615,10 @@ def _resolve_edge_crossings(layout: "PavementLayout") -> int:
         if not added_here:
             continue
         try:
-            new_poly = Polygon(new_ring + [new_ring[0]])
+            # Interior rings ride along (exterior-only fills the holes).
+            new_poly = Polygon(new_ring + [new_ring[0]],
+                               [list(r.coords)
+                                for r in shape.polygon.interiors])
             if not new_poly.is_valid or new_poly.is_empty:
                 continue
         except Exception:
@@ -706,7 +714,10 @@ def _resolve_yielding_tjunctions(layout: "PavementLayout", tol: float) -> int:
         if not added:
             continue
         try:
-            new_poly = Polygon(new_ring + [new_ring[0]])
+            # Interior rings ride along (exterior-only fills the holes).
+            new_poly = Polygon(new_ring + [new_ring[0]],
+                               [list(r.coords)
+                                for r in shape.polygon.interiors])
             if not new_poly.is_valid or new_poly.is_empty:
                 continue
         except Exception:
@@ -814,7 +825,9 @@ def densify_long_edges(layout, roles, max_edge_m: float = 60.0) -> int:
         if not changed:
             continue
         try:
-            poly = _Polygon(new_ring)
+            # Interior rings ride along (exterior-only fills the holes).
+            poly = _Polygon(new_ring, [list(r.coords)
+                                       for r in s.polygon.interiors])
             if not poly.is_valid or poly.is_empty:
                 continue
         except Exception:

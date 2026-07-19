@@ -1150,7 +1150,10 @@ def _heal_emitted_band_tears(emitted_shapes, layout):
         if len(new_ring) < 3:
             continue
         try:
-            poly = Polygon(new_ring + [new_ring[0]])
+            # Interior rings ride along (exterior-only fills the holes).
+            poly = Polygon(new_ring + [new_ring[0]],
+                           [list(h.coords)
+                            for h in sh.polygon.interiors])
             if not poly.is_valid:
                 poly = poly.buffer(0)
             if poly.is_empty or poly.geom_type != "Polygon":
@@ -1765,7 +1768,10 @@ def emit_stacked_conflict_walls(layout) -> int:
         if not shape_walls:
             continue
         try:
-            moved_poly = Polygon(new_coords + [new_coords[0]])
+            # Interior rings ride along (exterior-only fills the holes).
+            moved_poly = Polygon(new_coords + [new_coords[0]],
+                                 [list(h.coords)
+                                  for h in shape.polygon.interiors])
             if not moved_poly.is_valid:
                 moved_poly = moved_poly.buffer(0)
             if (moved_poly.is_empty
