@@ -259,6 +259,11 @@ def initialize_elevation_providers_dict(providers_directory=None):
         definition[SURFACE_MODEL_BUILDING_MASKING] = _parse_boolean(
             definition.get(SURFACE_MODEL_BUILDING_MASKING, "False")
         )
+        # Residual structure masking rides the same pass (default ON for
+        # surface models; an .elv may set residual_structure_masking=False).
+        definition[RESIDUAL_STRUCTURE_MASKING] = _parse_boolean(
+            definition.get(RESIDUAL_STRUCTURE_MASKING, "True")
+        )
         # Base-tier (role=base) fields, spec section 3.6.
         if "resolution_arc_seconds" in definition:
             definition["resolution_arc_seconds"] = _parse_float(
@@ -4590,6 +4595,173 @@ SURFACE_MODEL_BUILDING_MASKING = "surface_model_building_masking"
 # X-band return of a building smears roughly one resolution cell beyond
 # its walls, so the mask must reach past the mapped footprint.
 DEFAULT_FOOTPRINT_MASK_BUFFER_M = 35.0
+# Residual structure masking (2026-07-18, SPJC east-side mounds): surface
+# models bake UNMAPPED structures into the terrain too — dense city blocks
+# outside any OpenStreetMap/package footprint (measured SPJC: a +4-6 m
+# plateau of unmapped Lima rooftops right behind the terminal, zero
+# footprints within 90 m).  A morphological-opening ground estimate flags
+# pixels standing more than the threshold above it; the opening window
+# must exceed the widest unmapped structure while staying invariant on
+# planar slopes (opening of a plane is the plane, so genuine hillsides
+# never mask).  Broad ridges wider than the window are preserved.
+DEFAULT_RESIDUAL_MASK_THRESHOLD_M = 2.0
+DEFAULT_RESIDUAL_MASK_OPENING_WINDOW_M = 105.0
+# Dense-city DSM fabric is CONTIGUOUS rooftop plateau for hundreds of
+# metres (measured SPJC east wall: +5-6 m with no ground pixel inside any
+# window — 30 m native resolution never sees the streets), so a single
+# opening cannot recover ground there.  Iterate: each mask+fill round
+# recedes the plateau's SHARP edge by ~half a window from every recovered-
+# ground side; gradual (natural) terrain edges produce no opening residual
+# and never start eroding, so real sloped-flank mesas are preserved.  The
+# pass count bounds the reach (~5 x 52 m = ~260 m) — deep-city plateau
+# beyond it keeps its DSM height, which only matters past the graded
+# strips' reach where the sim draws the buildings anyway.
+DEFAULT_RESIDUAL_MASK_EROSION_PASSES = 12
+RESIDUAL_STRUCTURE_MASKING = "residual_structure_masking"
+
+
+def _residual_structure_mask(
+    values,
+    exclude_mask,
+    pixel_size_m,
+    opening_window_m=DEFAULT_RESIDUAL_MASK_OPENING_WINDOW_M,
+    threshold_m=DEFAULT_RESIDUAL_MASK_THRESHOLD_M,
+    erosion_passes=DEFAULT_RESIDUAL_MASK_EROSION_PASSES,
+):
+    """Boolean mask of pixels standing above the local ground estimate.
+
+    The ground estimate is a grey (morphological) OPENING of the raster:
+    erosion then dilation with a square window of ``opening_window_m``.
+    Structures narrower than the window are levelled out of the estimate,
+    so their pixels show a positive residual; a planar slope is invariant
+    under opening, so genuine hillsides show none; terrain features with
+    GRADUAL flanks survive into the estimate and are preserved regardless
+    of width.  Contiguous cliff-edged plateau wider than the window
+    (dense-city rooftop fabric) is recovered ITERATIVELY: each pass fills
+    the masked cells from the nearest trusted ground and re-runs the
+    opening, so the plateau's sharp edge recedes ~half a window per pass;
+    ``erosion_passes`` bounds the total reach.  ``exclude_mask`` cells
+    (genuine nodata) are replaced by the finite median for the estimate —
+    they can neither poison the estimate with sentinel lows nor appear in
+    the returned mask.
+
+    ESTIMATOR (2026-07-18, second iteration): the ground reference is a
+    LOCAL MEDIAN, not a morphological opening — an opening is exactly
+    invariant on a half-plane step (erosion shifts the cliff edge, the
+    dilation shifts it back), so it can never start biting into wide
+    city-plateau fabric.  The median over a symmetric window of a plane
+    is its centre value (slopes and gradual flanks are invariant), while
+    any pixel whose window is MAJORITY ground gets pulled down to
+    ground, which both levels isolated structures and lets the fill
+    iteration recede a plateau edge pass by pass.  Computed on a grid
+    decimated to ~15 m cells: the interesting sources are 30 m-native
+    DSMs oversampled to 3 m, so decimation loses nothing and keeps the
+    median filter fast."""
+    import numpy
+    from scipy import ndimage
+
+    finite = ~exclude_mask
+    if not finite.any():
+        return numpy.zeros(values.shape, dtype=bool)
+    decimation = max(1, int(round(15.0 / max(pixel_size_m, 0.5))))
+    small_values = values[::decimation, ::decimation].astype(
+        numpy.float64, copy=True)
+    small_finite = finite[::decimation, ::decimation]
+    if not small_finite.any():
+        return numpy.zeros(values.shape, dtype=bool)
+    small_pixel_m = pixel_size_m * decimation
+    window_pixels = int(round(opening_window_m / small_pixel_m))
+    window_pixels = max(3, window_pixels)
+    if window_pixels % 2 == 0:
+        window_pixels += 1
+    border = window_pixels // 2
+    small_values[~small_finite] = float(
+        numpy.median(small_values[small_finite]))
+    small_mask = numpy.zeros(small_values.shape, dtype=bool)
+    for _erosion_pass in range(max(1, erosion_passes)):
+        # Slope-safe criteria per pass, evaluated over a WINDOW LADDER
+        # (1x, 2x, 4x the base window): one window cannot fit every
+        # structure scale — a 105 m window around a 150 m warehouse band
+        # or inside wide city fabric sees under a quarter of true
+        # ground, so its low quartile carries no signal, while the
+        # airport's abundant ground IS visible at 420 m.  The uphill and
+        # steepness gates below are scale-independent, so growing the
+        # quartile's reach never unprotects slopes.
+        #   BUMP — the pixel stands above the base-window MEDIAN
+        #   (features covering under half the window; the median of a
+        #   plane is its centre, so slopes never fire);
+        #   EDGE BITE — the pixel stands above SOME window's LOW
+        #   QUARTILE (ground visible at that scale), has nothing
+        #   significantly higher within ~30 m uphill (plateau top, not
+        #   mid-slope — pixel-relative, so staircase levels recede
+        #   top-down across passes), and drops by the threshold within
+        #   ~30 m somewhere nearby (a real structure edge; natural
+        #   flanks up to ~6 % never do — steeper cliff-flanked terrain
+        #   accepts a bounded shoulder band being re-interpolated,
+        #   which inside an airport-neighbourhood inset is the right
+        #   trade).
+        window_median = ndimage.median_filter(
+            small_values, size=window_pixels, mode="nearest"
+        )
+        ground_visible_below = numpy.zeros(small_values.shape, dtype=bool)
+        believed_ground = None
+        for scale in (1, 2, 4):
+            ladder_window = window_pixels * scale
+            if ladder_window % 2 == 0:
+                ladder_window += 1
+            low_quartile = ndimage.percentile_filter(
+                small_values, 25, size=ladder_window, mode="nearest"
+            )
+            ground_visible_below |= (
+                (small_values - low_quartile) > threshold_m
+            )
+            believed_ground = (low_quartile if believed_ground is None
+                               else numpy.minimum(believed_ground,
+                                                  low_quartile))
+        uphill_is_flat = (
+            (ndimage.grey_dilation(small_values, size=5, mode="nearest")
+             - small_values) < threshold_m / 2.0
+        )
+        local_drop = small_values - ndimage.grey_erosion(
+            small_values, size=5, mode="nearest"
+        )
+        pass_mask = ((
+            ((small_values - window_median) > threshold_m)
+            | (ground_visible_below
+               & uphill_is_flat
+               & (local_drop > threshold_m))
+        ) & small_finite & ~small_mask)
+        # Nearest-padding makes the window asymmetric at the raster
+        # border (a slope reads high there), which would mask and
+        # re-fill a border strip and mint an inset-boundary seam; the
+        # estimate is untrustworthy there, so the border band never
+        # masks.
+        if border > 0:
+            pass_mask[:border, :] = False
+            pass_mask[-border:, :] = False
+            pass_mask[:, :border] = False
+            pass_mask[:, -border:] = False
+        if not pass_mask.any():
+            break
+        small_mask |= pass_mask
+        # Substitute the BELIEVED GROUND at the newly masked cells (a
+        # nearest-source fill would copy plateau values back in from the
+        # plateau side and stall the recession); the next pass then sees
+        # the edge receded.  The real raster fill happens once, in the
+        # caller, over the accumulated mask.
+        small_values = small_values.copy()
+        small_values[pass_mask] = believed_ground[pass_mask]
+    if not small_mask.any():
+        return numpy.zeros(values.shape, dtype=bool)
+    full_mask = numpy.kron(
+        small_mask,
+        numpy.ones((decimation, decimation), dtype=bool),
+    )[: values.shape[0], : values.shape[1]]
+    if full_mask.shape != values.shape:
+        padded = numpy.zeros(values.shape, dtype=bool)
+        padded[: full_mask.shape[0], : full_mask.shape[1]] = full_mask
+        full_mask = padded
+    return full_mask & finite
 
 # Upper bound, in pixels, on how far the legacy gdal.FillNodata inpainting
 # looks for valid ground values.  100 pixels at a 30 m grid is 3 km --
@@ -5229,7 +5401,8 @@ def mask_building_footprints_in_surface_model(
         definition.get("footprint_mask_buffer_m"),
         default=DEFAULT_FOOTPRINT_MASK_BUFFER_M,
     )
-    if not footprints:
+    residual_masking_on = definition.get(RESIDUAL_STRUCTURE_MASKING, True)
+    if not footprints and not residual_masking_on:
         return {
             "skipped": "no building footprints in the box",
             "footprint_count": 0,
@@ -5239,27 +5412,52 @@ def mask_building_footprints_in_surface_model(
     try:
         buffered = _buffer_footprints_in_metres(
             footprints, buffer_m, centre_latitude
-        )
+        ) if footprints else []
         dataset = gdal.Open(inset_path, gdal.GA_Update)
         band = dataset.GetRasterBand(1)
         values = band.ReadAsArray()
         nodata_value = band.GetNoDataValue()
         if nodata_value is None:
             nodata_value = -32768.0
-        building_mask = _rasterize_footprint_mask(buffered, dataset)
+        if buffered:
+            building_mask = _rasterize_footprint_mask(buffered, dataset)
+        else:
+            building_mask = numpy.zeros(values.shape, dtype=bool)
         genuine_nodata = (values == nodata_value) | ~numpy.isfinite(values)
-        pixels_to_fill = building_mask & ~genuine_nodata
+        # RESIDUAL STRUCTURE MASK (2026-07-18): footprint masking can only
+        # erase what is MAPPED; unmapped structures (dense city blocks with
+        # no OpenStreetMap coverage — the SPJC east-side mounds) survive it.
+        # Flag every pixel standing above the morphological ground estimate
+        # and heal it through the SAME source-agnostic fill.
+        residual_mask = numpy.zeros(values.shape, dtype=bool)
+        residual_masked_pixel_count = 0
+        if residual_masking_on:
+            import math
+            geotransform = dataset.GetGeoTransform()
+            pixel_size_m = abs(geotransform[1]) * 111320.0 * math.cos(
+                math.radians(centre_latitude))
+            residual_mask = _residual_structure_mask(
+                values, genuine_nodata, pixel_size_m
+            )
+            residual_masked_pixel_count = int(residual_mask.sum())
+        combined_mask = building_mask | residual_mask
+        pixels_to_fill = combined_mask & ~genuine_nodata
         # Trusted-ground sources: every cell that is neither under a
         # footprint nor genuine nodata (so sentinels are never fill
         # sources).  Both fill methods fill every non-source cell and let
         # the caller restore genuine nodata, so only building pixels change.
-        interpolation_sources = ~building_mask & ~genuine_nodata
-        if not pixels_to_fill.any():
+        interpolation_sources = ~combined_mask & ~genuine_nodata
+        if not pixels_to_fill.any() or not interpolation_sources.any():
             dataset = None
             return {
                 "footprint_source": footprint_source,
                 "footprint_count": len(footprints),
                 "masked_pixel_count": 0,
+                "residual_masked_pixel_count": residual_masked_pixel_count,
+                "residual_mask_threshold_m":
+                    DEFAULT_RESIDUAL_MASK_THRESHOLD_M,
+                "residual_mask_opening_window_m":
+                    DEFAULT_RESIDUAL_MASK_OPENING_WINDOW_M,
                 "footprint_mask_buffer_m": buffer_m,
                 "fill_method": _inset_fill_method(),
             }
@@ -5314,6 +5512,10 @@ def mask_building_footprints_in_surface_model(
         "masked_fraction": round(
             float(pixels_to_fill.sum()) / float(values.size), 4
         ),
+        "residual_masked_pixel_count": residual_masked_pixel_count,
+        "residual_mask_threshold_m": DEFAULT_RESIDUAL_MASK_THRESHOLD_M,
+        "residual_mask_opening_window_m":
+            DEFAULT_RESIDUAL_MASK_OPENING_WINDOW_M,
         "footprint_mask_buffer_m": buffer_m,
         "fill_method": fill_method,
     }
@@ -5367,6 +5569,25 @@ def _bounding_box_extends_beyond(
         or requested_east > recorded_east + tolerance
         or requested_north > recorded_north + tolerance
     )
+
+
+def _sidecar_lacks_residual_masking(lat, lon, icao, provider_code):
+    """True when the cached sidecar's masking summary predates residual
+    structure masking (no ``residual_masked_pixel_count`` field).  A
+    missing or unreadable sidecar reads as False — pre-sidecar caches
+    keep the established leave-alone policy."""
+    provenance_path = FNAMES.airport_inset_provenance(
+        lat, lon, icao, provider_code
+    )
+    try:
+        with open(provenance_path, "r") as handle:
+            provenance = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    summary = provenance.get(SURFACE_MODEL_BUILDING_MASKING)
+    if not isinstance(summary, dict):
+        return False
+    return "residual_masked_pixel_count" not in summary
 
 
 def _fetched_bounding_box(lat, lon, icao, provider_code):
@@ -5454,6 +5675,25 @@ def ensure_airport_insets(
                         bounding_box, fetched_box
                     )
                 )
+                if (not cached_inset_is_stale
+                        and definition.get(SURFACE_MODEL_BUILDING_MASKING)
+                        and definition.get(RESIDUAL_STRUCTURE_MASKING)
+                        and _sidecar_lacks_residual_masking(
+                            lat, lon, icao, code)):
+                    # One-time upgrade (2026-07-18): surface-model insets
+                    # cached before residual structure masking still carry
+                    # unmapped-building bumps (the SPJC east-side mounds) —
+                    # refetch them once; the sidecar then records the
+                    # residual fields and this branch never fires again.
+                    cached_inset_is_stale = True
+                    UI.vprint(
+                        1,
+                        "    Cached elevation inset for",
+                        icao,
+                        "from",
+                        code,
+                        "predates residual structure masking - refetching.",
+                    )
                 if not cached_inset_is_stale:
                     airport_record[code] = airport_record.get(code) or "ok"
                     _store_acceptance_probes_in_record(

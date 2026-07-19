@@ -3102,8 +3102,13 @@ def test_masking_skips_when_no_footprints_and_leaves_raster_unchanged(
     before = dataset.GetRasterBand(1).ReadAsArray().copy()
     dataset = None
 
+    # Residual structure masking OFF: with no footprints either, the
+    # pass must skip and leave the raster untouched (the pre-2026-07-18
+    # contract; residual masking default-ON handles the no-footprint
+    # case separately — see tests/test_dsm_residual_mask.py).
     summary = INSETS.mask_building_footprints_in_surface_model(
-        path, _MASK_BOX, {"code": "COPERTEST"}
+        path, _MASK_BOX,
+        {"code": "COPERTEST", INSETS.RESIDUAL_STRUCTURE_MASKING: False}
     )
     # No footprints -> an explicit skip carrying a zero count...
     assert "skipped" in summary
