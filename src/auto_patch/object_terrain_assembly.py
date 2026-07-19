@@ -1041,6 +1041,56 @@ _TUNNEL_FLOOR_OWNED_CLEARANCE_M = 0.7
 _TUNNEL_MAX_AIRSIDE_DISTANCE_M = 500.0
 
 
+def _chop_long_band_parts(parts, maximum_length_m=25.0):
+    """Subdivide long rim-band pieces so the per-part terrain-true DEM
+    sample tracks the ground along the trench (one 300 m C-shaped band
+    sampled once would flatten the whole rim to a single value — the
+    berm class the per-part sampling exists to prevent)."""
+    from shapely import affinity as shapely_affinity
+    from shapely.geometry import box as shapely_box
+
+    out = []
+    for part in parts:
+        try:
+            rectangle = part.minimum_rotated_rectangle
+            ring = list(rectangle.exterior.coords)
+            side_a = math.hypot(ring[1][0] - ring[0][0],
+                                ring[1][1] - ring[0][1])
+            side_b = math.hypot(ring[2][0] - ring[1][0],
+                                ring[2][1] - ring[1][1])
+            length = max(side_a, side_b)
+            if length <= maximum_length_m:
+                out.append(part)
+                continue
+            if side_a >= side_b:
+                angle = math.degrees(math.atan2(
+                    ring[1][1] - ring[0][1], ring[1][0] - ring[0][0]))
+            else:
+                angle = math.degrees(math.atan2(
+                    ring[2][1] - ring[1][1], ring[2][0] - ring[1][0]))
+            origin = part.centroid
+            flat = shapely_affinity.rotate(
+                part, -angle, origin=origin)
+            minimum_x, minimum_y, maximum_x, maximum_y = flat.bounds
+            slice_count = max(
+                2, int(math.ceil((maximum_x - minimum_x)
+                                 / maximum_length_m)))
+            step = (maximum_x - minimum_x) / slice_count
+            for index in range(slice_count):
+                window = shapely_box(
+                    minimum_x + index * step, minimum_y - 1.0,
+                    minimum_x + (index + 1) * step, maximum_y + 1.0)
+                piece = flat.intersection(window)
+                for simple in getattr(piece, "geoms", [piece]):
+                    if (simple.geom_type == "Polygon"
+                            and not simple.is_empty):
+                        out.append(shapely_affinity.rotate(
+                            simple, angle, origin=origin))
+        except Exception:
+            out.append(part)
+    return out
+
+
 def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
     """Feature A (``O4_OBJECT_TUNNEL_TERRAIN``, spec section 3.3 + amendment
     A1, ruling R12): born pre-solve tunnel-trench terrain as FIRST-CLASS
@@ -1093,7 +1143,7 @@ def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
     if classification is None or not getattr(classification, "tunnels", None):
         return 0, 0
 
-    from shapely.geometry import Point
+    from shapely.geometry import Point, Polygon
     from shapely.ops import unary_union
 
     from .bridges import (
@@ -1150,53 +1200,117 @@ def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
 
     floor_plate_count = 0
     rim_plate_count = 0
+    # SAME-ANCHOR FACILITY GROUPING (user 2026-07-18f): a long cut-and-
+    # cover facility ships as SEVERAL shell objects placed at ONE anchor
+    # (EGLL west: the ramp skin and the crossing box share a placement
+    # point, the open trench between them has no object at all — it was
+    # left covered by terrain).  Tunnels sharing an anchor are one
+    # facility: their bodies merge, and for two or more members the
+    # open CORRIDOR between the shells (the union's minimum rotated
+    # rectangle, only when trench-shaped) is cut at the facility floor.
+    facilities: dict = {}
     for tunnel in classification.tunnels:
-        resources = tunnel.object_resources
-        if tunnel.body_depth_m is None or tunnel.body_depth_m <= 0.0:
-            UI.vprint(
-                1,
-                f"   [object-tunnel] {resources}: no below-grade body depth "
-                "— skipped",
-            )
-            continue
         anchor_longitude, anchor_latitude = tunnel.anchor_longitude_latitude
-        datum = _sample_dem(
-            dem, tile_lat, tile_lon, anchor_latitude, anchor_longitude
-        )
-        if datum is None or datum != datum:
-            # Silent-zero rule (this project's classic failure mode): a
-            # missing datum is announced at verbosity 1, never swallowed.
-            UI.vprint(
-                1,
-                f"   [object-tunnel] {resources}: no DEM datum at the "
-                "anchor — skipped",
-            )
-            continue
-        # The deck's effective level is negative below grade; the AGL offset
-        # is already folded into ``body_depth_m`` (classifier effective
-        # height).  The floor keys on the DEEPEST SOLID of the whole
-        # structure when the classifier measured it (user 2026-07-18:
-        # EGLL shell walls reach up to ~2 m below the road deck — a
-        # deck-median floor left the object bottoms buried), falling
-        # back to the deck median for older records.
-        deck_reference_y = -float(tunnel.body_depth_m)
-        solid_minimum_y = getattr(tunnel, "solid_minimum_y_m", None)
-        if solid_minimum_y is not None:
-            deck_reference_y = min(deck_reference_y,
-                                   float(solid_minimum_y))
-        floor_elevation = tunnel_trench_floor_elevation_m(
-            float(datum), deck_reference_y
-        )
-        rim_elevation = tunnel_trench_rim_elevation_m(float(datum))
+        anchor_key = (round(anchor_longitude * 100000.0),
+                      round(anchor_latitude * 100000.0))
+        facilities.setdefault(anchor_key, []).append(tunnel)
 
-        body_parts = _tunnel_footprint_meters_parts(tunnel, to_meters)
-        if not body_parts:
-            UI.vprint(
-                1,
-                f"   [object-tunnel] {resources}: no deck footprint to cut "
-                "— skipped",
+    for facility_tunnels in facilities.values():
+        member_records = []
+        for tunnel in facility_tunnels:
+            resources = tunnel.object_resources
+            if tunnel.body_depth_m is None or tunnel.body_depth_m <= 0.0:
+                UI.vprint(
+                    1,
+                    f"   [object-tunnel] {resources}: no below-grade body "
+                    "depth — skipped",
+                )
+                continue
+            anchor_longitude, anchor_latitude = (
+                tunnel.anchor_longitude_latitude)
+            datum = _sample_dem(
+                dem, tile_lat, tile_lon, anchor_latitude, anchor_longitude
             )
+            if datum is None or datum != datum:
+                # Silent-zero rule (this project's classic failure mode):
+                # a missing datum is announced at verbosity 1, never
+                # swallowed.
+                UI.vprint(
+                    1,
+                    f"   [object-tunnel] {resources}: no DEM datum at the "
+                    "anchor — skipped",
+                )
+                continue
+            # The deck's effective level is negative below grade; the AGL
+            # offset is already folded into ``body_depth_m`` (classifier
+            # effective height).  The floor keys on the DEEPEST SOLID of
+            # the whole structure when the classifier measured it (user
+            # 2026-07-18: EGLL shell walls reach up to ~2 m below the
+            # road deck — a deck-median floor left the object bottoms
+            # buried), falling back to the deck median for older records.
+            deck_reference_y = -float(tunnel.body_depth_m)
+            solid_minimum_y = getattr(tunnel, "solid_minimum_y_m", None)
+            if solid_minimum_y is not None:
+                deck_reference_y = min(deck_reference_y,
+                                       float(solid_minimum_y))
+            member_floor = tunnel_trench_floor_elevation_m(
+                float(datum), deck_reference_y
+            )
+            member_rim = tunnel_trench_rim_elevation_m(float(datum))
+            member_parts = _tunnel_footprint_meters_parts(tunnel, to_meters)
+            if not member_parts:
+                UI.vprint(
+                    1,
+                    f"   [object-tunnel] {resources}: no deck footprint to "
+                    "cut — skipped",
+                )
+                continue
+            member_records.append(
+                (tunnel, float(datum), member_floor, member_rim,
+                 member_parts))
+        if not member_records:
             continue
+        resources = sorted({
+            resource for tunnel, *_rest in member_records
+            for resource in tunnel.object_resources})
+        datum = min(record[1] for record in member_records)
+        floor_elevation = min(record[2] for record in member_records)
+        rim_elevation = min(record[3] for record in member_records)
+        body_parts = [
+            part for *_head, parts in member_records for part in parts]
+        if len(member_records) >= 2:
+            # The open trench BETWEEN the facility's shells: the union's
+            # minimum rotated rectangle, admitted only when it is
+            # trench-shaped (elongated) — a blocky spread would over-cut.
+            try:
+                facility_union = unary_union(body_parts)
+                corridor = facility_union.minimum_rotated_rectangle
+                ring = list(corridor.exterior.coords)
+                side_a = math.hypot(ring[1][0] - ring[0][0],
+                                    ring[1][1] - ring[0][1])
+                side_b = math.hypot(ring[2][0] - ring[1][0],
+                                    ring[2][1] - ring[1][1])
+                long_side = max(side_a, side_b)
+                short_side = max(min(side_a, side_b), 1e-9)
+                if long_side / short_side >= 3.0:
+                    added = corridor.difference(facility_union).area
+                    body_parts = [corridor]
+                    UI.vprint(
+                        1,
+                        f"   [object-tunnel] {resources}: facility corridor "
+                        f"cut joins {len(member_records)} shells sharing "
+                        f"one anchor (+{added:.0f} m2 of open trench)",
+                    )
+            except Exception:
+                pass
+        else:
+            try:
+                merged = unary_union(body_parts)
+                body_parts = [
+                    part for part in getattr(merged, "geoms", [merged])
+                    if part.geom_type == "Polygon" and not part.is_empty]
+            except Exception:
+                pass
         # Airside-proximity gate (Global-Airports tile DSF: every
         # airport sees every object on the tile — see the constant's
         # comment).  Gated only when pavement evidence exists; a
@@ -1216,6 +1330,55 @@ def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
                 )
                 continue
 
+        # ANCHOR SEAT (user 2026-07-18f, "object sitting below terrain"):
+        # every shell of the facility drapes at terrain(anchor), and the
+        # classifier's whole depth model assumed that value is the DATUM
+        # it sampled — but the corridor cut (and the rim band) can move
+        # the terrain AT the anchor, sinking every shell by the cut
+        # depth.  Where OUR plates would touch the anchor and no earlier
+        # shape owns it, a small seat plate pins terrain(anchor) = datum
+        # (the pin the module docstring always promised).  The floor and
+        # band are cut back a node-split margin around it.
+        anchor_seat_keep_out = None
+        try:
+            first_tunnel = member_records[0][0]
+            seat_longitude, seat_latitude = (
+                first_tunnel.anchor_longitude_latitude)
+            seat_x, seat_y = to_meters(seat_longitude, seat_latitude)
+            seat_point = Point(seat_x, seat_y)
+            plates_reach = unary_union([
+                body.buffer(
+                    _TUNNEL_WALL_SETBACK_M + _TUNNEL_RIM_BAND_WIDTH_M,
+                    join_style=2, mitre_limit=2.0)
+                for body in body_parts])
+            if plates_reach.covers(seat_point):
+                owned_at_anchor = _owned_near(
+                    (seat_x - 2.0, seat_y - 2.0, seat_x + 2.0, seat_y + 2.0))
+                anchor_owned = (
+                    owned_at_anchor is not None
+                    and owned_at_anchor.covers(seat_point))
+                if not anchor_owned:
+                    seat_polygon = Polygon([
+                        (seat_x - 1.5, seat_y - 1.5),
+                        (seat_x + 1.5, seat_y - 1.5),
+                        (seat_x + 1.5, seat_y + 1.5),
+                        (seat_x - 1.5, seat_y + 1.5)])
+                    if born_flat_solver_plate(
+                            layout, seat_polygon, ROLE_TUNNEL_TRENCH,
+                            "object_tunnel_anchor_seat", float(datum),
+                            record_pins=False):
+                        anchor_seat_keep_out = seat_polygon.buffer(
+                            _TUNNEL_WALL_SETBACK_M,
+                            join_style=2, mitre_limit=2.0)
+                        UI.vprint(
+                            1,
+                            f"   [object-tunnel] {resources}: anchor seat "
+                            f"pinned at datum {float(datum):.2f} m (the "
+                            "facility cut reaches the placement anchor)",
+                        )
+        except Exception:
+            anchor_seat_keep_out = None
+
         yielded_area = 0.0
         for body in body_parts:
             if pavement_union is not None:
@@ -1225,22 +1388,28 @@ def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
                         yielded_area += kept.area
                 except Exception:
                     pass
-            # FLUSH WALLS (user screenshots 2026-07-18c): the floor pan is
-            # the body footprint itself — its edge lands ON the shell's
-            # vertical wall plane, so the mesh batter (the one node-split
-            # gap two rows must keep) leans OUTWARD from the shell instead
-            # of poking through its base.  Mitre joins everywhere: round
-            # buffer arcs read as curved ridges against the straight
-            # object walls (the v19 collar lesson).
+            # FLUSH WALLS, INVERTED (user 2026-07-18f): the wall TOP must
+            # be exactly flush with — or slightly inside — the shell's
+            # outer wall plane, and the wall base may hide INSIDE the
+            # shell but never protrude outward.  The previous outward
+            # batter (floor to the body edge, rim band starting 0.6 m
+            # outside) left a visible CREVICE between the shell top and
+            # the terrain wall top.  Now the rim band's inner ring lies
+            # exactly ON the body outline (flush top) and the floor is
+            # inset one node-split gap INSIDE it — the batter lives
+            # within the shell's wall thickness.  Mitre joins everywhere:
+            # round buffer arcs read as curved ridges against the
+            # straight object walls (the v19 collar lesson).
             #
-            # The clearance is kept from EVERY earlier-born shape, not
-            # pavement alone (Triangle4XP failure, tile +51-001
+            # The floor clearance is kept from EVERY earlier-born shape,
+            # not pavement alone (Triangle4XP failure, tile +51-001
             # 2026-07-18): the EGKR micro-trench's body outline ran
             # collinear with its terminal's building-pad ring, and the
             # un-inset floor edge minted a mm-jittered constraint mess
             # (125 nodes in half a metre) that killed segment recovery.
             try:
-                floor_geometry = body
+                floor_geometry = body.buffer(
+                    -_TUNNEL_WALL_SETBACK_M, join_style=2, mitre_limit=2.0)
                 envelope = body.buffer(
                     _TUNNEL_WALL_SETBACK_M + _TUNNEL_RIM_BAND_WIDTH_M
                     + 1.0)
@@ -1248,15 +1417,13 @@ def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
                 owned_near_floor = _owned_near(body_bounds)
                 if owned_near_floor is not None \
                         and not owned_near_floor.is_empty:
-                    floor_geometry = body.difference(
+                    floor_geometry = floor_geometry.difference(
                         owned_near_floor.intersection(envelope).buffer(
                             _TUNNEL_FLOOR_OWNED_CLEARANCE_M,
                             join_style=2, mitre_limit=2.0))
-                band_inner = body.buffer(
-                    _TUNNEL_WALL_SETBACK_M, join_style=2, mitre_limit=2.0)
                 band_geometry = body.buffer(
-                    _TUNNEL_WALL_SETBACK_M + _TUNNEL_RIM_BAND_WIDTH_M,
-                    join_style=2, mitre_limit=2.0).difference(band_inner)
+                    _TUNNEL_RIM_BAND_WIDTH_M,
+                    join_style=2, mitre_limit=2.0).difference(body)
                 band_bounds = band_geometry.bounds
                 owned_near = _owned_near((
                     band_bounds[0] - 1.0, band_bounds[1] - 1.0,
@@ -1270,6 +1437,11 @@ def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
                         owned_near.buffer(
                             _TUNNEL_WALL_SETBACK_M,
                             join_style=2, mitre_limit=2.0))
+                if anchor_seat_keep_out is not None:
+                    floor_geometry = floor_geometry.difference(
+                        anchor_seat_keep_out)
+                    band_geometry = band_geometry.difference(
+                        anchor_seat_keep_out)
             except Exception:
                 continue
             floor_parts = (
@@ -1294,7 +1466,8 @@ def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
                 # the rim is meaningless without a floor to wall down to.
                 continue
             floor_plate_count += body_floor_born
-            for band_part in _split_annulus_to_simple_parts(band_geometry):
+            for band_part in _chop_long_band_parts(
+                    _split_annulus_to_simple_parts(band_geometry)):
                 if band_part.area < 1.0:
                     continue
                 # TERRAIN-TRUE rim (user screenshots 2026-07-18c, EGLL
@@ -1333,10 +1506,13 @@ def build_tunnel_layout_shapes(layout, dem, tile_lat, tile_lon):
                 f"   [object-tunnel] {resources}: {yielded_area:.0f} m2 of "
                 "body under airside pavement kept at pavement grade",
             )
+        facility_depth = max(
+            float(record[0].body_depth_m) for record in member_records)
         UI.vprint(
             1,
             f"   [object-tunnel] {resources}: trench floor {floor_elevation:.2f} "
             f"m, rim {rim_elevation:.2f} m (datum {float(datum):.2f}, body "
-            f"depth {float(tunnel.body_depth_m):.2f} m)",
+            f"depth {facility_depth:.2f} m, "
+            f"{len(member_records)} shell(s))",
         )
     return floor_plate_count, rim_plate_count

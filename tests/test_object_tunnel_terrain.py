@@ -342,10 +342,71 @@ class TestPavementSubtraction:
         floors, rims = assembly.build_tunnel_layout_shapes(
             layout, _FakeDem(100.0), TILE_LATITUDE, TILE_LONGITUDE
         )
-        # A single simply-connected body: one floor pan, and a rim collar
-        # split into pieces (the annulus cannot be a single simple polygon).
+        # A single simply-connected body: one floor pan, and at least one
+        # rim piece (the anchor-seat keep-out may open the annulus into a
+        # single C-shaped band; long bands are chopped for terrain-true
+        # sampling).
         assert floors == 1
-        assert rims >= 2
+        assert rims >= 1
+
+
+# ---------------------------------------------------------------------------
+# SAME-ANCHOR FACILITY GROUPING + ANCHOR SEAT (user 2026-07-18f)
+# ---------------------------------------------------------------------------
+
+class TestFacilityGrouping:
+    def test_same_anchor_shells_join_with_a_corridor_cut(self):
+        # EGLL west: the ramp skin and the crossing box share ONE
+        # placement anchor; the open trench between them has no object.
+        # Same-anchor tunnels are one facility — the corridor between
+        # their shells is cut at the facility floor.
+        from shapely.geometry import Point
+
+        near_shell = _tunnel(body_depth_m=5.0)
+        far_footprint = Polygon([
+            (140.0, -8.0), (180.0, -8.0), (180.0, 8.0), (140.0, 8.0)])
+        far_shell = _tunnel(body_depth_m=7.0, deck_footprint=far_footprint)
+        layout = _FakeLayout()
+        setattr(
+            layout, assembly.CLASSIFICATION_ATTRIBUTE,
+            _Classification([near_shell, far_shell]),
+        )
+        floors, _rims = assembly.build_tunnel_layout_shapes(
+            layout, _FakeDem(100.0), TILE_LATITUDE, TILE_LONGITUDE
+        )
+        assert floors >= 1
+        floor_union = unary_union(
+            [p.polygon for p in _floor_plates(layout)])
+        # The open corridor between the shells (x 100..140) is floored.
+        assert floor_union.covers(Point(120.0, 0.0))
+        # One facility floor at the DEEPEST member's law value:
+        # 100 - 7 - 0.5 = 92.5.
+        floor_values = {a for p in _floor_plates(layout)
+                        for a in p.node_altitudes}
+        assert all(v == pytest.approx(92.5) for v in floor_values)
+
+    def test_anchor_seat_pins_the_datum_inside_the_cut(self):
+        # The shells drape at terrain(anchor); when the facility cut
+        # reaches the anchor a seat plate pins it at the datum so the
+        # objects never sink by the cut depth.
+        layout = _FakeLayout()
+        setattr(
+            layout, assembly.CLASSIFICATION_ATTRIBUTE,
+            _Classification([_tunnel(body_depth_m=5.0)]),
+        )
+        assembly.build_tunnel_layout_shapes(
+            layout, _FakeDem(100.0), TILE_LATITUDE, TILE_LONGITUDE
+        )
+        seats = [s for s in layout.shapes
+                 if s.ref == "object_tunnel_anchor_seat"]
+        assert len(seats) == 1
+        assert all(a == pytest.approx(100.0)
+                   for a in seats[0].node_altitudes)
+        # The floor keeps a node-split clearance around the seat.
+        floor_union = unary_union(
+            [p.polygon for p in _floor_plates(layout)])
+        assert floor_union.distance(seats[0].polygon) >= (
+            assembly._TUNNEL_WALL_SETBACK_M - 0.05)
 
 
 # ---------------------------------------------------------------------------
@@ -376,37 +437,55 @@ class TestFlushWalls:
         )
         return layout, pavement
 
-    def test_floor_covers_the_whole_body(self):
-        # The 100 x 30 m body is floored to its edge — the old 1.2 m inset
-        # left the terrain wall base protruding INTO the shell.
-        layout, _pavement = self._built()
-        floor_union = unary_union(
-            [p.polygon for p in _floor_plates(layout)])
-        assert floor_union.area == pytest.approx(3000.0, rel=0.01)
+    def test_floor_lies_one_gap_inside_the_body(self):
+        # INVERTED flush walls (user 2026-07-18f): the wall top is flush
+        # ON the shell outline and the batter hides INSIDE the shell —
+        # the floor sits one node-split gap inside the body, never
+        # outside it.
+        from shapely.geometry import box
 
-    def test_rim_band_lies_outside_the_body(self):
         layout, _pavement = self._built()
         floor_union = unary_union(
             [p.polygon for p in _floor_plates(layout)])
+        body = box(0.0, -15.0, 100.0, 15.0)
+        assert body.contains(floor_union)
+        gap = body.exterior.distance(floor_union)
+        assert assembly._TUNNEL_WALL_SETBACK_M - 0.05 <= gap \
+            <= assembly._TUNNEL_WALL_SETBACK_M + 0.1
+
+    def test_rim_band_top_is_flush_on_the_body_outline(self):
+        from shapely.geometry import box
+
+        layout, _pavement = self._built()
         rim_union = unary_union([p.polygon for p in _rim_plates(layout)])
-        # No overlap with the floored body, and the wall gap between the
-        # two rows is the setback (node-split safe, near-vertical).
-        assert rim_union.intersection(floor_union).area < 1e-6
+        body = box(0.0, -15.0, 100.0, 15.0)
+        # The band starts exactly ON the outline (flush top, no outside
+        # crevice) and lies outside the body interior.
+        assert rim_union.distance(body.exterior) < 1e-6
+        # Sub-0.1 m2 slivers are chopper rotation float-jitter (microns
+        # deep over hundreds of metres of shared edge).
+        assert rim_union.intersection(body).area < 0.1
+        # Wall gap between the band's inner ring (the outline) and the
+        # floor is the setback — node-split safe, near-vertical, hidden
+        # within the shell's wall thickness.
+        floor_union = unary_union(
+            [p.polygon for p in _floor_plates(layout)])
         assert floor_union.distance(rim_union) == pytest.approx(
             assembly._TUNNEL_WALL_SETBACK_M, abs=0.1)
 
-    def test_floor_keeps_clearance_from_pavement_only(self):
+    def test_floor_keeps_clearance_from_pavement(self):
         layout, pavement = self._built(with_pavement=True)
         floor_union = unary_union(
             [p.polygon for p in _floor_plates(layout)])
         # Bucket-safe gap where the body abuts pavement...
         assert floor_union.distance(pavement.polygon) >= (
             assembly._TUNNEL_FLOOR_OWNED_CLEARANCE_M - 0.05)
-        # ...while the free edges stay flush: the floor still reaches the
-        # body's outer boundary (y = ±15) away from the pavement band.
+        # ...while the free edges keep the uniform one-gap inset from
+        # the body outline (y = +-15 minus the setback).
         minimum_x, minimum_y, maximum_x, maximum_y = floor_union.bounds
-        assert minimum_y == pytest.approx(-15.0, abs=0.05)
-        assert maximum_y == pytest.approx(15.0, abs=0.05)
+        inset = assembly._TUNNEL_WALL_SETBACK_M
+        assert minimum_y == pytest.approx(-15.0 + inset, abs=0.05)
+        assert maximum_y == pytest.approx(15.0 - inset, abs=0.05)
 
     def test_rim_band_is_terrain_true_not_datum_flat(self):
         # EGLL west end (user 2026-07-18c): Tunnel/6+7 anchor ~100 m from
