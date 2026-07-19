@@ -54,6 +54,24 @@ STEP_LABELS = {
     "imagery": "imagery & DSF",
     "overlays": "overlays",
 }
+# Noun forms for end-of-run failure reporting ("the mesh step failed") —
+# the progress labels above are gerunds and read badly in a sentence.
+STEP_FAILURE_NOUNS = {
+    "vector": "vector data",
+    "mesh": "mesh",
+    "masks": "water masks",
+    "imagery": "imagery/DSF",
+    "overlays": "overlay",
+}
+
+
+def failed_steps_error_text(failed_step_keys):
+    """One sentence naming the step(s) whose build function reported
+    failure, for the tile's ``BuildDone.error``."""
+    nouns = [STEP_FAILURE_NOUNS.get(key, key) for key in failed_step_keys]
+    if len(nouns) == 1:
+        return "the %s step failed (see the console log)" % nouns[0]
+    return "the %s steps failed (see the console log)" % " and ".join(nouns)
 SCAN_FLUSH_SECONDS = 0.1     # scan streaming cadence (~10 Hz)
 ETA_EMIT_SECONDS = 1.0       # RunEta cadence
 RATE_MIN_SPAN_SECONDS = 3.0  # need this much window before trusting a rate
@@ -823,7 +841,7 @@ class EngineSession:
                 UI.reset_total_elapsed()
                 if any(k != "overlays" for k, _, _ in plan):
                     tile.make_dirs()
-                failed = False
+                failed_step_keys = []
                 # Percent windows proportional to this tile's predicted
                 # step seconds (static weights are only the fallback).
                 tile_plan = plan
@@ -844,7 +862,7 @@ class EngineSession:
                     if result == 0 and UI.red_flag:
                         break
                     if result == 0:
-                        failed = True
+                        failed_step_keys.append(key)
                 if UI.red_flag:
                     self._emit(TileState(lat=lat, lon=lon, state="queued",
                                          label="stopped"))
@@ -856,12 +874,13 @@ class EngineSession:
                         UI.red_flag = False
                         continue
                     break
-                if failed:
+                if failed_step_keys:
                     errors += 1
                     self._emit(TileState(lat=lat, lon=lon, state="error",
                                          label="failed"))
-                    self._emit(BuildDone(lat=lat, lon=lon, ok=False,
-                                         error="a build step failed"))
+                    self._emit(BuildDone(
+                        lat=lat, lon=lon, ok=False,
+                        error=failed_steps_error_text(failed_step_keys)))
                 else:
                     done += 1
                     self._emit(TileState(lat=lat, lon=lon, state="done",
@@ -886,8 +905,9 @@ class EngineSession:
                 errors += 1
                 self._emit(TileState(lat=lat, lon=lon, state="error",
                                      label="failed"))
-                self._emit(BuildDone(lat=lat, lon=lon, ok=False,
-                                     error="exception (see log)"))
+                self._emit(BuildDone(
+                    lat=lat, lon=lon, ok=False,
+                    error="crashed with an exception (see the console log)"))
         cancelled = bool(UI.red_flag)
         if not run_completed:
             with self._work_queue_lock:

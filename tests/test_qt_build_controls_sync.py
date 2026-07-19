@@ -153,3 +153,64 @@ def test_picking_a_value_resolves_the_block(window):
     window.zl_combo.setCurrentText("17")
     assert window.imagery_combo.currentIndex() >= 0
     assert window.zl_combo.currentIndex() >= 0
+
+
+def test_user_pick_survives_panel_refresh_on_same_selection(window):
+    """Async panel refreshes (scan results streaming in, build
+    bookkeeping) re-run the sync on an unchanged selection; they must
+    not snap the combos back to the tiles' recorded provenance after
+    the user deliberately picked different values."""
+    first, second = _two_provider_codes(window)
+    _write_tile_cfg(window, 48, -6, website=first, zoomlevel=17)
+    window.map.set_selection({(48, -6)})
+    assert window.imagery_combo.currentText() == first
+
+    window.imagery_combo.setCurrentText(second)
+    window.zl_combo.setCurrentText("16")
+    window._active_changed(window.map.active_tile())
+    assert window.imagery_combo.currentText() == second
+    assert window.zl_combo.currentText() == "16"
+
+
+def test_reselecting_tiles_resyncs_the_combos(window):
+    first, second = _two_provider_codes(window)
+    _write_tile_cfg(window, 48, -6, website=first, zoomlevel=17)
+    window.map.set_selection({(48, -6)})
+    window.imagery_combo.setCurrentText(second)
+
+    # A GENUINE selection change re-arms the sync: dropping and
+    # re-taking the selection points the combos back at the config.
+    window.map.set_selection(set())
+    window.map.set_selection({(48, -6)})
+    assert window.imagery_combo.currentText() == first
+    assert window.zl_combo.currentText() == "17"
+
+
+def test_start_build_uses_the_user_picked_values(window, monkeypatch):
+    """start_build must hand the engine the values showing in the
+    toolbar at click time — its own panel refresh used to reset the
+    combos to the tiles' recorded provenance BEFORE they were read,
+    silently rebuilding with the old imagery source."""
+    first, second = _two_provider_codes(window)
+    _write_tile_cfg(window, 48, -6, website=first, zoomlevel=17)
+    window.map.set_selection({(48, -6)})
+    assert window.imagery_combo.currentText() == first
+
+    window.imagery_combo.setCurrentText(second)
+    window.zl_combo.setCurrentText("16")
+
+    calls = []
+
+    def fake_enqueue_build(tiles, **kwargs):
+        calls.append((list(tiles), kwargs))
+        # "Not started": start_build unwinds its run bookkeeping, so the
+        # window closes cleanly without a live build to stop.
+        return False
+
+    monkeypatch.setattr(window._session, "enqueue_build",
+                        fake_enqueue_build)
+    window.start_build()
+    assert calls, "start_build never reached enqueue_build"
+    kwargs = calls[0][1]
+    assert kwargs["provider"] == second
+    assert kwargs["zoomlevel"] == 16

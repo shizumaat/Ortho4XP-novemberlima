@@ -15,6 +15,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import traceback
 
 from PySide6.QtCore import QByteArray, QEvent, QObject, Qt, QTimer, Signal
@@ -271,6 +272,10 @@ class MainWindow(QMainWindow):
         self._progress_states = {}
         self._building = False
         self._stop_requested = False
+        # Last (output dir, selection) the toolbar combos were synced to:
+        # _sync_build_controls_to_selection runs once per selection so
+        # panel refreshes never clobber a user-picked imagery source/ZL.
+        self._combos_synced_to = None
 
         # --- pipeline adapters -----------------------------------------
         UI.verbosity = int(self.prefs.get("verbosity", 1))
@@ -296,12 +301,18 @@ class MainWindow(QMainWindow):
             EV.StepProgress: self._on_step_progress,
             EV.TileState: self._on_tile_state,
             EV.RunEta: self._on_run_eta,
+            EV.BuildDone: self._on_build_done,
             EV.RunDone: self._on_run_done,
         }
         self._scan_built = {}
         self._scan_installed = set()
         self._last_run_eta = None
         self._build_t0 = None
+        # Per-tile timing/outcome for the end-of-run console report:
+        # started_at is stamped by the tile's FIRST progress event (queue
+        # wait never counts as build time), results by its BuildDone.
+        self._tile_started_at = {}
+        self._tile_results = {}
         self._done_count = 0
         self._ntiles = 0
 
@@ -933,7 +944,16 @@ class MainWindow(QMainWindow):
         combo (it shows "--") and :meth:`start_build` refuses to run until
         the user picks a value.  Tiles with no recorded value impose
         nothing, and an empty selection leaves the combos alone.
+
+        The sync runs once per selection: panel refreshes on an UNCHANGED
+        selection (scan results streaming in, build bookkeeping) must not
+        snap the combos back to the recorded provenance after the user
+        deliberately picked a different value for the next build.
         """
+        selection_key = (self.output_dir(), frozenset(selection))
+        if selection_key == self._combos_synced_to:
+            return
+        self._combos_synced_to = selection_key
         import O4_Settings_Model as SM
 
         websites = set()
@@ -1388,6 +1408,13 @@ class MainWindow(QMainWindow):
                 "toolbar before building." % " and the ".join(unresolved)
             )
             return
+        # Freeze the toolbar choices NOW: the panel refreshes below
+        # (_active_changed → _sync_build_controls_to_selection) re-read
+        # the selected tiles' recorded provenance and could otherwise
+        # snap the combos back to it, silently overriding what the user
+        # just picked for this build.
+        provider = self.imagery_combo.currentText()
+        zoomlevel = int(self.zl_combo.currentText())
         if self.chk_skip_built.isChecked():
             todo = [t for t in selection if t not in self._built]
             skipped = len(selection) - len(todo)
@@ -1411,7 +1438,8 @@ class MainWindow(QMainWindow):
 
         if self._building:
             self._queue_into_running_build(
-                todo, do_vector, do_imagery, do_overlays)
+                todo, provider, zoomlevel,
+                do_vector, do_imagery, do_overlays)
             return
 
         self._building = True
@@ -1433,8 +1461,8 @@ class MainWindow(QMainWindow):
 
         started = self._session.enqueue_build(
             todo,
-            provider=self.imagery_combo.currentText(),
-            zoomlevel=int(self.zl_combo.currentText()),
+            provider=provider,
+            zoomlevel=zoomlevel,
             custom_build_dir=self.output_dir(),
             do_vector=do_vector,
             do_imagery=do_imagery,
@@ -1447,8 +1475,8 @@ class MainWindow(QMainWindow):
             self._update_build_summary()
             self._status("The build could not be started.")
 
-    def _queue_into_running_build(self, todo, do_vector, do_imagery,
-                                  do_overlays):
+    def _queue_into_running_build(self, todo, provider, zoomlevel,
+                                  do_vector, do_imagery, do_overlays):
         """Append a batch to the run in progress; it starts as soon as
         the orchestrator has capacity for it."""
         fresh = [t for t in todo if not self._tile_in_active_run(t)]
@@ -1458,8 +1486,8 @@ class MainWindow(QMainWindow):
             return
         accepted = self._session.enqueue_build(
             fresh,
-            provider=self.imagery_combo.currentText(),
-            zoomlevel=int(self.zl_combo.currentText()),
+            provider=provider,
+            zoomlevel=zoomlevel,
             custom_build_dir=self.output_dir(),
             do_vector=do_vector,
             do_imagery=do_imagery,
@@ -1473,6 +1501,9 @@ class MainWindow(QMainWindow):
             return
         for tile in fresh:
             self._progress_states[tile] = ("queued", "queued", 0)
+            # A finished tile being built again starts a fresh stopwatch.
+            self._tile_started_at.pop(tile, None)
+            self._tile_results.pop(tile, None)
         self.map.set_progress(self._progress_states)
         self._add_progress_rows(fresh)
         self._ntiles += len(fresh)
@@ -1494,7 +1525,9 @@ class MainWindow(QMainWindow):
         self._add_progress_rows(todo)
         self._done_count = 0
         self._ntiles = len(todo)
-        self._build_t0 = __import__("time").time()
+        self._tile_started_at = {}
+        self._tile_results = {}
+        self._build_t0 = time.time()
         self.progress_title.setText(
             "<b>Building %d tile%s</b>"
             % (len(todo), "s" if len(todo) > 1 else "")
@@ -1552,6 +1585,7 @@ class MainWindow(QMainWindow):
 
     def _on_step_progress(self, event):
         tile = (event.lat, event.lon)
+        self._tile_started_at.setdefault(tile, time.time())
         state = "indeterminate" if event.indeterminate else "active"
         self._progress_states[tile] = (state, event.label, event.percent)
         self.map.set_progress(self._progress_states)
@@ -1618,18 +1652,33 @@ class MainWindow(QMainWindow):
         else:
             self.eta_label.setText("Remaining —")
 
+    def _on_build_done(self, event):
+        """One tile's terminal outcome: remember it (with the tile's own
+        wall time) for the end-of-run console report."""
+        tile = (event.lat, event.lon)
+        started_at = self._tile_started_at.get(tile)
+        seconds = (time.time() - started_at) if started_at else None
+        self._tile_results[tile] = (event.ok, event.error, seconds)
+
     def _on_run_done(self, event):
-        done, errors = event.done_count, event.error_count
         self._building = False
         self._last_run_eta = None
         self._elapsed_timer.stop()
         self.stop_btn.setEnabled(False)
         self.stop_btn.setText("■ Stop")
         self.setWindowTitle("Ortho4XP " + O4_Version.version)
-        summary = "Build finished: %d ok, %d failed." % (done, errors)
-        if self._stop_requested:
-            summary = "Build stopped: %d done, %d failed." % (done, errors)
-        print(summary)
+        total_seconds = (
+            time.time() - self._build_t0
+            if self._build_t0 is not None else None
+        )
+        (summary, detail_lines) = _compose_run_report(
+            sorted(self._progress_states),
+            self._tile_results,
+            self._progress_states,
+            total_seconds,
+            self._stop_requested,
+        )
+        print("\n".join([summary] + detail_lines))
         self._status(summary)
         self.progress_title.setText("<b>%s</b>" % summary)
         UI.is_working = False
@@ -1853,6 +1902,81 @@ def _fmt_duration(seconds):
     if seconds < 3600:
         return "%d m %02d s" % (seconds // 60, seconds % 60)
     return "%d h %02d m" % (seconds // 3600, (seconds % 3600) // 60)
+
+
+def _compose_run_report(tiles, tile_results, progress_states,
+                        total_seconds, stopped):
+    """The end-of-run console report: ``(summary, detail_lines)``.
+
+    One tile: a single summary line naming the tile and its build time
+    (or its failure).  Several tiles: a whole-run summary line, then one
+    detail line per tile — its build time, or why it failed.  A stopped
+    run keeps the done/failed counts in the summary; tiles the stop (or
+    a failure) prevented from finishing say so in their detail line.
+
+    ``tile_results`` maps tile -> (ok, error, seconds) from BuildDone;
+    ``seconds`` (and ``total_seconds``) may be None when no timing was
+    observed (e.g. a run that never started a step).
+    """
+    total_text = (
+        _fmt_duration(total_seconds) if total_seconds is not None else None)
+
+    def _tile_outcome(tile):
+        """(ok_or_None, phrase) — ok None means the tile never finished."""
+        result = tile_results.get(tile)
+        if result is None:
+            (_state, label, _percent) = progress_states.get(
+                tile, (None, None, 0))
+            if label == "stopped":
+                return (None, "stopped before finishing")
+            return (None, "never started")
+        (ok, error, seconds) = result
+        duration = _fmt_duration(seconds) if seconds is not None else None
+        if ok:
+            return (True, "built in %s" % duration if duration else "built")
+        reason = error or "failed (see the console log)"
+        if duration:
+            return (False, "failed after %s — %s" % (duration, reason))
+        return (False, "failed — %s" % reason)
+
+    if len(tiles) == 1 and not stopped:
+        tile = tiles[0]
+        name = FNAMES.short_latlon(*tile)
+        result = tile_results.get(tile)
+        if result is not None:
+            (ok, _error, seconds) = result
+            duration = (
+                _fmt_duration(seconds) if seconds is not None
+                else total_text)
+            if ok:
+                if duration:
+                    return ("Tile %s finished in %s." % (name, duration), [])
+                return ("Tile %s finished." % name, [])
+            (_ok, phrase) = _tile_outcome(tile)
+            return ("Tile %s %s." % (name, phrase), [])
+        return ("Tile %s was not built." % name, [])
+
+    ok_count = sum(
+        1 for tile in tiles if tile_results.get(tile, (False,))[0])
+    failed_count = sum(
+        1 for tile in tiles
+        if tile in tile_results and not tile_results[tile][0])
+    if stopped:
+        summary = "Build stopped%s: %d done, %d failed." % (
+            " after %s" % total_text if total_text else "",
+            ok_count, failed_count)
+    elif failed_count:
+        summary = "Build finished%s: %d ok, %d failed." % (
+            " in %s" % total_text if total_text else "",
+            ok_count, failed_count)
+    else:
+        summary = ("Build finished in %s." % total_text
+                   if total_text else "Build finished.")
+    detail_lines = [
+        "  %s: %s" % (FNAMES.short_latlon(*tile), _tile_outcome(tile)[1])
+        for tile in tiles
+    ]
+    return (summary, detail_lines)
 
 
 def _fmt_remaining(seconds):
