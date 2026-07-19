@@ -673,6 +673,9 @@ class MainWindow(QMainWindow):
         coral_atlas_action = QAction("Allen Coral Atlas reef bathymetry…", self)
         coral_atlas_action.triggered.connect(self.open_coral_atlas_dialog)
         tools_menu.addAction(coral_atlas_action)
+        msfs_convert_action = QAction("Convert MSFS airport…", self)
+        msfs_convert_action.triggered.connect(self.open_msfs_convert_dialog)
+        tools_menu.addAction(msfs_convert_action)
 
         help_menu = self.menuBar().addMenu("&Help")
         wizard_action = QAction("Run setup assistant…", self)
@@ -755,6 +758,15 @@ class MainWindow(QMainWindow):
         )
         dialog = QTCORAL.CoralAtlasDialog(
             self, initial_lat=tile[0], initial_lon=tile[1]
+        )
+        dialog.show()
+
+    def open_msfs_convert_dialog(self):
+        """Tools menu: convert an MSFS airport package to Custom Scenery."""
+        import O4_Qt_MSFS_Convert as QTMSFS
+
+        dialog = QTMSFS.MSFSConvertDialog(
+            self, self.prefs.get("xplane_dir", "")
         )
         dialog.show()
 

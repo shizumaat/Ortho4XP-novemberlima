@@ -1,0 +1,184 @@
+{
+  "airport": "KRDM",
+  "source": "Overpass API (overpass-api.de/api/interpreter) bbox 44.24,-121.17,44.27,-121.13; way 104478704 tagged aeroway=terminal. Only terminal-tagged building in query. Cross-check: expanded to ~140,000 sqft total floor area at 2010 ribbon-cutting (https://en.wikipedia.org/wiki/Roberts_Field ; https://flyrdm.com/terminal-expansion/ ; https://www.rsandh.com/projects/redmond-municipal-airport-terminal-concourse-expansion/ ).",
+  "osm_ids": [
+    104478704
+  ],
+  "centroid": {
+    "lat": 44.253096,
+    "lon": -121.160848
+  },
+  "parts": [
+    {
+      "name": "terminal",
+      "osm_id": 104478704,
+      "footprint_latlon": [
+        [
+          44.2531,
+          -121.16171
+        ],
+        [
+          44.253365,
+          -121.161069
+        ],
+        [
+          44.25344,
+          -121.161128
+        ],
+        [
+          44.25347,
+          -121.161058
+        ],
+        [
+          44.253494,
+          -121.160999
+        ],
+        [
+          44.253434,
+          -121.160958
+        ],
+        [
+          44.253676,
+          -121.16037
+        ],
+        [
+          44.253484,
+          -121.160219
+        ],
+        [
+          44.253032,
+          -121.159867
+        ],
+        [
+          44.253276,
+          -121.159268
+        ],
+        [
+          44.253225,
+          -121.159228
+        ],
+        [
+          44.252325,
+          -121.161433
+        ],
+        [
+          44.252374,
+          -121.161472
+        ],
+        [
+          44.25252,
+          -121.161116
+        ],
+        [
+          44.252811,
+          -121.161351
+        ],
+        [
+          44.25287,
+          -121.161191
+        ],
+        [
+          44.252976,
+          -121.161285
+        ],
+        [
+          44.252866,
+          -121.161535
+        ],
+        [
+          44.2531,
+          -121.16171
+        ]
+      ],
+      "footprint_xz_m": [
+        [
+          -68.8,
+          -0.4
+        ],
+        [
+          -17.6,
+          -29.8
+        ],
+        [
+          -22.3,
+          -38.2
+        ],
+        [
+          -16.8,
+          -41.5
+        ],
+        [
+          -12.1,
+          -44.2
+        ],
+        [
+          -8.8,
+          -37.5
+        ],
+        [
+          38.1,
+          -64.4
+        ],
+        [
+          50.1,
+          -43.0
+        ],
+        [
+          78.2,
+          7.2
+        ],
+        [
+          125.9,
+          -19.9
+        ],
+        [
+          129.2,
+          -14.2
+        ],
+        [
+          -46.7,
+          85.8
+        ],
+        [
+          -49.8,
+          80.3
+        ],
+        [
+          -21.4,
+          64.1
+        ],
+        [
+          -40.2,
+          31.8
+        ],
+        [
+          -27.4,
+          25.2
+        ],
+        [
+          -34.9,
+          13.4
+        ],
+        [
+          -54.8,
+          25.6
+        ],
+        [
+          -68.8,
+          -0.4
+        ]
+      ],
+      "tags": {
+        "aeroway": "terminal",
+        "building": "yes"
+      }
+    }
+  ],
+  "bbox_m": {
+    "east_west": 198.0,
+    "north_south": 150.2
+  },
+  "principal_axis_bearing_deg_true": 62.4,
+  "stated_area_sqft": 140000,
+  "notes": "OSM has the terminal mapped as a SINGLE non-convex polygon (way 104478704, aeroway=terminal, building=yes), 18 unique vertices, no separate concourse/rotunda parts. Rings are CLOSED (first vertex repeated as last). Ground-footprint area from shoelace = 10807 m2 = ~116,300 sqft; published 140,000 sqft is TOTAL floor area (multi-level), consistent with a single-story footprint of this size. Envelope 198.0 m (E-W) x 150.2 m (N-S); the building's long walls run roughly ENE-WSW (PCA principal axis ~62 deg true), matching the passenger apron frontage. No height/levels/roof tags present in OSM. x=meters EAST of centroid, z=meters SOUTH (z=-north). Confidence: HIGH on identity (authoritative aeroway=terminal tag, isolated from other clusters), MODERATE-HIGH on exact vertex geometry (OSM hand-tracing), footprint area cross-checked to published expansion figure."
+}

@@ -1,0 +1,87 @@
+{
+  "massing": [
+    {
+      "block": "landside_gabled_headhouse",
+      "role": "ticketing / check-in / baggage / entry (landside face)",
+      "relative_position": "west/front side facing the curb, parking and access road",
+      "approx_stories": 1,
+      "notes": "Series of stepped, sawtooth low-slope green metal gable and shed roofs of varying widths; rustic 'high-desert lodge' character with exposed glulam gable ends, tan walls and stone-masonry piers. This is the older core (pre-2009), lengthened over time."
+    },
+    {
+      "block": "airside_two_story_departure_lounge",
+      "role": "second-level departure lounge / holdroom concourse (airside face)",
+      "relative_position": "east side facing the apron/ramp; the tallest element of the complex",
+      "approx_stories": 2,
+      "notes": "2009 HNTB expansion. Full-height (two-story) curtain-wall glazed box under a shallow green metal roof with a deep cantilevered overhang carried on tapered concrete piers. Bi-level (upper departures / lower arrivals)."
+    },
+    {
+      "block": "airside_gate_concourse",
+      "role": "single-story ground-boarding gate concourse (no jet bridges as built)",
+      "relative_position": "extends north/south along the apron from the two-story lounge",
+      "approx_stories": 1,
+      "notes": "Ribbon of holdroom windows, each bay sheltered by a repeating sloped green metal gate canopy; ground-level boarding via covered walkways to aircraft."
+    },
+    {
+      "block": "detached_atc_tower",
+      "role": "air traffic control tower (separate structure, not part of terminal)",
+      "relative_position": "near the terminal, set back from the curb",
+      "approx_stories": 6,
+      "notes": "Slender dark shaft with glazed cab; a strong vertical landmark next to the low terminal. Model as a distinct object."
+    }
+  ],
+  "roof": {
+    "forms": ["low-slope gables (landside, sawtooth/stepped)", "shallow shed with deep cantilevered overhang (airside)", "repeating sloped gate canopies over apron"],
+    "pitch_estimate_deg": 18,
+    "material": "standing-seam metal (ribbed panels; airside overhang near-flat ~8 deg, landside gables ~15-22 deg)",
+    "color_hex": "#63736a",
+    "overhang": "deep, roughly 1.5-2.5 m eave projection with exposed rafter/beam tails",
+    "fascia_color_hex": "#55655b"
+  },
+  "walls": {
+    "primary_material": "stucco / painted panel over frame (landside) and concrete/spandrel with glazing (airside)",
+    "primary_color_hex": "#c3b191",
+    "secondary_materials": ["basalt/lava stone masonry veneer (piers, bases, plinths)", "natural Douglas-fir glulam and wood soffits", "exposed cast-in-place concrete (airside piers)"],
+    "base_treatment": "rough-faced dark basalt (lava rock) stone masonry wainscot / piers at grade",
+    "base_color_hex": "#5a4d40"
+  },
+  "glazing": {
+    "curtain_wall_locations": ["two-story airside departure lounge (dominant glazed box)", "landside entry gable ends", "continuous holdroom window band along the gate concourse"],
+    "mullion_color_hex": "#2b2b2b",
+    "typical_grid": "airside: ~2 tall stories high x many bays wide (large vision-glass panels, one vertical mullion per ~1.2-1.8 m, one horizontal transom between floors); landside entry: single gable-height glazed screen divided into a few tall lights",
+    "glass_tint_hex": "#34424e"
+  },
+  "structure": {
+    "exposed_elements": ["glulam beams and purlins at gable ends and soffits (landside)", "tapered/battered concrete piers carrying the airside roof overhang", "exposed metal roof rafter tails"],
+    "column_material": "cast-in-place concrete (airside piers); glued-laminated timber (landside)",
+    "column_color_hex": "#9c968b"
+  },
+  "distinctive_features": [
+    "stepped/sawtooth green standing-seam gable roofline (multiple parallel ridges of different widths)",
+    "deep overhanging eaves throughout, both landside gables and airside cantilever",
+    "repeating sloped green gate canopies over each apron holdroom bay",
+    "bronze eagle sculpture on a rough basalt-stone plinth at the curbside entry",
+    "detached slender dark ATC tower adjacent to the terminal",
+    "high-desert material palette: green metal + tan walls + dark lava stone + honey glulam, set against the Cascade Range backdrop"
+  ],
+  "heights": {
+    "eave_m_estimate": 5,
+    "ridge_m_estimate": 10.5,
+    "method": "Scaled against the airside photo: fuel/box truck box height ~3.3 m and United CRJ fuselage/tail for the apron; single-story gate-concourse eave read ~5 m and the two-story glazed departure-lounge roof ~10-11 m (~2x the concourse). Landside gable ridges lower, ~7-9 m; landside eaves ~3.5-4.5 m. Standard 2.1 m doors used as secondary scale. Estimates +/-20%."
+  },
+  "landside_vs_airside": "Landside (west/curb) reads as a low, rustic lodge: several stepped green metal gables, tan walls, dark stone piers, exposed glulam, and a projecting entry canopy over the drop-off. Airside (east/apron) is taller and more modern: a two-story fully glazed departure lounge under a deep cantilevered green roof on tapered concrete piers, with a single-story gate concourse of repeating sloped canopies. The green standing-seam roof and material palette unify both faces.",
+  "canopies": {
+    "landside_entry_canopy": {"form": "projecting gable/curved green metal canopy over the curbside drop-off", "support": "columns / glulam brackets", "clearance_m_estimate": 4.0},
+    "airside_gate_canopies": {"form": "repeating sloped (mono-pitch) green metal canopies, one per holdroom/gate bay", "support": "steel/concrete posts and cantilevers off the concourse", "clearance_m_estimate": 4.0},
+    "airside_main_overhang": {"form": "deep cantilevered roof eave over the two-story glazed lounge", "support": "tapered concrete piers", "projection_m_estimate": 2.5}
+  },
+  "design_narrative": {
+    "landside_gabled_building_architect": "Barber Barrett Turner Architects (per Kirby Nagelhout Construction portfolio); general contractor Kirby Nagelhout Construction Company",
+    "landside_building_material_intent": "Stated palette: 'an exposed glu-lam structure, natural wood finishes, and stone masonry throughout' (Kirby Nagelhout portfolio).",
+    "2009_expansion_architect": "HNTB (per Wikipedia / Roberts Field); ~600% area increase, bi-level structure with a two-story windowed departure lounge and covered walkways to aircraft; opened October 2009.",
+    "current_terminal_size": "~132,000 sq ft, described as showcasing Central Oregon design elements.",
+    "future_expansion_not_built": "A separate $180-200M, 80,000+ sq ft concourse expansion (Hennebery Eddy Architects + RS&H; builder Skanska) broke ground ~2025 for ~2028 completion, adding a second-level concourse with seven jet bridges, mass-timber ceilings and curtain-wall with Cascade-silhouette solar shade fins. This is NOT reflected in the reference photos and should NOT be modeled as existing."
+  },
+  "confidence": {
+    "per_section_notes": "Massing/roof forms: HIGH (clear in airside ramp photo, oblique aerial, entry close-up, orthophoto). Colors: MEDIUM - green roof/fascia and dark tinted glass sampled directly (roof ~#6b786e sunlit, airside glass ~#2c3845); landside glass reads greener/teal (~#6f8f8e); tan wall and glulam amber are observational, not cleanly sampled (small/JPEG images, varied lighting). Heights: MEDIUM-LOW, scaled from vehicles/aircraft/doors, +/-20%. Two build eras present (pre-2009 landside gabled building + 2009 HNTB airside expansion); reconcile the two faces when modeling."
+  }
+}

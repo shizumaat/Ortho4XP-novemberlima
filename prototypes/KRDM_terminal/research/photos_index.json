@@ -1,0 +1,44 @@
+[
+  {
+    "file": "airside_terminal_ramp_2010_01.jpg",
+    "source_url": "https://commons.wikimedia.org/wiki/File:KRDM2010DEC.jpg",
+    "view": "airside",
+    "description": "Airside/apron facade from the ramp, Dec 2010 (post-2009 HNTB expansion): two-story glazed departure lounge at right, low green metal roof with deep overhang on tapered concrete piers, continuous sloped gate canopies over hold-room windows; United CRJ, fuel truck, apron light poles for scale."
+  },
+  {
+    "file": "landside_entry_facade_02.jpg",
+    "source_url": "https://aroundus.com/p/5551360-roberts-field",
+    "view": "landside",
+    "description": "Close-up of landside main entry: green standing-seam gable roof with deep overhanging eaves, exposed glulam beams/purlins, green-tinted curtain-wall glazing, stone-masonry base, warm wood soffits."
+  },
+  {
+    "file": "landside_aerial_oblique_01.jpg",
+    "source_url": "https://kirbynagelhout.com/portfolio-item/redmond-air-terminal-roberts-field/",
+    "view": "aerial",
+    "description": "Oblique aerial of landside (contractor portfolio): stepped/sawtooth green standing-seam gable and shed roofs, tan walls, stone accents, projecting entry canopies, glulam gable ends; curbside drop-off loop and parking in front."
+  },
+  {
+    "file": "terminal_2006_preexpansion_01.jpg",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Redmond_Municipal_Airport_terminal.jpg",
+    "view": "landside",
+    "description": "Landside front elevation of the core building (2006, before the 2009 airside expansion): multiple low green metal gable roofs, curved projecting entry canopy over the curb, tan walls; low resolution."
+  },
+  {
+    "file": "landside_curbside_busstop_01.jpg",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Redmond_Airport_-_HighDesert_POINT_(5913242367).jpg",
+    "view": "landside",
+    "description": "Curbside/parking approach, June 2011: bronze eagle sculpture on reddish basalt stone plinth, freestanding dark ATC tower behind, right edge shows the terminal's projecting green entry canopy; roadway and lot layout."
+  },
+  {
+    "file": "aerial_orthophoto_usgs_01.jpg",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Roberts_Field_-_Oregon.jpg",
+    "view": "aerial",
+    "description": "USGS top-down orthophoto (2006) of the whole airport; terminal complex and apron on the west side, crossing-runway (X) layout, high-desert surroundings. Good for footprint/orientation."
+  },
+  {
+    "file": "aerial_airnav_2008_01.jpg",
+    "source_url": "http://www.airnav.com/airport/krdm",
+    "view": "aerial",
+    "description": "Low-resolution oblique aerial of the airfield (Feb 2008) showing terminal, apron and ramps on the west side relative to the runways."
+  }
+]
