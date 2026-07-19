@@ -218,7 +218,7 @@ def _pool_world_bounds(
 # Bump when partition_structures' output shape or semantics change, or
 # when anything new starts feeding the partition (the pickle payload and
 # the hash must both change meaning together).
-_PARTITION_CACHE_VERSION = 1
+_PARTITION_CACHE_VERSION = 2  # 2: oversized-chain connector split
 
 
 def _cached_partition_structures(

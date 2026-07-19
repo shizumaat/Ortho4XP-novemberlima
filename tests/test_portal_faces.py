@@ -464,12 +464,18 @@ class TestPortalFaceAnchorSeat:
                 plates["crown"],
                 key=lambda shape: shape.polygon.distance(anchor))
             # The crown still COVERS the anchor (the object drapes at
-            # terrain(anchor) and must read deck grade), with real
-            # margin so the drape triangle is wholly deck-grade.
-            assert crown.polygon.covers(anchor)
-            assert crown.polygon.exterior.distance(anchor) >= 0.5
+            # terrain(anchor) and must read deck grade).  With the
+            # zero-lip seat the anchor sits ON the seat's front edge —
+            # the drape interpolates that edge's two deck-grade nodes —
+            # and the edge must SURVIVE locally around the anchor.
+            # covers() is float-fragile for a point exactly on the edge
+            # — distance 0 (within a micron) is the robust containment.
+            assert crown.polygon.distance(anchor) < 1e-6
+            assert crown.polygon.intersection(
+                anchor.buffer(0.6)).area >= 0.4
             # No crown vertex protrudes past the seat lip into the road
-            # (the old disk reached 5 m outward of the face line).
+            # (the old disk reached 5 m outward of the face line; the
+            # v20 rectangle's 1 m lip rendered as a squared fin).
             for vertex_x, _vertex_y in crown.polygon.exterior.coords:
                 protrusion = (vertex_x - anchor_east) * outward_sign
                 assert protrusion <= seat_lip + 0.05, (

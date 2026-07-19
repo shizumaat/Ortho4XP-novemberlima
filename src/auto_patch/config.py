@@ -2561,25 +2561,30 @@ TUNNEL_PORTAL_PAIR_BURIED_MARGIN_M = 1.0
 # mouth/crown/collar plates are built on a synthesized rectangle
 # CENTERED ON THE FACE ANCHOR — face width plus a shoulder each side,
 # half the depth outward (the road-grade mouth half) and half inward
-# (the deck-grade crown half over the buried bore).
-PORTAL_FACE_PLATE_SHOULDER_M = 3.0
+# (the deck-grade crown half over the buried bore).  Shoulder 3 -> 4 m
+# (user screenshots 2026-07-18e): the cut's lateral side walls stood
+# just proud of the portal object's flared wing walls and hid them —
+# one extra metre tucks the terrain behind the object.
+PORTAL_FACE_PLATE_SHOULDER_M = 4.0
 PORTAL_FACE_PLATE_DEPTH_M = 16.0
 # (user screenshots 2026-07-18b, EGGW) A hanging-face portal seats its
 # ANCHOR at deck grade — the object drapes at terrain(anchor) and the
 # face hangs BELOW its origin — but the anchor sits mid-road ON the
-# face line, so the deck-grade seat unavoidably protrudes into the
-# road.  A 5 m ROUND disk there rendered as a ~10 m arc-shaped tower
-# in the middle of the road at both EGGW mouths.  The seat is instead
-# a FACE-ALIGNED rectangle: half-width along the face each side of the
-# anchor, a minimal outward lip (just enough that the anchor's drape
-# triangle is wholly deck-grade), and a deeper inward reach that fuses
-# it with the crown across the crown's 1 m face setback.  The
-# road-grade mouth plate is cut back an extra CLEARANCE margin around
-# the seat so no seat node shares a ~0.5 m mesh node bucket with a
-# mouth node (first-writer interning would otherwise decide the wall
-# height at random — the v18 face-meeting trap).
+# face line.  A 5 m ROUND disk there rendered as a ~10 m arc-shaped
+# tower in the middle of the road at both EGGW mouths, and the v20
+# rectangle's 1 m outward lip still rendered as a squared fin (user
+# screenshots 2026-07-18e).  The seat is a FACE-ALIGNED rectangle
+# ENTIRELY BEHIND the face: its front edge passes exactly THROUGH the
+# anchor along the face line, so the drape at the anchor interpolates
+# between that edge's two deck-grade nodes no matter which triangle
+# claims the point — zero terrain stands outward of the face.  The
+# inward reach fuses it with the crown across the crown's 1 m face
+# setback.  The road-grade mouth plate is cut back an extra CLEARANCE
+# margin around the seat so no seat node shares a ~0.5 m mesh node
+# bucket with a mouth node (first-writer interning would otherwise
+# decide the wall height at random — the v18 face-meeting trap).
 PORTAL_FACE_ANCHOR_SEAT_HALF_WIDTH_M = 2.5
-PORTAL_FACE_ANCHOR_SEAT_OUTWARD_M = 1.0
+PORTAL_FACE_ANCHOR_SEAT_OUTWARD_M = 0.0
 PORTAL_FACE_ANCHOR_SEAT_INWARD_M = 4.0
 PORTAL_FACE_ANCHOR_SEAT_CLEARANCE_M = 0.9
 # Outward ray from each mouth sampled over this range for the mouth

@@ -7111,9 +7111,15 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                             # edge: the seat's inward reach may cross
                             # under the junction — trim it back with the
                             # 0.6 m node-split margin, UNLESS that would
-                            # take the seat edge within the anchor's own
-                            # drape clearance (coverage beats overlap
-                            # cleanliness; user JOSM review 2026-07-18d).
+                            # eat the anchor's own drape neighbourhood
+                            # (coverage beats overlap cleanliness; user
+                            # JOSM review 2026-07-18d).  With the seat's
+                            # front edge ON the face line the anchor
+                            # legitimately sits on the exterior — the
+                            # guard is that the front edge SURVIVES
+                            # locally: the trimmed part still covers the
+                            # anchor and keeps most of a 0.6 m half-disk
+                            # behind it.
                             if airside_pavement_union is not None:
                                 try:
                                     _seat_trim = anchor_seat.difference(
@@ -7125,11 +7131,15 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                                             _seat_trim, "geoms",
                                             [_seat_trim])
                                         if part.geom_type == "Polygon"
-                                        and part.covers(anchor_point)]
+                                        # covers() is float-fragile for
+                                        # the on-edge anchor; micron
+                                        # distance is the robust test.
+                                        and part.distance(anchor_point)
+                                        < 1e-6]
                                     if _seat_parts and (
-                                            _seat_parts[0].exterior
-                                            .distance(anchor_point)
-                                            >= 0.55):
+                                            _seat_parts[0].intersection(
+                                                anchor_point.buffer(0.6))
+                                            .area >= 0.4):
                                         anchor_seat = _seat_parts[0]
                                 except _GEOM_EXC:
                                     pass

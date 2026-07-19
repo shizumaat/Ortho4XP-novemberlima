@@ -73,6 +73,246 @@ BROAD_PHASE_GRID_CELL_METRES = 6.0
 # costs centimetres, tearing is unrecoverable).
 NARROW_PHASE_POINT_TRIANGLE_BUDGET = 400_000
 
+# ── Connector split (design 2026-07-18, EGGW floating buildings) ─────
+# Co-baked payware packs chain independent buildings into airport-scale
+# contact components through LINEAR CONNECTOR objects — fences,
+# barriers, blast walls, light rows (measured EGGW: two components,
+# 3.1 km / 2.6 km diameter, 55 + 44 resources, spans 38.2 / 26.5 m).
+# The rigid-seat span gate rightly refuses one offset for such a chain,
+# but that left EVERY member at its authored y: whole terminals, signs
+# and stop-mark boards floated over the regraded ground.  A component
+# wider than the split threshold can never be a rigidly-seatable body
+# anyway, so it is RE-PARTITIONED with its linear-connector parts
+# removed from the contact graph: each real building seats on its own
+# offset, each connector seats (or span-skips) alone.  The accepted
+# cost is a possible small vertical step where a fence meets a building
+# across regraded ground — strictly better than the whole chain
+# floating (the steps only appear where ground varies, exactly where
+# the chain float was worst).  This deliberately amends the "no
+# post-hoc splitting" note on ``connected_structures``: splitting is
+# still forbidden for normally-sized structures; only never-seatable
+# oversized chains are split, at connector joints only.  The threshold
+# sits well above any REAL building complex (KCLT's terminal
+# concourses with their thin load-bearing canopy members measure
+# ~100-400 m and must never split — measured: a 100 m threshold
+# fragmented them 220 -> 343 structures) and well below the measured
+# fence-chained webs (EGGW 2646/3068 m, HECA kilometre-scale).
+CONNECTOR_SPLIT_MIN_DIAMETER_M = 800.0
+# Fences are authored as CHAINS of short panel parts (EGGW Fence2019:
+# each welded part is a ~2-3 m panel), so the "linear" test cannot
+# demand a long extent — inside an oversized component the aspect test
+# carries the discrimination, and the reattachment pass returns every
+# glue part that touches a single real building to that building.
+LINEAR_CONNECTOR_MAX_SHORT_EXTENT_M = 3.0
+LINEAR_CONNECTOR_MIN_LONG_EXTENT_M = 2.0
+LINEAR_CONNECTOR_MIN_ASPECT = 5.0
+# Thin bands alone did not break the measured EGGW chains — with the
+# 393/190 fence panels removed the components RE-COHERED through
+# BLOCKY glue (car fields, blast-barrier sections, light fixtures:
+# measured, both chains still 2.7-3.1 km).  Inside a never-seatable
+# component the robust discriminator is SIZE: real buildings are large
+# connected volumes, chain glue is small clutter.  Any part whose plan
+# longest extent is under this ceiling is glue; only larger parts form
+# the sub-component skeletons.  (A real building splits at a walkway
+# only inside an airport-scale chain, where neighbouring offsets are
+# locally near-equal and the cut is invisible.)
+CHAIN_GLUE_MAX_EXTENT_M = 12.0
+# A perimeter fence can be ONE welded part snaking around the whole
+# airfield (measured EGGW Fence2019: a single part spanning
+# 2889 x 632 m oriented box) — neither small nor a PCA-thin band.  Its
+# tell is SOLIDITY: a snaking wall's plan projection covers a
+# negligible fraction of its oriented box, while a real building's
+# roof/floor plates project nearly solid.
+CHAIN_GLUE_MAX_SOLIDITY = 0.05
+# Reattachment is for building-internal TRIM (parapets, sills, short
+# canopy beams).  A glue part longer than this never reattaches even
+# when it touches a single sub-component — the measured failure was the
+# 2889 m perimeter fence lassoing one connected terminal cluster,
+# "touching one sub-component" and ballooning the group right back to
+# 3.1 km.
+CHAIN_GLUE_REATTACH_MAX_EXTENT_M = 40.0
+
+
+def part_plan_extents(
+    vertex_array: "numpy.ndarray", part: list[Triangle]
+) -> tuple[float, float]:
+    """``(long, short)`` extents of the part's plan (x, z) footprint
+    along its principal axes — the oriented-bounding-box measure the
+    linear-connector test reads."""
+    indices = sorted({index for triangle in part for index in triangle})
+    plan = vertex_array[indices][:, [0, 2]]
+    if len(plan) < 2:
+        return (0.0, 0.0)
+    centered = plan - plan.mean(axis=0)
+    covariance = centered.T @ centered
+    eigenvalues, eigenvectors = numpy.linalg.eigh(covariance)
+    projected = centered @ eigenvectors
+    extents = projected.max(axis=0) - projected.min(axis=0)
+    long_extent = float(extents.max())
+    short_extent = float(extents.min())
+    return (long_extent, short_extent)
+
+
+def part_is_linear_connector(
+    vertex_array: "numpy.ndarray", part: list[Triangle]
+) -> bool:
+    """A part whose plan footprint is a long thin band — fence, barrier,
+    blast wall, light row.  Such parts CHAIN unrelated buildings into
+    unseatable components; they are never themselves buildings."""
+    long_extent, short_extent = part_plan_extents(vertex_array, part)
+    if long_extent < LINEAR_CONNECTOR_MIN_LONG_EXTENT_M:
+        return False
+    if short_extent > LINEAR_CONNECTOR_MAX_SHORT_EXTENT_M:
+        return False
+    if short_extent > 1e-9 and (
+            long_extent / short_extent) < LINEAR_CONNECTOR_MIN_ASPECT:
+        return False
+    return True
+
+
+def part_plan_area(
+    vertex_array: "numpy.ndarray", part: list[Triangle]
+) -> float:
+    """Total UNSIGNED plan (x, z) projected area of the part's
+    triangles.  Vertical faces project to ~zero; roofs and floors carry
+    their real area — the solidity numerator of the glue test."""
+    triangle_array = numpy.asarray(part, dtype=numpy.int64)
+    first = vertex_array[triangle_array[:, 0]][:, [0, 2]]
+    second = vertex_array[triangle_array[:, 1]][:, [0, 2]]
+    third = vertex_array[triangle_array[:, 2]][:, [0, 2]]
+    cross = (
+        (second[:, 0] - first[:, 0]) * (third[:, 1] - first[:, 1])
+        - (second[:, 1] - first[:, 1]) * (third[:, 0] - first[:, 0])
+    )
+    return float(numpy.abs(cross).sum() * 0.5)
+
+
+def part_is_chain_glue(
+    vertex_array: "numpy.ndarray", part: list[Triangle]
+) -> bool:
+    """A part that may glue an oversized chain but is never a building:
+    a SMALL part (fence panel, car, light fixture, barrier section), a
+    PCA-thin band (straight fence/barrier run), or a SPARSE SNAKE (one
+    welded perimeter-fence part ringing the airfield: huge oriented box,
+    negligible plan solidity)."""
+    long_extent, short_extent = part_plan_extents(vertex_array, part)
+    if long_extent < CHAIN_GLUE_MAX_EXTENT_M:
+        return True
+    if part_is_linear_connector(vertex_array, part):
+        return True
+    oriented_box_area = long_extent * short_extent
+    if oriented_box_area > 1e-9:
+        solidity = part_plan_area(vertex_array, part) / oriented_box_area
+        if solidity < CHAIN_GLUE_MAX_SOLIDITY:
+            return True
+    return False
+
+
+def split_oversized_components(
+    vertices: list[tuple[float, float, float]],
+    parts: list[list[Triangle]],
+    part_index_groups: list[list[int]],
+    epsilon_metres: float,
+) -> tuple[list[list[int]], int]:
+    """Re-partition never-seatable oversized components at their linear
+    connectors (see the CONNECTOR_SPLIT constants' comment).
+
+    ``contact_graph`` returns a SPANNING edge subset, so connector edges
+    cannot simply be deleted — a direct building-to-building contact may
+    have been skipped as redundant because a path through the fence
+    already joined them.  Instead the non-connector parts of an
+    oversized component are re-run through ``contact_graph`` fresh, so
+    real direct contacts re-form their own components.  Connector parts
+    become singleton structures.  Returns ``(groups, split_count)``."""
+    vertex_array = numpy.asarray(vertices, dtype=numpy.float64)
+    result: list[list[int]] = []
+    split_count = 0
+    for group in part_index_groups:
+        group_indices = sorted(
+            {index for part_index in group
+             for triangle in parts[part_index] for index in triangle})
+        plan = vertex_array[group_indices][:, [0, 2]]
+        extent = plan.max(axis=0) - plan.min(axis=0)
+        diameter = float(numpy.hypot(extent[0], extent[1]))
+        if diameter <= CONNECTOR_SPLIT_MIN_DIAMETER_M:
+            result.append(group)
+            continue
+        thin_parts = [
+            part_index for part_index in group
+            if part_is_chain_glue(vertex_array, parts[part_index])
+        ]
+        if not thin_parts:
+            result.append(group)
+            continue
+        kept = [index for index in group if index not in set(thin_parts)]
+        if not kept:
+            result.extend([thin] for thin in thin_parts)
+            split_count += 1
+            continue
+        sub_edges = contact_graph(
+            vertices, [parts[index] for index in kept], epsilon_metres)
+        sub_groups = [
+            [kept[local] for local in sub_group]
+            for sub_group in connected_structures(len(kept), sub_edges)
+        ]
+        # REATTACH thin parts that touch exactly ONE sub-component:
+        # building-internal trim (roof strips, parapet bands) is thin
+        # but not a connector, and leaving it out shattered real
+        # terminals (KCLT: 220 -> 382 structures).  Only a part that
+        # BRIDGES two or more sub-components — the actual fence between
+        # two buildings — stays out as its own singleton structure.
+        # Broad phase vectorised: a mega-chain holds hundreds of thin
+        # panels and thousands of member parts.
+        geometry_by_part = {
+            part_index: _PartGeometry(vertex_array, parts[part_index])
+            for part_index in group
+        }
+        members: list[int] = [
+            member for sub_group in sub_groups for member in sub_group
+        ]
+        member_sub_index = numpy.array([
+            sub_index
+            for sub_index, sub_group in enumerate(sub_groups)
+            for _member in sub_group
+        ])
+        member_minimums = numpy.array(
+            [geometry_by_part[member].box_minimum for member in members])
+        member_maximums = numpy.array(
+            [geometry_by_part[member].box_maximum for member in members])
+        for thin in thin_parts:
+            thin_long_extent, _thin_short = part_plan_extents(
+                vertex_array, parts[thin])
+            if thin_long_extent > CHAIN_GLUE_REATTACH_MAX_EXTENT_M:
+                sub_groups.append([thin])
+                continue
+            thin_geometry = geometry_by_part[thin]
+            overlap_mask = (
+                (thin_geometry.box_minimum - epsilon_metres
+                 <= member_maximums).all(axis=1)
+                & (member_minimums - epsilon_metres
+                   <= thin_geometry.box_maximum).all(axis=1)
+            )
+            touched: set[int] = set()
+            candidate_order = numpy.flatnonzero(overlap_mask)
+            for candidate in candidate_order:
+                sub_index = int(member_sub_index[candidate])
+                if sub_index in touched:
+                    continue
+                if _surfaces_in_contact(
+                        thin_geometry,
+                        geometry_by_part[members[candidate]],
+                        epsilon_metres):
+                    touched.add(sub_index)
+                    if len(touched) >= 2:
+                        break
+            if len(touched) == 1:
+                sub_groups[touched.pop()].append(thin)
+            else:
+                sub_groups.append([thin])
+        result.extend(sorted(sub_group) for sub_group in sub_groups)
+        split_count += 1
+    return (result, split_count)
+
 
 def weld_parts(
     vertices: list[tuple[float, float, float]],

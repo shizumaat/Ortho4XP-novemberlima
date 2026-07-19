@@ -826,6 +826,26 @@ def partition_structures(
     part_index_groups = obj8_partition.connected_structures(
         len(parts), contact_edges
     )
+    # Connector split (2026-07-18, EGGW floating buildings): an
+    # airport-scale chained component can never be seated by one rigid
+    # offset — re-partition it at its linear connectors so each real
+    # building bakes on its own (see the CONNECTOR_SPLIT constants in
+    # obj8_partition for the design and the accepted fence-joint cost).
+    part_index_groups, connector_splits = (
+        obj8_partition.split_oversized_components(
+            frame.shared_vertices, parts, part_index_groups, epsilon_metres
+        )
+    )
+    if connector_splits:
+        import O4_UI_Utils as UI
+
+        UI.vprint(
+            1,
+            f"   [object-anchor] connector split: {connector_splits} "
+            "oversized chained component(s) re-partitioned at their "
+            "linear connectors (fences/barriers) so member buildings "
+            "seat individually",
+        )
 
     structures: list[Structure] = []
     for part_indices in part_index_groups:

@@ -553,6 +553,64 @@ class TestDiscoverObjectPools:
         assert len(pools) == 2
 
 
+# ── connector split (2026-07-18, EGGW floating buildings) ─────────────
+
+
+class TestConnectorSplit:
+    def _structures_for(self, *boxes):
+        geometry = compound_geometry(*boxes)
+        placement = make_placement(
+            "chain.obj", PLANE_ANCHOR_LATITUDE, PLANE_ANCHOR_LONGITUDE
+        )
+        pool = ObjectPool(
+            placements=[placement],
+            resolved_paths={"chain.obj": "/nonexistent/chain.obj"},
+        )
+        return partition_structures(
+            pool,
+            {"chain.obj": geometry},
+            epsilon_metres=CONTACT_EPSILON_METRES,
+        )
+
+    def test_kilometre_fence_chain_splits_into_buildings(self):
+        # Two buildings a kilometre apart chained by one thin fence: the
+        # EGGW class (fences/barriers glued 40 structures into 2.6-3.1 km
+        # components; the span gate then left them ALL floating at their
+        # authored y).  The oversized component re-partitions: each
+        # building seats alone, the fence becomes its own singleton.
+        structures = self._structures_for(
+            (0.0, 20.0, 0.0, 8.0, 0.0, 20.0),       # west building
+            (1000.0, 1020.0, 0.0, 8.0, 0.0, 20.0),  # east building
+            (19.9, 1000.1, 0.0, 1.5, 4.0, 4.4),     # fence joining both
+        )
+        assert len(structures) == 3
+
+    def test_compact_complex_with_thin_members_stays_whole(self):
+        # The same shape under the 800 m threshold is a real building
+        # complex (KCLT: terminal concourses with thin load-bearing
+        # canopy members measured 100-400 m and must never split).
+        structures = self._structures_for(
+            (0.0, 20.0, 0.0, 8.0, 0.0, 20.0),
+            (100.0, 120.0, 0.0, 8.0, 0.0, 20.0),
+            (19.9, 100.1, 0.0, 1.5, 4.0, 4.4),
+        )
+        assert len(structures) == 1
+
+    def test_internal_trim_reattaches_to_its_building(self):
+        # A thin parapet strip touching ONLY its own building must ride
+        # with it through an oversized split (a fence elsewhere triggers
+        # the split); leaving it out shattered KCLT 220 -> 343.
+        structures = self._structures_for(
+            (0.0, 20.0, 0.0, 8.0, 0.0, 20.0),        # west building
+            (0.0, 30.0, 7.9, 8.4, 0.2, 0.6),         # its parapet strip
+            (1000.0, 1020.0, 0.0, 8.0, 0.0, 20.0),   # east building
+            (19.9, 1000.1, 0.0, 1.5, 4.0, 4.4),      # true fence
+        )
+        # west building + parapet reattached = 1, east building = 1,
+        # fence singleton = 1.
+        assert len(structures) == 3
+
+
 # ── inheritance (invariant I-8) ───────────────────────────────────────
 
 
