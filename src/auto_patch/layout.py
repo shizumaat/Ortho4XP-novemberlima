@@ -93,13 +93,23 @@ __all__ = [
 from O4_Geo_Utils import earth_radius as R_EARTH  # single source of truth
 SHARED_VERTEX_TOL_M = 0.5    # snap vertices closer than this together
 
-# Vertices that share an XY bucket but disagree on altitude by more
-# than ``VERTEX_ALT_MERGE_TOL_M`` are kept as separate node IDs.
-# Per user 2026-05-18 invariant: "two nodes can never share the
-# same location without sharing the same elevation."  Sub-metre
-# altitude differences are smoothed into one node (the rounded
-# average); larger differences represent a real wall / cliff and
-# must stay as distinct vertices so X-Plane renders the step.
+# NO-STACKED-NODES INVARIANT (owner ruling 2026-07-19, completing the
+# user 2026-05-18 invariant "two nodes can never share the same
+# location without sharing the same elevation"): coincident vertices
+# ALWAYS intern to ONE node with ONE consensus elevation — the emitter
+# never mints a second node id at the same canonical coordinate.  A
+# genuine level change must be HORIZONTAL wall geometry (two node
+# columns offset in plan — the ``retaining_wall`` machinery), never
+# coincident nodes with different elevations: those render as bare
+# near-vertical mesh tears (the CYXY d=0.00 audit pairs).
+#
+# ``VERTEX_ALT_MERGE_TOL_M`` no longer splits node ids (the pre-ruling
+# "clean wall" twin path is gone); it remains the threshold separating
+# a silent consensus merge (claims within it = solver/rounding noise)
+# from a level change that upstream must resolve as geometry — the
+# heal/blend passes and the stacked-conflict wall emitter reason with
+# it, and ``tools/check_grade.py::_check_stacked_nodes`` enforces the
+# structural invariant on the emitted OSM (cap 0).
 VERTEX_ALT_MERGE_TOL_M = 1.0
 
 # PAVEMENT-NODE RULE (user 2026-07-09): a pavement edge keeps a node
@@ -597,10 +607,6 @@ class PavementLayout:
         # a runway ring vertex (the A2 doctrine at emit: authorities
         # never adopt; soft receivers adopt).
         node_id_to_authority_alts: dict[int, list[float]] = {}
-        # Which ROLES claimed each authority node — the strip-adoption
-        # branch admits only WELD_DONOR_ROLES claimants (2026-07-17).
-        node_id_to_authority_roles: dict[int, set] = {}
-        current_shape_role: list = [None]
         # LAW-VALUE claims (feature B): the object-bridge plates carry
         # grade-law constants (deck-end / corridor-floor elevations) —
         # a node with a law claim takes the LAW value; other authority
@@ -634,7 +640,6 @@ class PavementLayout:
         })
         _SOFT_RECEIVER_ROLES = SOFT_RECEIVER_ROLES
         current_shape_is_soft = [False]
-        current_shape_is_strip = [False]
         current_shape_is_law = [False]
         current_shape_is_skirt = [False]
         next_nid = [-1]
@@ -644,8 +649,6 @@ class PavementLayout:
             if not current_shape_is_soft[0]:
                 node_id_to_authority_alts.setdefault(
                     nid, []).append(alt)
-                node_id_to_authority_roles.setdefault(
-                    nid, set()).add(current_shape_role[0])
             if current_shape_is_law[0]:
                 node_id_to_law_alts.setdefault(nid, []).append(alt)
             if current_shape_is_skirt[0]:
@@ -653,57 +656,28 @@ class PavementLayout:
 
         def _intern(x: float, y: float,
                     alt: float | None = None) -> int:
+            # NO-STACKED-NODES HARD MERGE (owner ruling 2026-07-19):
+            # one canonical point = ONE node id, always.  Every claim
+            # joins the node and the consensus pass resolves the value
+            # by precedence (law > authority > skirt > soft mean) —
+            # this subsumes the former altitude sub-grouping, the
+            # strip donor-gated adoption, and the fresh-twin "clean
+            # wall" path (all three could mint or preserve a second
+            # node at the same coordinate, which renders as a bare
+            # near-vertical mesh tear).  Level changes that must NOT
+            # be averaged away are resolved UPSTREAM as horizontal
+            # wall geometry before interning ever sees them
+            # (``emit_stacked_conflict_walls``).
             key = registry.get_or_add(float(x), float(y))
             existing = xy_to_nodes.get(key)
             if existing:
-                # Find the first existing node within altitude
-                # tolerance.  None matches any altitude (no claim).
-                for nid, claimed in existing:
-                    if alt is None or claimed is None:
-                        if alt is not None:
-                            _record_claim(nid, alt)
-                        return nid
-                    if abs(claimed - alt) <= VERTEX_ALT_MERGE_TOL_M:
-                        _record_claim(nid, alt)
-                        return nid
-                # PAVEMENT WINS at a pavement node (user ruling
-                # 2026-07-09): a graded strip NEVER emits a wall twin
-                # against an authority-claimed node — its vertex only
-                # coincides with the pavement corner through the
-                # canonical bucket (the layout-level coordinates can
-                # be decimetres apart, so the emitter's registry
-                # adoption cannot see it), and the fresh-nid path
-                # minted an unmerged-node cliff (CYXY junction #111,
-                # Δ1.71 m).  Adopt the authority node; the soft claim
-                # joins the plain mean only (the authority-aware
-                # consensus ignores it), so the strip surface bends
-                # to the pavement value.  Deliberate walls
-                # (retaining_wall, skirt lifts) keep the twin path.
-                #
-                # DONOR-GATED (2026-07-17): adoption applies only when
-                # the authority claimant is a WELD_DONOR_ROLES member
-                # (runway/taxi/apron/clearance families).  A designed
-                # split — building pad, service road, terminal,
-                # groundside, bridge plate — is NOT a donor: adopting
-                # its corner minted near-vertical tears inside the
-                # strip (CYXY: building 705.5 into a 714.6 band edge =
-                # 9 m over 0.9 m); the strip keeps its own lawful
-                # value and the fresh-nid path renders the designed
-                # wall.
-                if current_shape_is_strip[0]:
-                    for nid, _claimed in existing:
-                        if (node_id_to_authority_alts.get(nid)
-                                and (node_id_to_authority_roles.get(nid)
-                                     or set()) & WELD_DONOR_ROLES):
-                            _record_claim(nid, alt)
-                            return nid
-                # No altitude match: real wall / cliff.  Allocate
-                # a fresh node at the SAME canonical lat/lon so
-                # X-Plane renders the vertical step between
-                # adjacent polygons.
+                nid = existing[0][0]
+                if alt is not None:
+                    _record_claim(nid, alt)
+                return nid
             nid = next_nid[0]
             next_nid[0] -= 1
-            xy_to_nodes.setdefault(key, []).append((nid, alt))
+            xy_to_nodes[key] = [(nid, alt)]
             # Use the CANONICAL coordinates (not the input) so all
             # nodes referencing this canonical point produce the
             # exact same lat/lon in the OSM file.
@@ -850,19 +824,6 @@ class PavementLayout:
             # strips are SOFT receivers, everything else is a value
             # authority (see node_id_to_authority_alts above).
             current_shape_is_soft[0] = s.role in _SOFT_RECEIVER_ROLES
-            current_shape_role[0] = s.role
-            # Legacy surface_clearance strips share the graded-strip
-            # adoption path: their inner row is defined to sit AT the
-            # pavement edge with pavement values verbatim, so a
-            # >VERTEX_ALT_MERGE_TOL_M foreign terrain read must adopt
-            # the authority node, not mint a cliff twin.  Skirts
-            # (ref runway_end_skirt) and deliberate walls keep the
-            # twin path.
-            current_shape_is_strip[0] = (
-                s.role == ROLE_GRADED_STRIP
-                or (s.ref == "surface_clearance"
-                    and s.role in (ROLE_TAXIWAY_CLEARANCE,
-                                   ROLE_RUNWAY_CLEARANCE)))
             current_shape_is_law[0] = s.role in _LAW_VALUE_ROLES
             # A runway-end skirt owns its edge law; among purely-soft
             # claims it wins over adjacent-ground strips (see
@@ -1208,15 +1169,6 @@ class PavementLayout:
         # affecting step of emission.
         _WELD_TOL_M = 0.005
         _cell_m = 1.0
-        # The soft strip-vs-strip tear guard below is part of the raster
-        # reach-band reconciliation (the class arises only where that tighter
-        # band clamps abutting pavements ~2 m apart); scoped to it so gate-OFF
-        # keeps its established byte-identical emit.
-        import os as _os_layout
-        from .config import RASTER_REACH_BAND as _RRB_DEFAULT
-        _rrb_env = _os_layout.environ.get("O4_RASTER_REACH_BAND")
-        _raster_reach_on = ((_rrb_env == "1") if _rrb_env is not None
-                            else bool(_RRB_DEFAULT))
         _nid_xy: dict[int, tuple[float, float]] = {}
         _grid: dict[tuple[int, int], list[int]] = {}
         for _p_i, (_si, _s, _enids, _sa, _sna) in enumerate(pending):
@@ -1270,28 +1222,6 @@ class PavementLayout:
                     if perp >= _WELD_TOL_M:
                         continue
                     hits.append((t, nid))
-                def _soft_claim_mean(query_nid):
-                    """Mean of the node's NON-authority claims (the
-                    strip-side reading), falling back to all claims."""
-                    alts = node_id_to_alts.get(query_nid)
-                    if not alts:
-                        return None
-                    soft = list(alts)
-                    for value in list(
-                            node_id_to_authority_alts.get(query_nid)
-                            or []):
-                        try:
-                            soft.remove(value)
-                        except ValueError:
-                            pass
-                    pool = soft or alts
-                    return sum(pool) / len(pool)
-
-                _way_is_strip = (
-                    _s.role == ROLE_GRADED_STRIP
-                    or (_s.ref == "surface_clearance"
-                        and _s.role in (ROLE_TAXIWAY_CLEARANCE,
-                                        ROLE_RUNWAY_CLEARANCE)))
                 for _t, nid in sorted(hits):
                     # ZERO-LENGTH GUARD (Triangle4XP fatal, 2026-07-18):
                     # two coordinate-twin nodes can BOTH hit the same
@@ -1309,62 +1239,18 @@ class PavementLayout:
                             and abs(_hit_xy[0] - _last_xy[0]) < 0.005
                             and abs(_hit_xy[1] - _last_xy[1]) < 0.005):
                         continue
-                    # DONOR-GATED DESIGNED WALL (2026-07-17): a SOFT
-                    # strip receiving an on-edge node whose authority
-                    # claimants are all NON-donors (building pad,
-                    # service road, terminal, groundside — the
-                    # WELD_DONOR_ROLES complement) must not splice the
-                    # foreign VALUE into its ring: that minted
-                    # near-vertical tears inside the band (CYXY:
-                    # building 705.5 into a ~714 band edge).  Insert a
-                    # COORDINATE-TWIN carrying the strip's own
-                    # edge-interpolated soft value instead — the mesh
-                    # still welds the chains by coordinates (no
-                    # T-vertex Ruppert explosion) and the value step
-                    # renders as the designed wall between the twin
-                    # and the foreign shape's own node.
-                    _authority_roles = node_id_to_authority_roles.get(nid)
-                    _non_donor_authority = bool(
-                        _authority_roles
-                        and not (_authority_roles & WELD_DONOR_ROLES))
-                    # SOFT strip-vs-strip TEAR guard (raster-reach-band
-                    # reconciliation, 2026-07-18): a node ANOTHER SOFT strip
-                    # owns (no authority claimant), spliced into THIS strip's
-                    # edge, carries the FOREIGN strip's value.  Where two
-                    # strips grade off pavements the tighter, correct reach
-                    # band now clamps ~2 m apart, that foreign value differs
-                    # from this strip's own edge-interpolated value by more
-                    # than the merge tolerance and renders as a sub-metre
-                    # near-vertical TEAR (the check_grade adjacent-ground
-                    # sentinel).  Twin it at THIS strip's own value — the same
-                    # coordinate-weld / designed-wall resolution as the
-                    # non-donor-authority case, extended to soft↔soft.
-                    _wall_a = _soft_claim_mean(n0) if _way_is_strip else None
-                    _wall_b = _soft_claim_mean(n1) if _way_is_strip else None
-                    _soft_strip_tear = False
-                    if (_raster_reach_on and _way_is_strip
-                            and not _authority_roles
-                            and _wall_a is not None and _wall_b is not None):
-                        _foreign = node_id_to_alts.get(nid)
-                        if _foreign:
-                            _own_interp = (1.0 - _t) * _wall_a + _t * _wall_b
-                            _soft_strip_tear = (
-                                abs(sum(_foreign) / len(_foreign) - _own_interp)
-                                > VERTEX_ALT_MERGE_TOL_M)
-                    if (_way_is_strip
-                            and (_non_donor_authority or _soft_strip_tear)
-                            and _wall_a is not None and _wall_b is not None):
-                        twin = next_nid[0]
-                        next_nid[0] -= 1
-                        node_id_to_ll[twin] = node_id_to_ll[nid]
-                        node_id_to_alts[twin] = [
-                            (1.0 - _t) * _wall_a + _t * _wall_b]
-                        _nid_xy[twin] = _nid_xy[nid]
-                        out.append(twin)
-                        member.add(twin)
-                        changed = True
-                        _n_weld += 1
-                        continue
+                    # NO-STACKED-NODES (owner ruling 2026-07-19): the
+                    # former value-twin branches here (the 2026-07-17
+                    # donor-gated "designed wall" and the 2026-07-18
+                    # soft strip-vs-strip tear guard) minted a second
+                    # node id at the hit coordinate carrying the
+                    # strip's own value — a stacked bare tear.  Both
+                    # classes are now resolved UPSTREAM as geometry
+                    # (``emit_stacked_conflict_walls`` retreats the
+                    # strip edge and emits a retaining_wall face; the
+                    # cross-strip seam blend levels soft↔soft steps),
+                    # so the splice always references the ONE
+                    # consensus node.
                     if nid in member:
                         # The way already passes through this node
                         # ELSEWHERE (a multi-way collinear seam that
@@ -1387,9 +1273,14 @@ class PavementLayout:
                         if nid in node_id_to_authority_alts:
                             node_id_to_authority_alts[twin] = list(
                                 node_id_to_authority_alts[nid])
-                        if nid in node_id_to_authority_roles:
-                            node_id_to_authority_roles[twin] = set(
-                                node_id_to_authority_roles[nid])
+                        if nid in node_id_to_law_alts:
+                            # Copy LAW claims too: the twin must land
+                            # on the SAME consensus value as the
+                            # original node (no-stacked-nodes: a twin
+                            # is only legal because it shares the
+                            # elevation).
+                            node_id_to_law_alts[twin] = list(
+                                node_id_to_law_alts[nid])
                         if nid in node_id_to_skirt_alts:
                             node_id_to_skirt_alts[twin] = list(
                                 node_id_to_skirt_alts[nid])

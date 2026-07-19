@@ -1413,6 +1413,17 @@ def _check_adjacent_ground_edges(ways: List[Way],
     tear_max_edge_m = 0.2 * CLEARANCE_STATION_STEP_M      # 1.0 m
     tear_min_jump_m = 1.0
 
+    # WALL-SPANNED EXEMPTION (no-stacked-nodes unit, 2026-07-19): a
+    # strip edge whose BOTH endpoints a ``retaining_wall`` way
+    # references is the side of a deliberate wall wedge (the strip
+    # retreat's end taper) — the face fills the jump; it is not a bare
+    # clip tear.  Same reading as the strip-SEAM check's exemption.
+    wall_nid_ways: Dict[str, set] = defaultdict(set)
+    for wi, w in enumerate(ways):
+        if w.tags.get("role") == "retaining_wall":
+            for nid in w.nids:
+                wall_nid_ways[nid].add(wi)
+
     out: List[Violation] = []
     for w in ways:
         if w.ref != "adjacent_ground":
@@ -1432,6 +1443,9 @@ def _check_adjacent_ground_edges(ways: List[Way],
             de = abs(float(ea) - float(eb))
             if not (dist < tear_max_edge_m and de > tear_min_jump_m):
                 continue
+            if wall_nid_ways.get(nid_a, set()) & wall_nid_ways.get(
+                    nid_b, set()):
+                continue  # side of a deliberate retaining_wall wedge
             grade = de / dist if dist > 1e-9 else float("inf")
             out.append(Violation(
                 grade_pct=grade * 100,
@@ -1497,6 +1511,13 @@ def _check_strip_seam_tears(
     ``shapeID`` are treated as one shape (a strip emitted as several ways)
     and skipped.
 
+    WALL-SPANNED EXEMPTION (no-stacked-nodes unit, 2026-07-19): a level
+    change between two strips rendered as DELIBERATE wall geometry — a
+    ``retaining_wall`` way referencing BOTH endpoints (its top row welds
+    the upper strip's chain, its bottom row the retreated lower strip)
+    — is the ruling's sanctioned form, not a bare tear; the face fills
+    the gap the bare-seam reading assumes empty.
+
     Runs in ~linear time via a spatial grid over the strip nodes (never an
     O(n^2) all-pairs scan — airports reach ~50k strip nodes).  Returns
     ``Violation`` rows (``grade_pct`` = the seam's near-vertical grade),
@@ -1510,6 +1531,22 @@ def _check_strip_seam_tears(
     ]
     if len(strip_vertices) < 2:
         return []
+    # Wall-vertex registry for the wall-spanned exemption: coordinate
+    # key -> set of retaining_wall way indices referencing it.  Wall
+    # rows are emitted at the exact canonical coordinates of the chains
+    # they weld, so exact (cm-rounded) matching suffices.
+    wall_keys: Dict[Tuple[int, int], set] = defaultdict(set)
+    for v in vertices:
+        if ways[v.way_idx].tags.get("role") == "retaining_wall":
+            wall_keys[(round(v.x * 100), round(v.y * 100))].add(v.way_idx)
+
+    def _wall_spans(a: Vertex, b: Vertex) -> bool:
+        wa = wall_keys.get((round(a.x * 100), round(a.y * 100)))
+        if not wa:
+            return False
+        wb = wall_keys.get((round(b.x * 100), round(b.y * 100)))
+        return bool(wb) and bool(wa & wb)
+
     cell = max(radius_m, 0.5)
     grid = _bucket_vertices(strip_vertices, cell)
     out: List[Violation] = []
@@ -1542,6 +1579,8 @@ def _check_strip_seam_tears(
                     grade = de / max(d, min_distance_m)
                     if grade < STRIP_SEAM_TEAR_MIN_GRADE:
                         continue  # steep-terrain drape, not a cliff
+                    if _wall_spans(v, u):
+                        continue  # deliberate retaining_wall face
                     out.append(Violation(
                         grade_pct=grade * 100,
                         excess_pct=grade * 100,
@@ -1550,6 +1589,104 @@ def _check_strip_seam_tears(
                         way_a=way_v, way_b=way_u,
                         pt_a=(v.x, v.y), pt_b=(u.x, u.y),
                         elev_a=v.elev, elev_b=u.elev))
+    out.sort(key=lambda v: -v.de_m)
+    return out
+
+
+# ── Stacked-node invariant ──────────────────────────────────────
+# OWNER RULING 2026-07-19: nodes can NEVER be stacked — two distinct
+# OSM node ids at the same coordinate are illegal regardless of their
+# elevations ("if they are in the same spot they must be merged and
+# share the same elevation").  A genuine level change must be emitted
+# as HORIZONTAL wall geometry (two node columns offset in plan — the
+# retaining_wall machinery), never as coincident nodes with different
+# elevations (those render as bare near-vertical mesh tears: the CYXY
+# d=0.00 audit pairs, the SPLP seam site).  Cap is ZERO.
+#
+# The emitter's canonical-point registry spaces distinct points by its
+# 0.5 m proximity tolerance, and stacked twins are emitted at the
+# IDENTICAL canonical lat/lon — so anything under this radius is "the
+# same spot" with wide margin, not a near-adjacent pair (those belong
+# to the proximity / seam checks).
+STACKED_NODE_XY_TOL_M = 0.05
+# Two nodes at one spot violate the invariant when their ELEVATIONS
+# differ — "they must be merged and share the same elevation".  A
+# same-value coordinate twin is a legal OSM-encoding artifact (an OSM
+# ring cannot reference one node id twice, so a figure-8 revisit emits
+# a twin carrying identical claims; the mesh welds by coordinates into
+# ONE vertex with one elevation — no tear exists).  Emitted altitudes
+# are rounded to 0.1 m, so anything above this noise floor is a real
+# disagreement.
+STACKED_NODE_ALT_TOL_M = 0.05
+
+
+def _check_stacked_nodes(
+    vertices: List[Vertex],
+    ways: List[Way],
+    xy_tol_m: float = STACKED_NODE_XY_TOL_M,
+    alt_tol_m: float = STACKED_NODE_ALT_TOL_M,
+) -> List[Violation]:
+    """STRUCTURAL stacked-node detector (owner invariant 2026-07-19).
+
+    Flags every pair of DISTINCT node ids lying within ``xy_tol_m`` of
+    each other whose claimed elevations disagree by more than
+    ``alt_tol_m`` — one Violation row per node pair.  Same-value
+    coordinate twins (the figure-8 OSM-encoding artifact) and
+    elevation-less pairs (both drape onto the DEM — one surface) are
+    NOT violations: the invariant is about the rendered surface, and
+    those weld into one mesh vertex.  Works identically on test-DEM
+    and production-DEM builds: the invariant is structural, so it
+    needs no per-airport calibration and no DEM.
+
+    Linear-time via the shared spatial grid; never an all-pairs scan.
+    """
+    # One entry per node id: representative coordinate, every elevation
+    # claimed for it across referencing ways, a representative way.
+    by_nid: Dict[str, list] = {}
+    for v in vertices:
+        entry = by_nid.get(v.nid)
+        if entry is None:
+            by_nid[v.nid] = [v.x, v.y, [] if v.elev is None else [v.elev],
+                             v.way_idx]
+        elif v.elev is not None:
+            entry[2].append(v.elev)
+    entries = [(nid, e[0], e[1], e[2], e[3])
+               for nid, e in by_nid.items()]
+    if len(entries) < 2:
+        return []
+    cell = 0.5
+    grid: Dict[Tuple[int, int], List[int]] = defaultdict(list)
+    for i, (_nid, x, y, _elevs, _w) in enumerate(entries):
+        grid[(int(math.floor(x / cell)), int(math.floor(y / cell)))].append(i)
+    out: List[Violation] = []
+    for i, (nid_a, xa, ya, elevs_a, way_a) in enumerate(entries):
+        cx = int(math.floor(xa / cell))
+        cy = int(math.floor(ya / cell))
+        for dcx in (-1, 0, 1):
+            for dcy in (-1, 0, 1):
+                for j in grid.get((cx + dcx, cy + dcy), ()):
+                    if j <= i:
+                        continue  # each unordered pair once
+                    (nid_b, xb, yb, elevs_b, way_b) = entries[j]
+                    d = math.hypot(xa - xb, ya - yb)
+                    if d > xy_tol_m:
+                        continue
+                    if not elevs_a or not elevs_b:
+                        continue  # both drape the DEM — one surface
+                    elev_a = sum(elevs_a) / len(elevs_a)
+                    elev_b = sum(elevs_b) / len(elevs_b)
+                    de = abs(elev_a - elev_b)
+                    if de <= alt_tol_m:
+                        continue  # same-value encoding twin — merged in mesh
+                    grade = de / max(d, 0.01)
+                    out.append(Violation(
+                        grade_pct=grade * 100,
+                        excess_pct=grade * 100,
+                        distance_m=d,
+                        de_m=de,
+                        way_a=ways[way_a], way_b=ways[way_b],
+                        pt_a=(xa, ya), pt_b=(xb, yb),
+                        elev_a=elev_a, elev_b=elev_b))
     out.sort(key=lambda v: -v.de_m)
     return out
 
@@ -2227,6 +2364,12 @@ def run_checks(
         f"{STRIP_SEAM_TEAR_RADIUS_M:.1f}m)",
         strip_seam_tears, top_n)
     within = within + strip_seam_tears
+
+    stacked = _check_stacked_nodes(vertices, ways)
+    _pv("STACKED NODES (distinct node ids at one coordinate, values "
+        "disagree — owner invariant 2026-07-19, cap 0)",
+        stacked, top_n)
+    within = within + stacked
 
     cross = _check_cross_shape_proximity(
         vertices, ways, proximity_m, max_grade)

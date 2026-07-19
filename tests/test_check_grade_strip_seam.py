@@ -206,6 +206,41 @@ def test_steep_drape_below_grade_floor_is_not_flagged(tmp_path):
     assert violations == []
 
 
+def test_wall_spanned_step_is_not_flagged(tmp_path):
+    # The no-stacked-nodes unit renders a strip-vs-strip level change
+    # as a retreated edge + retaining_wall face: the wall way
+    # references BOTH endpoints (top row on the upper strip's chain,
+    # bottom row on the retreated lower strip).  The face fills the
+    # gap, so the pair is deliberate geometry — NOT a tear.
+    ways_spec = [
+        {"wid": "-10", "role": "graded_strip", "shapeID": "1",
+         "nodes": [("-1", 0.0, 0.0, 12.0)] + _pad_a()},
+        {"wid": "-20", "role": "graded_strip", "shapeID": "2",
+         "nodes": [("-2", 0.6, 0.0, 10.0)] + _pad_b()},
+        {"wid": "-30", "role": "retaining_wall", "shapeID": "3",
+         "nodes": [("-1", 0.0, 0.0, 12.0), ("-2", 0.6, 0.0, 10.0),
+                   ("-3", 0.6, 5.0, 10.0), ("-4", 0.0, 5.0, 12.0)]},
+    ]
+    violations = _run(tmp_path, ways_spec)
+    assert violations == []
+
+
+def test_unrelated_wall_does_not_exempt_a_tear(tmp_path):
+    # A retaining_wall touching only ONE endpoint does not span the
+    # pair — the tear is still bare and must be flagged.
+    ways_spec = [
+        {"wid": "-10", "role": "graded_strip", "shapeID": "1",
+         "nodes": [("-1", 0.0, 0.0, 12.0)] + _pad_a()},
+        {"wid": "-20", "role": "graded_strip", "shapeID": "2",
+         "nodes": [("-2", 0.6, 0.0, 10.0)] + _pad_b()},
+        {"wid": "-30", "role": "retaining_wall", "shapeID": "3",
+         "nodes": [("-1", 0.0, 0.0, 12.0), ("-5", 0.0, 5.0, 12.0),
+                   ("-6", -0.6, 5.0, 10.0), ("-7", -0.6, 0.0, 10.0)]},
+    ]
+    violations = _run(tmp_path, ways_spec)
+    assert len(violations) == 1
+
+
 def test_stacked_wall_same_coordinate_is_flagged(tmp_path):
     # Two strips holding DIFFERENT values at the same coordinate emit as
     # stacked separate nodes — a bare vertical terrain wall.  The grade

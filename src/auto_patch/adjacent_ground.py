@@ -1006,8 +1006,14 @@ def _heal_emitted_band_tears(emitted_shapes, layout):
     from collections import defaultdict
     from shapely.strtree import STRtree
     from .layout import WELD_DONOR_ROLES
+    # RETAINING WALLS protect like donors (no-stacked-nodes unit): a
+    # strip vertex welded onto a wall row must never be dropped — the
+    # heal's spring-back straightens the strip edge ACROSS the wall
+    # face (measured SPJC: a 2.5 m² strip∩wall overlap, zero-tolerance
+    # self-overlap invariant).
     donor_ext = [s.polygon.exterior for s in layout.shapes
-                 if (s.role or "") in WELD_DONOR_ROLES
+                 if ((s.role or "") in WELD_DONOR_ROLES
+                     or s.role == ROLE_RETAINING_WALL)
                  and s.polygon is not None and not s.polygon.is_empty
                  and s.polygon.geom_type == "Polygon"]
     try:
@@ -1028,9 +1034,11 @@ def _heal_emitted_band_tears(emitted_shapes, layout):
     # Cross-strip shared-coordinate consensus (mirrors ``to_osm``'s soft-mean
     # rule): millimetre vertex key -> list of contributing strip values, so a
     # vertex two strips share resolves to the value the patch actually emits
-    # there (class 2).  Values within the emit-merge tolerance intern into ONE
-    # node in ``to_osm``; a spread past it splits into separate nodes (a clean
-    # wall, no tear), so only same-key values within tolerance are a tear risk.
+    # there (class 2).  NO-STACKED-NODES (owner ruling 2026-07-19): to_osm
+    # hard-merges EVERY same-canonical-point claim into one node whose soft
+    # consensus is the mean — there is no "clean wall" split any more, so a
+    # same-key spread of ANY size resolves to the mean and is a tear risk
+    # against the ring neighbours.
     strip_vals: "defaultdict[tuple, list]" = defaultdict(list)
     strip_rings: list = []
     for sh in emitted_shapes:
@@ -1051,16 +1059,47 @@ def _heal_emitted_band_tears(emitted_shapes, layout):
             strip_vals[k].append(float(a))
         strip_rings.append((sh, ring, alts, keys))
 
+    # AUTHORITY value table (no-stacked-nodes hard merge): a strip
+    # vertex coincident with any pavement/solver shape EMITS at the
+    # authority consensus, not at its own value — the heal must judge
+    # tears against the value the patch will actually carry (a strip
+    # step of exactly the threshold can emit ABOVE it after adoption:
+    # the CYXY #392 shoulder read 1.00 m in strip values but 1.03 m
+    # emitted).
+    from .layout import SOFT_RECEIVER_ROLES as _SOFT_ROLES
+    authority_vals: "defaultdict[tuple, list]" = defaultdict(list)
+    for sh in layout.shapes:
+        if (sh.role or "") in _SOFT_ROLES:
+            continue
+        if (sh.polygon is None or sh.polygon.is_empty
+                or sh.polygon.geom_type != "Polygon"):
+            continue
+        try:
+            a_ring = list(sh.polygon.exterior.coords)[:-1]
+        except _GEOM_EXC:
+            continue
+        if sh.node_altitudes is not None:
+            a_alts = list(sh.node_altitudes[:len(a_ring)])
+            if len(a_alts) != len(a_ring):
+                continue
+        elif sh.altitude is not None:
+            a_alts = [float(sh.altitude)] * len(a_ring)
+        else:
+            continue
+        for (vx, vy), a in zip(a_ring, a_alts):
+            authority_vals[_vertex_key(vx, vy)].append(float(a))
+
     def _effective(k, own):
+        # to_osm precedence: authority claims win the node outright.
+        av = authority_vals.get(k)
+        if av:
+            return sum(av) / float(len(av))
         vals = strip_vals.get(k)
         if not vals or len(vals) <= 1:
             return own
-        # Same-key values within the merge tolerance intern to one node whose
-        # emitted altitude is their mean (``to_osm``); a wider spread splits
-        # into separate nodes (no shared value → no cross-strip tear).
-        if max(vals) - min(vals) <= VERTEX_ALT_MERGE_TOL_M:
-            return sum(vals) / float(len(vals))
-        return own
+        # Same-key values ALWAYS intern to one node whose emitted soft
+        # consensus is their mean (to_osm hard merge, ruling 2026-07-19).
+        return sum(vals) / float(len(vals))
 
     healed = 0
     for (sh, ring, alts, keys) in strip_rings:
@@ -1321,6 +1360,463 @@ def blend_cross_strip_seam_steps(strip_shapes, layout):
         (sh, _ring, alts) = entries[entry_index]
         sh.node_altitudes = list(alts) + [alts[0]]
     return moved
+
+
+# ── Stacked-conflict wall emission (owner ruling 2026-07-19) ──────
+# NO-STACKED-NODES INVARIANT: the emitter hard-merges every coincident
+# vertex into ONE node with ONE consensus elevation (layout.to_osm),
+# so a strip vertex that coincides with a designed-split authority
+# corner (building pad, service road, terminal, groundside — the
+# WELD_DONOR_ROLES complement) can no longer render its level change
+# as a stacked "clean wall" twin.  This pass resolves the residue AS
+# GEOMETRY before emit: the strip's conflicting boundary run retreats
+# horizontally into its own interior, and a ``retaining_wall`` face
+# fills the vacated band — top row ON the old boundary at the
+# authority values (welds to the designed shape's chain), bottom row
+# at the retreated strip edge at the strip's own values.  The level
+# change survives as deliberate, horizontally-extended wall geometry.
+#
+# The retreat must exceed the emitter's canonical-point proximity
+# tolerance (SHARED_VERTEX_TOL_M = 0.5 m) or the moved vertex would
+# re-intern into the very node it retreats from.
+STACKED_WALL_RETREAT_M = 0.6
+# Run-extension floor: ring neighbours of a primary conflict join the
+# wall run whenever they are coincident with the authority boundary at
+# all (any spread above emit-rounding noise) — the run must terminate
+# at a NON-coincident vertex, where the strip's own drape is
+# continuous.  Terminating at a still-coincident neighbour leaves that
+# neighbour silently merged UP to the authority value beside a
+# retreated vertex at the strip's own value: a shoulder step of the
+# full conflict height (the CYXY #392 tear, 1.03 m over 0.99 m,
+# survived a 0.3 m floor exactly this way — the shoulder's own spread
+# was small but its merged value was not).
+STACKED_WALL_TAPER_MIN_M = 0.05
+
+
+def emit_stacked_conflict_walls(layout) -> int:
+    """Resolve strip-vs-authority coincident level conflicts as offset
+    wall geometry (owner ruling 2026-07-19: nodes are never stacked; a
+    genuine level change is horizontal wall geometry).
+
+    For every ``graded_strip`` ring vertex whose canonical point also
+    carries a NON-donor authority claim differing by more than
+    ``VERTEX_ALT_MERGE_TOL_M``: retreat the strip vertex
+    ``STACKED_WALL_RETREAT_M`` into the strip's interior and emit a
+    ``retaining_wall`` face over the vacated band.  Tile-seam-band
+    vertices are cross-tile contracts and are never moved (their
+    conflicts fall back to the emit consensus merge).  Returns the
+    number of wall faces emitted.
+    """
+    from .crown import _point_in_seam_band
+    from .layout import (
+        SOFT_RECEIVER_ROLES, WELD_DONOR_ROLES, corner_alts_from_high_low)
+
+    registry = getattr(layout, "canonical_points", None)
+    if registry is None:
+        return 0
+
+    def _ring_values(shape):
+        """Open exterior ring + aligned per-vertex values, mirroring
+        ``to_osm``'s derivation (node_altitudes > flat altitude
+        broadcast > sloped-rect high/low corners).  None when the
+        shape carries no elevation or the lists misalign."""
+        poly = shape.polygon
+        if (poly is None or poly.is_empty
+                or poly.geom_type != "Polygon"):
+            return None
+        try:
+            coords = list(poly.exterior.coords)
+        except _GEOM_EXC:
+            return None
+        if len(coords) > 1 and coords[0] == coords[-1]:
+            coords = coords[:-1]
+        if len(coords) < 3:
+            return None
+        if shape.node_altitudes is not None:
+            alts = list(shape.node_altitudes)
+            if len(alts) == len(coords) + 1:
+                alts = alts[:-1]
+            if len(alts) != len(coords):
+                return None
+            return coords, [float(a) for a in alts]
+        if shape.altitude is not None:
+            return coords, [float(shape.altitude)] * len(coords)
+        if (shape.altitude_high is not None
+                and shape.altitude_low is not None
+                and len(coords) == 4):
+            return coords, corner_alts_from_high_low(
+                float(shape.altitude_high), float(shape.altitude_low))
+        return None
+
+    # Authority claim table over canonical points: value claims from
+    # NON-donor, non-soft shapes (the designed-split classes whose
+    # corners the strip adoption never welded to).  Donor-pavement and
+    # soft claims merge fine through the emit consensus and need no
+    # wall.  Alongside the vertex table, keep each shape's exterior +
+    # aligned values for the EDGE-coincident case: a strip boundary
+    # clipped along a designed shape shares the CHAIN, not necessarily
+    # the vertices — its vertices lie ON the foreign edge, the weld
+    # pass splices them into it, and the consensus then bends the
+    # strip mid-edge (the CYXY #392 service-road class).
+    from shapely.strtree import STRtree
+    authority_claims: dict = {}
+    authority_edges: list = []      # (LineString exterior, coords, alts)
+    # Soft strip-vs-strip claims (the ALL-ANCHORED residue): the seam
+    # blend levels every FREE vertex first, so a coincident strip-strip
+    # spread still exceeding the merge tolerance afterwards is two
+    # host-welded (anchored) strips holding a genuine level change —
+    # exactly the class the ruling turns into wall geometry.  The
+    # LOWER strip retreats; the top holder keeps the point.
+    strip_claims: dict = {}
+    strip_edges: list = []   # (exterior, coords, alts, id(shape))
+    for shape in layout.shapes:
+        role = shape.role or ""
+        if role == ROLE_GRADED_STRIP:
+            rv = _ring_values(shape)
+            if rv is None:
+                continue
+            coords, alts = rv
+            for (vx, vy), value in zip(coords, alts):
+                key = registry.get_or_add(float(vx), float(vy))
+                strip_claims.setdefault(key, []).append(
+                    (value, id(shape)))
+            try:
+                strip_edges.append(
+                    (shape.polygon.exterior, coords, alts, id(shape)))
+            except _GEOM_EXC:
+                pass
+            continue
+        if role in SOFT_RECEIVER_ROLES or role in WELD_DONOR_ROLES:
+            continue
+        rv = _ring_values(shape)
+        if rv is None:
+            continue
+        coords, alts = rv
+        for (vx, vy), value in zip(coords, alts):
+            key = registry.get_or_add(float(vx), float(vy))
+            authority_claims.setdefault(key, []).append(value)
+        try:
+            authority_edges.append(
+                (shape.polygon.exterior, coords, alts))
+        except _GEOM_EXC:
+            pass
+
+    if (not authority_claims and not authority_edges
+            and not strip_claims):
+        return 0
+    edge_tree = None
+    if authority_edges:
+        try:
+            edge_tree = STRtree([e[0] for e in authority_edges])
+        except _GEOM_EXC:
+            edge_tree = None
+    _EDGE_COINCIDE_TOL_M = 0.01
+
+    def _edge_conflict_value(vx, vy):
+        """Authority value at (vx, vy) when the point lies ON a
+        non-donor authority exterior (edge-interpolated); None when no
+        edge passes through the point."""
+        if edge_tree is None:
+            return None
+        try:
+            idxs = edge_tree.query_nearest(
+                Point(vx, vy), max_distance=_EDGE_COINCIDE_TOL_M)
+        except _GEOM_EXC:
+            return None
+        if idxs is None or len(idxs) == 0:
+            return None
+        exterior, coords_a, alts_a = authority_edges[int(idxs[0])]
+        # Walk the ring segments for the projection and interpolate
+        # the two segment-end values.
+        best = None
+        na = len(coords_a)
+        for i in range(na):
+            ax, ay = coords_a[i]
+            bx, by = coords_a[(i + 1) % na]
+            dx, dy = bx - ax, by - ay
+            L2 = dx * dx + dy * dy
+            if L2 < 1e-12:
+                continue
+            t = ((vx - ax) * dx + (vy - ay) * dy) / L2
+            t = min(1.0, max(0.0, t))
+            px, py = ax + dx * t, ay + dy * t
+            d = math.hypot(vx - px, vy - py)
+            if best is None or d < best[0]:
+                best = (d, (1.0 - t) * alts_a[i]
+                        + t * alts_a[(i + 1) % na])
+        if best is None or best[0] > _EDGE_COINCIDE_TOL_M:
+            return None
+        return best[1]
+
+    strip_edge_tree = None
+    if strip_edges:
+        try:
+            strip_edge_tree = STRtree([e[0] for e in strip_edges])
+        except _GEOM_EXC:
+            strip_edge_tree = None
+
+    def _interp_on_ring(coords_a, alts_a, vx, vy):
+        """Edge-interpolated value of a ring at (vx, vy), or None when
+        the point is farther than the coincidence tolerance."""
+        best = None
+        na = len(coords_a)
+        for i in range(na):
+            ax, ay = coords_a[i]
+            bx, by = coords_a[(i + 1) % na]
+            dx, dy = bx - ax, by - ay
+            L2 = dx * dx + dy * dy
+            if L2 < 1e-12:
+                continue
+            t = ((vx - ax) * dx + (vy - ay) * dy) / L2
+            t = min(1.0, max(0.0, t))
+            px, py = ax + dx * t, ay + dy * t
+            d = math.hypot(vx - px, vy - py)
+            if best is None or d < best[0]:
+                best = (d, (1.0 - t) * alts_a[i]
+                        + t * alts_a[(i + 1) % na])
+        if best is None or best[0] > _EDGE_COINCIDE_TOL_M:
+            return None
+        return best[1]
+
+    def _strip_edge_conflict_value(vx, vy, own_id):
+        """Highest OTHER-strip chain value at (vx, vy) when the point
+        lies on another strip's exterior; None otherwise."""
+        if strip_edge_tree is None:
+            return None
+        try:
+            idxs = strip_edge_tree.query(
+                Point(vx, vy), predicate="dwithin",
+                distance=_EDGE_COINCIDE_TOL_M)
+        except _GEOM_EXC:
+            return None
+        best = None
+        for k in idxs:
+            exterior, coords_a, alts_a, sid = strip_edges[int(k)]
+            if sid == own_id:
+                continue
+            val = _interp_on_ring(coords_a, alts_a, vx, vy)
+            if val is not None and (best is None or val > best):
+                best = val
+        return best
+
+    emitted = 0
+    new_walls: list = []
+    for shape in layout.shapes:
+        if shape.role != ROLE_GRADED_STRIP:
+            continue
+        rv = _ring_values(shape)
+        if rv is None or shape.node_altitudes is None:
+            continue
+        coords, alts = rv
+        n = len(coords)
+        if n < 4:
+            continue
+        # Coincidence spread per vertex (vertex- or edge-coincident with
+        # a non-donor authority).  PRIMARY conflicts (spread beyond the
+        # merge tolerance) seed wall runs; each run then EXTENDS along
+        # ring neighbours holding smaller-but-real spreads
+        # (> STACKED_WALL_TAPER_MIN_M) so the level change tapers
+        # INSIDE the wall face — without the extension, the run's
+        # shoulder (a neighbour that merged silently) steps against the
+        # first retreated vertex by the full conflict height (the CYXY
+        # #392 shoulder tear).
+        coincident_top: list = [None] * n
+        spread: list = [0.0] * n
+        for i, ((vx, vy), own) in enumerate(zip(coords, alts)):
+            key = registry.get_or_add(float(vx), float(vy))
+            claims = authority_claims.get(key)
+            if claims:
+                top = sum(claims) / len(claims)
+            else:
+                top = _edge_conflict_value(vx, vy)
+            if top is None:
+                # Soft strip-vs-strip cluster: this strip retreats only
+                # when another strip holds a HIGHER value at the point
+                # (the top holder keeps the weld; equal values are the
+                # ordinary shared seam).
+                cluster = strip_claims.get(key)
+                if cluster and len(cluster) > 1:
+                    others_max = max(
+                        (v for (v, sid) in cluster if sid != id(shape)),
+                        default=None)
+                    if others_max is not None and others_max > own:
+                        top = others_max
+                if top is None:
+                    # Edge-coincident soft case: this vertex lies mid-
+                    # edge on a HIGHER strip's chain (the weld would
+                    # splice a valley node into that chain).
+                    se = _strip_edge_conflict_value(vx, vy, id(shape))
+                    if se is not None and se > own:
+                        top = se
+                if top is None:
+                    continue
+            sp = abs(top - own)
+            if sp <= 0.05:
+                continue
+            if _point_in_seam_band(layout, vx, vy):
+                continue  # cross-tile contract — consensus merge only
+            coincident_top[i] = top
+            spread[i] = sp
+        primary = [i for i in range(n)
+                   if spread[i] > VERTEX_ALT_MERGE_TOL_M]
+        if not primary:
+            continue
+        selected: set = set(primary)
+        for i in primary:
+            for step in (1, -1):
+                j = i
+                while True:
+                    j = (j + step) % n
+                    if (j in selected
+                            or coincident_top[j] is None
+                            or spread[j] <= STACKED_WALL_TAPER_MIN_M):
+                        break
+                    selected.add(j)
+        conflict_top = [coincident_top[i] if i in selected else None
+                        for i in range(n)]
+        # Inward retreat per conflict vertex: candidate normals are the
+        # ±perpendicular of the adjacent-edge mean direction; keep the
+        # one whose probe point lands inside the strip.
+        poly = shape.polygon
+        moved_pos: list = [None] * n
+        for i in range(n):
+            if conflict_top[i] is None:
+                continue
+            ax, ay = coords[(i - 1) % n]
+            bx, by = coords[i]
+            cx, cy = coords[(i + 1) % n]
+            tx, ty = (cx - ax), (cy - ay)
+            norm = math.hypot(tx, ty)
+            if norm < 1e-9:
+                continue
+            tx, ty = tx / norm, ty / norm
+            for (nx_, ny_) in ((-ty, tx), (ty, -tx)):
+                px = bx + nx_ * STACKED_WALL_RETREAT_M
+                py = by + ny_ * STACKED_WALL_RETREAT_M
+                try:
+                    if poly.contains(Point(px, py)):
+                        moved_pos[i] = (px, py)
+                        break
+                except _GEOM_EXC:
+                    continue
+        run_indices = [i for i in range(n) if moved_pos[i] is not None]
+        if not run_indices:
+            continue
+        # Group into consecutive ring runs (wrap-aware).
+        runs: list[list[int]] = []
+        current = [run_indices[0]]
+        for i in run_indices[1:]:
+            if (i - current[-1]) % n == 1:
+                current.append(i)
+            else:
+                runs.append(current)
+                current = [i]
+        runs.append(current)
+        if (len(runs) > 1 and runs[0][0] == 0
+                and (runs[-1][-1] + 1) % n == 0):
+            runs[0] = runs[-1] + runs[0]
+            runs.pop()
+        # Build one wall face per run; commit the retreat only for the
+        # runs whose face built cleanly, and only if the retreated ring
+        # stays a valid simple polygon (else the whole shape falls back
+        # to the emit consensus merge, walls withdrawn).
+        new_coords = list(coords)
+        new_alts = list(alts)
+        shape_walls: list = []
+        for run in runs:
+            top_pts = [coords[i] for i in run]
+            top_alts_run = [round(float(conflict_top[i]), 1) for i in run]
+            bot_pts = [moved_pos[i] for i in run]
+            bot_alts_run = [round(float(alts[i]), 1) for i in run]
+            # Pinch the wall closed with the ring neighbours on the TOP
+            # row (unmoved, at the strip's own value — zero face height
+            # at the taper stations).
+            prev_i = (run[0] - 1) % n
+            next_i = (run[-1] + 1) % n
+            ring_pts = ([coords[prev_i]] + top_pts + [coords[next_i]]
+                        + bot_pts[::-1])
+            ring_alts = ([round(float(alts[prev_i]), 1)] + top_alts_run
+                         + [round(float(alts[next_i]), 1)]
+                         + bot_alts_run[::-1])
+            try:
+                wall_poly = Polygon(ring_pts)
+                if not wall_poly.is_valid:
+                    wall_poly = wall_poly.buffer(0)
+                if (wall_poly.is_empty
+                        or wall_poly.geom_type != "Polygon"):
+                    continue
+            except _GEOM_EXC:
+                continue
+            rebuilt = _open_coords(wall_poly)
+            if len(rebuilt) < 3:
+                continue
+            if len(rebuilt) == len(ring_pts):
+                wall_alts = ring_alts
+            else:
+                wall_alts = [round(float(_nearest_alt(
+                    ring_pts, ring_alts, vx, vy)), 1)
+                    for (vx, vy) in rebuilt]
+            shape_walls.append(BuiltShape(
+                polygon=wall_poly, role=ROLE_RETAINING_WALL,
+                ref="stacked_conflict_wall",
+                node_altitudes=wall_alts + [wall_alts[0]]))
+            for i in run:
+                new_coords[i] = moved_pos[i]
+        if not shape_walls:
+            continue
+        try:
+            moved_poly = Polygon(new_coords + [new_coords[0]])
+            if not moved_poly.is_valid:
+                moved_poly = moved_poly.buffer(0)
+            if (moved_poly.is_empty
+                    or moved_poly.geom_type != "Polygon"
+                    or len(_open_coords(moved_poly)) != n):
+                continue  # retreat degenerated the ring — fall back
+            shape.polygon = moved_poly
+            rebuilt_open = _open_coords(moved_poly)
+            if rebuilt_open != new_coords:
+                # buffer(0) may rotate the ring start; re-map the
+                # altitude list to the rebuilt vertex order.
+                new_alts = [float(_nearest_alt(
+                    new_coords, new_alts, vx, vy))
+                    for (vx, vy) in rebuilt_open]
+            shape.node_altitudes = (
+                [round(a, 2) for a in new_alts]
+                + [round(new_alts[0], 2)])
+        except _GEOM_EXC:
+            continue
+        # Clip each wall out of the RETREATED strip's footprint (same
+        # discipline as ``_emit_apron_walls``): on a concave boundary
+        # the wedge between the old and new edges can lap onto strip
+        # area the retreat kept — the zero-tolerance self-overlap
+        # invariant forbids any lap.
+        clipped_walls: list = []
+        for wall in shape_walls:
+            try:
+                clipped = wall.polygon.difference(shape.polygon)
+                if clipped.is_empty:
+                    continue
+                if clipped.geom_type == "MultiPolygon":
+                    clipped = max(clipped.geoms, key=lambda g: g.area)
+                if (clipped.geom_type != "Polygon"
+                        or clipped.is_empty or clipped.area < 1e-6):
+                    continue
+                pr = _open_coords(clipped)
+                if len(pr) < 3:
+                    continue
+                src_ring = list(wall.polygon.exterior.coords)[:-1]
+                src_alts = wall.node_altitudes[:len(src_ring)]
+                walts = [round(float(_nearest_alt(
+                    src_ring, src_alts, vx, vy)), 1) for (vx, vy) in pr]
+                wall.polygon = clipped
+                wall.node_altitudes = walts + [walts[0]]
+                clipped_walls.append(wall)
+            except _GEOM_EXC:
+                continue
+        new_walls.extend(clipped_walls)
+        emitted += len(clipped_walls)
+    layout.shapes.extend(new_walls)
+    return emitted
 
 
 def _ring_edge_reference(coords, ring_alts):

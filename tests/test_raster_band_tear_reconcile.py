@@ -179,23 +179,87 @@ def _way_has_tear(ring_xyz):
     return False
 
 
-def test_cross_strip_seam_tears_gate_off(monkeypatch):
-    """Gate OFF (legacy band): the nid-level weld splices the foreign strip's
-    value into the partner's edge, producing the sub-metre tear — the class
-    the raster reconciliation removes (a 'before' anchor)."""
-    monkeypatch.setenv("O4_RASTER_REACH_BAND", "0")
-    strips = _emit_two_strips_and_read()
-    assert any(_way_has_tear(r) for r in strips), (
-        "expected the un-reconciled splice tear with the gate off")
-
-
-def test_cross_strip_seam_twinned_gate_on(monkeypatch):
-    """Gate ON: the soft strip-vs-strip weld twins the seam node at each
-    strip's own value, so neither strip carries a sub-metre near-vertical
-    edge — the mesh still welds the chains by coordinate."""
-    monkeypatch.setenv("O4_RASTER_REACH_BAND", "1")
+def test_cross_strip_seam_hard_merge_no_stacked_nodes():
+    """NO-STACKED-NODES (owner ruling 2026-07-19): the former nid-level
+    value twin is GONE in every gate state — ``to_osm`` hard-merges each
+    coincident claim into ONE node with ONE consensus value.  The bare
+    emit of two conflicting flat strips therefore carries the splice
+    step as a within-strip edge (the pipeline resolves it upstream via
+    the seam blend + ``emit_stacked_conflict_walls``, exercised below);
+    what to_osm itself must guarantee is the structural invariant: no
+    two node ids at one coordinate with different values."""
     strips = _emit_two_strips_and_read()
     assert strips, "no adjacent_ground ways emitted"
-    for r in strips:
-        assert not _way_has_tear(r), (
-            "a soft strip-vs-strip seam still tears with the gate on")
+    # Rebuild the node table from the emit and scan for stacked pairs.
+    seen: dict = {}
+    for ring in strips:
+        for (x, y, e) in ring:
+            if e is None:
+                continue
+            key = (round(x, 2), round(y, 2))
+            for other in seen.get(key, ()):  # values at this coordinate
+                assert abs(other - e) <= 0.05, (
+                    f"stacked values {other} vs {e} at {key}")
+            seen.setdefault(key, []).append(e)
+
+
+def test_stacked_conflict_walls_resolve_two_strip_step():
+    """The ruling's resolution for an all-anchored strip-vs-strip level
+    change: the LOWER strip retreats and a ``retaining_wall`` face
+    spans the vacated band (top row on the upper chain, bottom row on
+    the retreated edge) — the level change survives as deliberate,
+    horizontally-extended geometry and neither strip tears."""
+    from auto_patch.adjacent_ground import emit_stacked_conflict_walls
+    from auto_patch.canonical_points import CanonicalPointRegistry
+    from auto_patch.layout import ROLE_RETAINING_WALL, SHARED_VERTEX_TOL_M
+
+    # Anchor OFF the integer lat/lon lines: the wall pass rightly
+    # refuses to move tile-seam-band vertices (cross-tile contract),
+    # and an integer-line anchor would put the whole synthetic seam
+    # chain inside that band.
+    layout = PavementLayout(icao="KFAKE", anchor=(40.37, -100.21))
+    a_ring = [(0.0, 0.0), (3.0, 0.0), (10.0, 0.0), (10.0, -3.0), (0.0, -3.0)]
+    a_alt = [100.0] * len(a_ring)
+    layout.shapes.append(BuiltShape(
+        polygon=Polygon(a_ring), role=ROLE_GRADED_STRIP,
+        ref="adjacent_ground", node_altitudes=a_alt + [a_alt[0]]))
+    b_ring = [(0.0, 0.0), (3.5, 0.0), (10.0, 0.0), (10.0, 3.0), (0.0, 3.0)]
+    b_alt = [103.0] * len(b_ring)
+    layout.shapes.append(BuiltShape(
+        polygon=Polygon(b_ring), role=ROLE_GRADED_STRIP,
+        ref="adjacent_ground", node_altitudes=b_alt + [b_alt[0]]))
+    registry = CanonicalPointRegistry(tol_m=SHARED_VERTEX_TOL_M)
+    for s in layout.shapes:
+        for (x, y) in list(s.polygon.exterior.coords):
+            registry.get_or_add(float(x), float(y))
+    layout.canonical_points = registry
+
+    emitted = emit_stacked_conflict_walls(layout)
+    assert emitted >= 1, "expected a retaining_wall face for the 3 m step"
+    walls = [s for s in layout.shapes if s.role == ROLE_RETAINING_WALL]
+    assert walls and all(
+        s.ref == "stacked_conflict_wall" for s in walls)
+    # The LOWER strip (A, 100 m) retreated: its seam-row vertices moved
+    # off y=0; the upper strip (B, 103 m) keeps its chain.
+    strip_a = layout.shapes[0]
+    a_seam_ys = [y for (x, y) in
+                 list(strip_a.polygon.exterior.coords)[:-1]
+                 if abs(y) < 1e-6]
+    assert not a_seam_ys, "lower strip still touches the seam line"
+    strip_b = layout.shapes[1]
+    assert any(abs(y) < 1e-6 for (x, y) in
+               list(strip_b.polygon.exterior.coords)[:-1])
+    # Wall spans: top row on y=0 at 103, bottom row retreated at 100.
+    wall = walls[0]
+    wall_ring = list(wall.polygon.exterior.coords)[:-1]
+    wall_alts = wall.node_altitudes[:len(wall_ring)]
+    assert any(abs(y) < 1e-6 and abs(a - 103.0) < 0.6
+               for (x, y), a in zip(wall_ring, wall_alts))
+    assert any(abs(y) > 1e-6 and abs(a - 100.0) < 0.6
+               for (x, y), a in zip(wall_ring, wall_alts))
+    # Neither strip carries a sub-metre near-vertical edge afterwards.
+    for s in (strip_a, strip_b):
+        ring = list(s.polygon.exterior.coords)[:-1]
+        alts = s.node_altitudes[:len(ring)]
+        assert not _way_has_tear(
+            [(x, y, a) for (x, y), a in zip(ring, alts)])

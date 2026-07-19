@@ -6860,6 +6860,57 @@ def build_airport_pavement(icao: str, xplane_root: str,
             UI.vprint(1, f"  [pav-builder] WARN {icao}: cross-strip seam "
                          f"blend failed ({_seam_blend_exc!r}).")
 
+    # ── Stacked-conflict wall emission (owner ruling 2026-07-19: nodes
+    # are NEVER stacked — same spot ⇒ one merged node, one elevation;
+    # a genuine level change is horizontal wall geometry).  to_osm now
+    # hard-merges every coincident claim, so a strip vertex coincident
+    # with a designed-split authority corner (building pad, service
+    # road, groundside — non-donor classes) would be AVERAGED into it,
+    # bending the strip metres at one column.  Resolve those sites as
+    # geometry instead: retreat the strip edge and emit a
+    # retaining_wall face over the vacated band.  Runs after the seam
+    # blend (soft↔soft steps level first) and BEFORE the late
+    # projection, whose strip freeze then anchors the final values.
+    if compute_elevations:
+        # Post-merge tear heal FIRST: the hard-merge consensus + the
+        # seam blend can mint sub-metre near-vertical pinches after the
+        # adjacent-ground emit's own final heal ran (that one sees only
+        # its own emit group, and earlier values).  Same doctrine: the
+        # pinch edge is the only unlawful thing — collapse it by
+        # dropping an unshared, non-donor vertex.  ORDER CONTRACT: the
+        # heal must run BEFORE the wall pass — a wall-retreated vertex
+        # is unshared by the heal's tests, and healing after the
+        # retreat drops it, springing the strip edge back across the
+        # already-emitted wall band (measured CYXY: a 2.16 m² strip∩
+        # wall overlap, the zero-tolerance self-overlap invariant).
+        try:
+            from .adjacent_ground import (
+                _heal_emitted_band_tears, _raster_reach_band_active)
+            if _raster_reach_band_active():
+                _strip_shapes = [s for s in layout.shapes
+                                 if s.ref == "adjacent_ground"]
+                _n_late_heal = _heal_emitted_band_tears(
+                    _strip_shapes, layout)
+                if _n_late_heal:
+                    UI.vprint(1, f"  [pav-builder] {icao}: post-merge "
+                                 f"tear heal — collapsed pinch edge(s) "
+                                 f"in {_n_late_heal} strip(s).")
+        except _GEOM_EXC as _late_heal_exc:
+            UI.vprint(1, f"  [pav-builder] WARN {icao}: post-merge tear "
+                         f"heal failed ({_late_heal_exc!r}).")
+        try:
+            from .adjacent_ground import emit_stacked_conflict_walls
+            _n_conflict_walls = emit_stacked_conflict_walls(layout)
+            if _n_conflict_walls:
+                UI.vprint(1, f"  [pav-builder] {icao}: stacked-conflict "
+                             f"walls — {_n_conflict_walls} retaining "
+                             f"face(s) at strip-vs-designed-split level "
+                             f"changes.")
+        except _GEOM_EXC as _conflict_wall_exc:
+            UI.vprint(1, f"  [pav-builder] WARN {icao}: stacked-conflict "
+                         f"wall emission failed "
+                         f"({_conflict_wall_exc!r}).")
+
     # ── LATE final grade projection (2026-07-17): the mid-pipeline
     # ``final_grade_projection`` is no longer last — band/gap emission,
     # tile cuts, conformance welds, crown completion and the densify
