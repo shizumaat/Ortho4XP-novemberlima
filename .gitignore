@@ -39,3 +39,9 @@ Sessions/
 Airport_mod_cache/
 Default_DSF_cache/
 tools/run_ledger.jsonl
+
+# Local test-content area: third-party scenery packages (KRDM_Redmond,
+# comparison airports) and generated synthetic packages. Third-party
+# content must never be committed (personal-use only); see
+# docs/msfs_converter_handoff.md working agreements.
+scratchpad/
