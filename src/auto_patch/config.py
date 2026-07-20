@@ -80,6 +80,7 @@ __all__ = [
     "RASTER_REACH_BAND_MAX_CELLS",
     "RASTER_REACH_BAND_GRID_RESIDUAL_M",
     "VECTORIZED_GEOMETRY",
+    "HOLE_ROUTER_MID_EDGE_PRUNE",
     "RECT_CROSS_FLATNESS_TOLERANCE_M",
     "BUILDING_SEAT_FLATNESS_TOLERANCE_M",
     "TAXI_MAX_GRADE",
@@ -1256,6 +1257,18 @@ CHROMATIC_CHAIN_PREPASS = (
 # to the scalar path when this master gate is off.
 VECTORIZED_GEOMETRY = (
     _os_early.environ.get("O4_VECTORIZED_GEOMETRY", "1") == "1")
+
+# Hole-router pair-enumeration prune (track T3c / wave-3 R4): the v2
+# conforming-cuts planner blocks collinear mid-edge ring vertices in every
+# Dijkstra call (they are never sources, waypoints, bridge feet, or targets),
+# so visibility edges incident to them are provably dead — skipping those
+# pairs at graph-build time removes their O(V^2) share of the prepared-GEOS
+# ``contains`` mass without changing a single planned cut.  v1 planner paths
+# (``plan_hole_cuts``, ``route_between``, ``route_hole_opening``) always keep
+# the full graph.  Default ON; ``O4_HOLE_ROUTER_MID_EDGE_PRUNE=0`` restores
+# full enumeration for the cuts-parity A/B.
+HOLE_ROUTER_MID_EDGE_PRUNE = (
+    _os_early.environ.get("O4_HOLE_ROUTER_MID_EDGE_PRUNE", "1") == "1")
 
 # Taxi-rect CROSS-section flatness reserve (m): a rect's two flat-cross
 # (cap≈0) edges want their endpoints EQUAL, so a rect certifies its

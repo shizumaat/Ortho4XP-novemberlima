@@ -27,6 +27,11 @@ adding its corners as nodes and its interior as a hard no-cross region.
 Perf note: the graph is all-pairs visibility, O(V^2) prepared-geometry
 ``contains`` tests (V = exterior verts + every hole vert + obstacle corners).
 Fine for a per-apron op; Phase 2 can prune to reflex vertices if needed.
+The v2 planner additionally excludes collinear mid-edge ring vertices from
+the pair enumeration (``config.HOLE_ROUTER_MID_EDGE_PRUNE``, track T3c):
+it blocks them in every Dijkstra call anyway, so their edges are provably
+dead — on residue rings dense with collinear vertices this removes most of
+the pair count without changing a single planned cut.
 """
 from __future__ import annotations
 
@@ -153,6 +158,63 @@ def _visible(a: tuple[float, float], b: tuple[float, float],
     return True
 
 
+def _coord_key(x: float, y: float) -> tuple[int, int]:
+    """The 1e-6 m bucket key shared by node dedupe and index lookups."""
+    return (round(x * 1e6), round(y * 1e6))
+
+
+# Collinearity threshold for mid-edge classification: a ring vertex whose two
+# incident edges are within ~1 degree of straight merely SUBDIVIDES an edge.
+_COLLINEAR_COS = -math.cos(math.radians(1.0))   # cos(179 deg)
+
+
+def _collinear_mid_edge_keys(polygon: Polygon,
+                             extra_keys: set[tuple[int, int]]
+                             ) -> set[tuple[int, int]]:
+    """Coordinate keys of ring vertices that merely subdivide a straight edge.
+
+    Along a subtracted rect the residue ring runs flush with the rect side, so
+    such a vertex sits on the rect-edge INTERIOR — the v2 planner refuses them
+    as attachment points (a cut attaching there decouples the piece from the
+    rect downstream; HECA U-connector) and blocks them as waypoints in every
+    Dijkstra call.  True corners and global/shared ``extra_keys`` stay legal.
+
+    Returns an empty set on any geometry error (conservative: nothing is
+    classified, so nothing is blocked or pruned).
+    """
+    keys: set[tuple[int, int]] = set()
+
+    def _mark(ring_obj) -> None:
+        pts_r = _ring_pts(ring_obj)
+        m = len(pts_r)
+        if m < 3:
+            return
+        for ii in range(m):
+            ax, ay = pts_r[(ii - 1) % m]
+            bx, by = pts_r[ii]
+            cx, cy = pts_r[(ii + 1) % m]
+            v1x, v1y = ax - bx, ay - by
+            v2x, v2y = cx - bx, cy - by
+            n1 = math.hypot(v1x, v1y)
+            n2 = math.hypot(v2x, v2y)
+            if n1 < 1e-9 or n2 < 1e-9:
+                continue
+            if (v1x * v2x + v1y * v2y) / (n1 * n2) >= _COLLINEAR_COS:
+                continue                      # a real corner
+            key = _coord_key(bx, by)
+            if key in extra_keys:
+                continue                      # shared neighbour corner
+            keys.add(key)
+
+    try:
+        _mark(polygon.exterior)
+        for ring_obj in polygon.interiors:
+            _mark(ring_obj)
+    except _GEOM_EXC:
+        return set()
+    return keys
+
+
 def _dedupe_nodes(pts: Sequence[tuple[float, float]]):
     """Unique node list + index map, bucketed at 1e-6 m so coincident ring /
     corner points collapse to one graph node."""
@@ -183,14 +245,23 @@ class VisibilityGraph:
     hole_rings: list[list[int]]             # node idxs per interior ring
 
 
-def _build_adjacency_scalar(nodes, ppoly_buf, boundary, obstacles, eps_m):
+def _build_adjacency_scalar(nodes, ppoly_buf, boundary, obstacles, eps_m,
+                            excluded=frozenset()):
     """Reference O(V^2) adjacency: the original per-pair ``_visible`` double
-    loop.  Kept verbatim as the byte-identity oracle for the vectorized path."""
+    loop.  Kept verbatim as the byte-identity oracle for the vectorized path.
+
+    ``excluded`` node indices take part in no pair (T3c mid-edge prune): the
+    caller guarantees they can never be traversed, so their edges are dead.
+    """
     n = len(nodes)
     adj: list[list[tuple[int, float]]] = [[] for _ in range(n)]
     for i in range(n):
+        if i in excluded:
+            continue
         xi, yi = nodes[i]
         for j in range(i + 1, n):
+            if j in excluded:
+                continue
             xj, yj = nodes[j]
             if _visible((xi, yi), (xj, yj), ppoly_buf, boundary,
                         obstacles, eps_m):
@@ -200,7 +271,8 @@ def _build_adjacency_scalar(nodes, ppoly_buf, boundary, obstacles, eps_m):
     return adj
 
 
-def _build_adjacency_vectorized(nodes, buf_poly, boundary, obstacles, eps_m):
+def _build_adjacency_vectorized(nodes, buf_poly, boundary, obstacles, eps_m,
+                                excluded=frozenset()):
     """Vectorized equivalent of :func:`_build_adjacency_scalar` using shapely-2
     batch predicates.  Produces a BYTE-IDENTICAL adjacency (same edge set, same
     per-list order): pairs are enumerated in the identical ascending ``(i, j)``
@@ -245,6 +317,15 @@ def _build_adjacency_vectorized(nodes, buf_poly, boundary, obstacles, eps_m):
     # Upper-triangle pair indices in row-major (ascending i, then j) order —
     # exactly the scalar double-loop order.
     ii, jj = np.triu_indices(n, k=1)
+    if excluded:
+        # T3c mid-edge prune: drop pairs with an excluded endpoint before any
+        # GEOS work.  Filtering the ascending pair stream preserves the scalar
+        # enumeration order of the surviving pairs.
+        excluded_mask = np.zeros(n, dtype=bool)
+        excluded_mask[list(excluded)] = True
+        pair_alive = ~(excluded_mask[ii] | excluded_mask[jj])
+        ii = ii[pair_alive]
+        jj = jj[pair_alive]
     total = ii.shape[0]
     for start in range(0, total, _VIS_PAIR_CHUNK):
         stop = min(start + _VIS_PAIR_CHUNK, total)
@@ -336,7 +417,8 @@ def _build_adjacency_vectorized(nodes, buf_poly, boundary, obstacles, eps_m):
     return adj
 
 
-def _build_adjacency(nodes, buf_poly, ppoly_buf, boundary, obstacles, eps_m):
+def _build_adjacency(nodes, buf_poly, ppoly_buf, boundary, obstacles, eps_m,
+                     excluded=frozenset()):
     """Adjacency dispatch: vectorized batch predicates when
     ``config.VECTORIZED_GEOMETRY`` is on (byte-identical to the scalar path),
     else the reference double loop.  Any failure in the vectorized path falls
@@ -348,18 +430,29 @@ def _build_adjacency(nodes, buf_poly, ppoly_buf, boundary, obstacles, eps_m):
     if VECTORIZED_GEOMETRY:
         try:
             return _build_adjacency_vectorized(
-                nodes, buf_poly, boundary, obstacles, eps_m)
+                nodes, buf_poly, boundary, obstacles, eps_m, excluded)
         except _GEOM_EXC:
             pass
-    return _build_adjacency_scalar(nodes, ppoly_buf, boundary, obstacles, eps_m)
+    return _build_adjacency_scalar(nodes, ppoly_buf, boundary, obstacles,
+                                   eps_m, excluded)
 
 
 def build_graph(polygon: Polygon, *,
                 obstacles=(),
                 extra_nodes: Sequence[tuple[float, float]] = (),
-                eps_m: float = _EPS_M) -> VisibilityGraph | None:
+                eps_m: float = _EPS_M,
+                excluded_pair_keys: set[tuple[int, int]] = frozenset(),
+                ) -> VisibilityGraph | None:
     """All-pairs visibility graph over exterior verts + every hole vert +
-    obstacle corners + ``extra_nodes``.  ``None`` if the polygon is degenerate."""
+    obstacle corners + ``extra_nodes``.  ``None`` if the polygon is degenerate.
+
+    ``excluded_pair_keys`` (T3c mid-edge prune): coordinate keys (see
+    ``_coord_key``) of nodes to leave out of the pair enumeration — their
+    adjacency lists come back empty and no other list references them.  Only
+    a caller that provably never traverses those nodes (the v2 planner, which
+    blocks them in every Dijkstra call) may pass this; v1 paths pass nothing
+    and keep the full graph.
+    """
     if polygon is None or polygon.is_empty or polygon.geom_type != "Polygon":
         return None
     ext_pts = _ring_pts(polygon.exterior)
@@ -383,8 +476,13 @@ def build_graph(polygon: Polygon, *,
         return None
     boundary = polygon.boundary
 
+    excluded = (
+        {i for i, (x, y) in enumerate(nodes)
+         if _coord_key(x, y) in excluded_pair_keys}
+        if excluded_pair_keys else frozenset()
+    )
     adj = _build_adjacency(nodes, buf_poly, ppoly_buf,
-                           boundary, obstacles, eps_m)
+                           boundary, obstacles, eps_m, excluded)
 
     ext_idx = {k for k in (_node_idx(index, x, y) for x, y in ext_pts)
                if k is not None}
@@ -746,10 +844,29 @@ def plan_hole_cuts_v2(polygon: Polygon, *,
     Holes with no two disjoint visible bridges are SKIPPED (left in place for
     the caller's legacy-guillotine fallback on that piece alone).
     """
+    # Ring vertices that merely SUBDIVIDE a straight edge (collinear within
+    # ~1 degree) are not conforming attachment points (see
+    # ``_collinear_mid_edge_keys``) and are blocked as waypoints in every
+    # Dijkstra call below — so their visibility edges are provably dead.
+    # Under ``config.HOLE_ROUTER_MID_EDGE_PRUNE`` (T3c) they are excluded
+    # from the O(V^2) pair enumeration outright; the planned cuts are
+    # identical either way.
+    extra_keys = {_coord_key(float(x), float(y)) for (x, y) in extra_nodes}
+    mid_edge_keys = _collinear_mid_edge_keys(polygon, extra_keys)
+    try:
+        from ..config import HOLE_ROUTER_MID_EDGE_PRUNE
+    except Exception:
+        HOLE_ROUTER_MID_EDGE_PRUNE = True
+
     g = build_graph(polygon, obstacles=obstacles, eps_m=eps_m,
-                    extra_nodes=extra_nodes)
+                    extra_nodes=extra_nodes,
+                    excluded_pair_keys=(mid_edge_keys
+                                        if HOLE_ROUTER_MID_EDGE_PRUNE
+                                        else frozenset()))
     if g is None:
         return []
+    mid_edge = {i for i, (x, y) in enumerate(g.nodes)
+                if _coord_key(x, y) in mid_edge_keys}
     interiors = list(polygon.interiors)
     INF = float("inf")
 
@@ -826,52 +943,6 @@ def plan_hole_cuts_v2(polygon: Polygon, *,
         if via is not None and len(via) >= 2:
             return via
         return None
-
-    # Ring vertices that merely SUBDIVIDE a straight edge (collinear within
-    # ~1°) are not conforming attachment points: along a subtracted rect the
-    # residue ring runs flush with the rect side, so such a vertex sits on
-    # the rect-edge INTERIOR — a cut attaching there decouples the piece
-    # from the rect downstream (the push-off-edge pass shoves the vertex
-    # 1 m off → no weld → cliff; HECA U-connector).  True corners and
-    # global/shared extra nodes stay legal.
-    extra_keys = {(round(float(x) * 1e6), round(float(y) * 1e6))
-                  for (x, y) in extra_nodes}
-    mid_edge: set[int] = set()
-    _COLLINEAR_COS = -math.cos(math.radians(1.0))   # cos(179°)
-
-    def _mark_collinear(ring_obj):
-        pts_r = _ring_pts(ring_obj)
-        m = len(pts_r)
-        if m < 3:
-            return
-        for ii in range(m):
-            ax, ay = pts_r[(ii - 1) % m]
-            bx, by = pts_r[ii]
-            cx, cy = pts_r[(ii + 1) % m]
-            v1x, v1y = ax - bx, ay - by
-            v2x, v2y = cx - bx, cy - by
-            n1 = math.hypot(v1x, v1y)
-            n2 = math.hypot(v2x, v2y)
-            if n1 < 1e-9 or n2 < 1e-9:
-                continue
-            if (v1x * v2x + v1y * v2y) / (n1 * n2) >= _COLLINEAR_COS:
-                continue                      # a real corner
-            key = (round(bx * 1e6), round(by * 1e6))
-            if key in extra_keys:
-                continue                      # shared neighbour corner
-            idx = index_lookup(bx, by)
-            if idx is not None:
-                mid_edge.add(idx)
-
-    def index_lookup(x, y):
-        return g.index.get((round(x * 1e6), round(y * 1e6)))
-
-    try:
-        _mark_collinear(polygon.exterior)
-        for ring_obj in interiors:
-            _mark_collinear(ring_obj)
-    except _GEOM_EXC:
-        mid_edge = set()
 
     cuts: list[LineString] = []
     while remaining:
