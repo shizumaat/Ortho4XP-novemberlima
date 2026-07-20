@@ -249,14 +249,20 @@ def test_compute_exclusion_far_apart_objects_stay_separate():
 # --------------------------------------------------------------------------
 # write_overlay_dsf (real DSFTool round-trip)
 # --------------------------------------------------------------------------
-_DSFTOOL_PATH = (
-    Path(__file__).resolve().parent.parent / "Utils" / "mac" / "DSFTool"
-)
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 _IS_MACOS_ARM = platform.system() == "Darwin" and platform.machine() == "arm64"
+_IS_LINUX_X86 = platform.system() == "Linux" and platform.machine() == "x86_64"
+if _IS_MACOS_ARM:
+    _DSFTOOL_PATH = _REPO_ROOT / "Utils" / "mac" / "DSFTool"
+elif _IS_LINUX_X86:
+    _DSFTOOL_PATH = _REPO_ROOT / "Utils" / "lin" / "DSFTool"
+else:
+    _DSFTOOL_PATH = _REPO_ROOT / "Utils" / "mac" / "DSFTool"
 
-_dsftool_reason = "requires the bundled macOS-arm64 DSFTool binary"
+_dsftool_reason = "requires a bundled DSFTool binary for this platform"
 requires_dsftool = pytest.mark.skipif(
-    not (_IS_MACOS_ARM and _DSFTOOL_PATH.is_file()), reason=_dsftool_reason
+    not ((_IS_MACOS_ARM or _IS_LINUX_X86) and _DSFTOOL_PATH.is_file()),
+    reason=_dsftool_reason,
 )
 
 
@@ -346,3 +352,128 @@ def test_write_overlay_dsf_bad_dsftool_raises(tmp_path):
         PACK.write_overlay_dsf(
             pack_directory, placements, [], tmp_path / "does-not-exist-dsftool"
         )
+
+
+# --------------------------------------------------------------------------
+# Altitude-aware placements (task 3) and extent-based exclusions (task 2)
+# --------------------------------------------------------------------------
+def test_build_tile_dsf_text_altitude_rows():
+    placements = [
+        PACK.PlacedObject("objects/a.obj", -121.5, 44.5, 90.0),
+        PACK.PlacedObject(
+            "objects/a.obj", -121.5, 44.5, 45.0,
+            altitude_meters=8.0, altitude_is_agl=True,
+        ),
+        PACK.PlacedObject(
+            "objects/a.obj", -121.5, 44.5, 180.0,
+            altitude_meters=120.0, altitude_is_agl=False,
+        ),
+    ]
+    text = PACK._build_tile_dsf_text(-122, 44, placements, [])
+    lines = text.splitlines()
+    object_rows = [line for line in lines if line.startswith("OBJECT")]
+    assert object_rows[0] == "OBJECT_DEF objects/a.obj"
+    # Ground-clamped AGL-0 placement keeps the plain OBJECT form.
+    assert object_rows[1].startswith("OBJECT 0 ")
+    # Elevated rows: elevation comes BEFORE the rotation (DSFTool text
+    # order, verified by round-trip).
+    agl_fields = object_rows[2].split()
+    assert agl_fields[0] == "OBJECT_AGL"
+    assert float(agl_fields[4]) == pytest.approx(8.0)
+    assert float(agl_fields[5]) == pytest.approx(45.0)
+    msl_fields = object_rows[3].split()
+    assert msl_fields[0] == "OBJECT_MSL"
+    assert float(msl_fields[4]) == pytest.approx(120.0)
+    assert float(msl_fields[5]) == pytest.approx(180.0)
+
+
+def test_compute_exclusion_rectangle_uses_object_extents():
+    latitude = 44.25
+    padding_meters = 20.0
+    # A 200 m x 20 m building centred on the placement, heading 0:
+    # OBJ8 X spans east-west, Z spans north-south.
+    bounds = (-100.0, 0.0, -10.0, 100.0, 15.0, 10.0)
+    placement = PACK.PlacedObject(
+        "objects/terminal.obj", -121.15, latitude, 0.0, bounds_obj8=bounds
+    )
+    rectangles = PACK.compute_exclusion_rectangles([placement], padding_meters)
+    assert len(rectangles) == 1
+    west, south, east, north = rectangles[0]
+
+    metres_per_degree_longitude = 111320.0 * math.cos(math.radians(latitude))
+    east_west_metres = (east - west) * metres_per_degree_longitude
+    north_south_metres = (north - south) * 111320.0
+    # 200 m footprint + 2 x 20 m padding east-west; 20 m + padding north-south.
+    assert east_west_metres == pytest.approx(240.0, abs=1.0)
+    assert north_south_metres == pytest.approx(60.0, abs=1.0)
+
+
+def test_compute_exclusion_rectangle_rotates_extents_with_heading():
+    latitude = 44.25
+    bounds = (-100.0, 0.0, -10.0, 100.0, 15.0, 10.0)
+    placement = PACK.PlacedObject(
+        "objects/terminal.obj", -121.15, latitude, 90.0, bounds_obj8=bounds
+    )
+    rectangles = PACK.compute_exclusion_rectangles([placement], 20.0)
+    west, south, east, north = rectangles[0]
+    metres_per_degree_longitude = 111320.0 * math.cos(math.radians(latitude))
+    east_west_metres = (east - west) * metres_per_degree_longitude
+    north_south_metres = (north - south) * 111320.0
+    # At heading 90 the long axis points north-south.
+    assert east_west_metres == pytest.approx(60.0, abs=1.0)
+    assert north_south_metres == pytest.approx(240.0, abs=1.0)
+
+
+def test_compute_exclusion_point_fallback_matches_legacy_padding():
+    # Placements without bounds keep the historical padded-point behavior.
+    latitude = 44.25
+    padding_meters = 20.0
+    objects = [PACK.PlacedObject("objects/a.obj", -121.150, latitude, 0.0)]
+    west, south, east, north = PACK.compute_exclusion_rectangles(
+        objects, padding_meters
+    )[0]
+    latitude_padding_degrees = padding_meters / 111320.0
+    assert south == pytest.approx(latitude - latitude_padding_degrees, abs=1e-9)
+    assert north == pytest.approx(latitude + latitude_padding_degrees, abs=1e-9)
+
+
+@requires_dsftool
+def test_write_overlay_dsf_round_trips_elevated_placements(tmp_path):
+    pack_directory = tmp_path / "MSFS Convert - ALT"
+    placements = [
+        PACK.PlacedObject("objects/alpha.obj", -121.161, 44.254, 90.0),
+        PACK.PlacedObject(
+            "objects/alpha.obj", -121.160, 44.255, 45.0,
+            altitude_meters=8.0, altitude_is_agl=True,
+        ),
+        PACK.PlacedObject(
+            "objects/alpha.obj", -121.159, 44.256, 180.0,
+            altitude_meters=921.5, altitude_is_agl=False,
+        ),
+    ]
+    earth_nav_data = PACK.write_overlay_dsf(
+        pack_directory, placements, [], _DSFTOOL_PATH
+    )
+    dsf_path = earth_nav_data / "+40-130" / "+44-122.dsf"
+    assert dsf_path.is_file()
+    text_out = tmp_path / "roundtrip.txt"
+    completed = subprocess.run(
+        [str(_DSFTOOL_PATH), "--dsf2text", str(dsf_path), str(text_out)],
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    round_tripped = text_out.read_text(encoding="utf-8")
+    agl_rows = [
+        line for line in round_tripped.splitlines()
+        if line.startswith("OBJECT_AGL ")
+    ]
+    msl_rows = [
+        line for line in round_tripped.splitlines()
+        if line.startswith("OBJECT_MSL ")
+    ]
+    assert len(agl_rows) == 1 and len(msl_rows) == 1
+    # Elevation is field 4 (before the rotation). The DSF encoding
+    # quantizes elevations to ~1 m pool steps, so allow that much.
+    assert float(agl_rows[0].split()[4]) == pytest.approx(8.0, abs=0.51)
+    assert float(msl_rows[0].split()[4]) == pytest.approx(921.5, abs=0.51)

@@ -70,6 +70,14 @@ normals agree with the authored vertex normals, keeps CW-front sources
 as-is, and reverses spec-CCW sources so the OBJ8 output is always
 CW-front. Override with --winding gltf|directx if a file lies about its
 normals.
+
+Per-node mirror correction: the detected (or forced) convention is the
+FILE's base convention.  A node whose world transform mirrors (negative
+determinant, e.g. negative-scale instancing of a symmetric wing/facade)
+flips the world-space winding of its own triangles, so each primitive's
+reversal decision is the base convention XOR its node's mirror state
+(gltf_reader marks this as ``primitive["mirrored"]``).  Detection votes
+from mirrored primitives are inverted for the same reason.
 """
 from __future__ import annotations
 
@@ -296,6 +304,35 @@ def _write_obj8(
     output_path.write_text("\n".join(lines), encoding="ascii")
 
 
+def write_scaled_obj8(
+    source_path: Path, output_path: Path, scale: float
+) -> None:
+    """Write a uniformly pre-scaled copy of an OBJ8 object file.
+
+    DSF placements carry no scale, so MSFS placement scales are baked into
+    per-scale OBJ variants: every ``VT`` position is multiplied by
+    ``scale`` (normals and UVs are scale-invariant under a uniform scale).
+    Only ``VT`` rows are rewritten; the converter emits no other
+    position-carrying rows (no ANIM/LIGHT/smoke directives).
+    """
+    source_path = Path(source_path)
+    output_path = Path(output_path)
+    lines_out: List[str] = []
+    for line in source_path.read_text(encoding="ascii").splitlines():
+        if line.startswith("VT "):
+            fields = line.split()
+            px, py, pz = (float(fields[k]) * scale for k in (1, 2, 3))
+            lines_out.append(
+                f"VT {px:.4f} {py:.4f} {pz:.4f} "
+                + " ".join(fields[4:7])
+                + " "
+                + " ".join(fields[7:9])
+            )
+        else:
+            lines_out.append(line)
+    output_path.write_text("\n".join(lines_out), encoding="ascii")
+
+
 # --------------------------------------------------------------------------
 # Conversion core.
 # --------------------------------------------------------------------------
@@ -305,13 +342,18 @@ def detect_source_winding(primitives: List[Dict[str, Any]]) -> str:
     BGL model libraries).
 
     Tests whether right-handed geometric triangle normals agree with the
-    authored vertex normals across a sample of triangles.
+    authored vertex normals across a sample of triangles.  Primitives
+    under a mirroring node (negative-determinant world transform) have
+    their world-space winding flipped by the mirror itself; their votes
+    are inverted so the vote measures the file's underlying authoring
+    convention rather than the per-node mirror state.
     """
     agree = disagree = 0
     for primitive in primitives:
         positions = primitive["positions"]
         normals = primitive["normals"]
         indices = primitive["indices"]
+        mirrored = bool(primitive.get("mirrored"))
         for k in range(0, min(len(indices), 600), 3):
             i0, i1, i2 = indices[k : k + 3]
             edge_a = [positions[i1][j] - positions[i0][j] for j in range(3)]
@@ -326,6 +368,8 @@ def detect_source_winding(primitives: List[Dict[str, Any]]) -> str:
                 for j in range(3)
             ]
             dot = sum(cross[j] * authored[j] for j in range(3))
+            if mirrored:
+                dot = -dot
             if dot > 1e-12:
                 agree += 1
             elif dot < -1e-12:
@@ -442,6 +486,11 @@ def _build_group_geometry(
     groups return their cell centre).  Alongside the merged vertices/indices
     this accumulates the triangle-area-weighted roughness and emissive so the
     caller can emit an object-level ``ATTR_shiny_rat`` and scale a LIT map.
+
+    ``reverse_triangles`` is the file's base convention (reverse when the
+    source is spec CCW-front); a primitive under a mirroring node has its
+    world-space winding flipped by the mirror, so its reversal decision is
+    the base convention inverted.
     """
     vertices: List[Tuple[float, ...]] = []
     indices: List[int] = []
@@ -462,7 +511,7 @@ def _build_group_geometry(
                 uv_source(primitive, vertex_index),
             ))
         primitive_indices = primitive["indices"]
-        if reverse_triangles:
+        if reverse_triangles != bool(primitive.get("mirrored")):
             for k in range(0, len(primitive_indices) - 2, 3):
                 indices.append(base_offset + primitive_indices[k])
                 indices.append(base_offset + primitive_indices[k + 2])
@@ -649,6 +698,17 @@ def convert(
             "triangles": len(indices) // 3,
             "texture": texture_png,
         }
+        vertices = geometry["vertices"]
+        if vertices:
+            # OBJ8-space axis-aligned bounds (min x/y/z, max x/y/z), used by
+            # the pack writer to size exclusion zones from real extents.
+            entry["bounds"] = [
+                round(min(vertex[axis] for vertex in vertices), 4)
+                for axis in range(3)
+            ] + [
+                round(max(vertex[axis] for vertex in vertices), 4)
+                for axis in range(3)
+            ]
         if texture_lit is not None:
             entry["texture_lit"] = texture_lit
         if texture_normal is not None:

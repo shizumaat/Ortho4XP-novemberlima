@@ -73,29 +73,40 @@ docs) unless marked otherwise:
 
 ## Prioritized task list (each with the evidence behind it)
 
-1. **Per-node winding correction.** Replace whole-file
-   `detect_source_winding` majority vote with per-primitive reversal
-   decided by sign(det(node world transform)) × source convention.
-   Mirrored (negative-scale) nodes currently render inside-out.
-2. **Exclusion zones from model extents, not placement points.**
-   `O4_MSFS_Airport_Convert` pads placement POINTS by 20 m; a 630 m
-   terminal complex keeps only a 40 m exclusion box, so default gateway
-   3-D (e.g. the stock KRDM tower) still draws. Compute each placed
-   object's world bbox (object bounds, rotated by heading, at the
-   placement) and merge those rectangles.
-3. **Honor placement altitude via `OBJECT_AGL`/`OBJECT_MSL`.** Altitude
-   (mm→m) and the AGL flag are parsed but dropped; DSF supports both
-   forms. Small change in `O4_MSFS_XPlane_Pack.write_overlay_dsf` +
-   orchestrator plumbing.
-4. **Bake placement scale.** DSF has no scale; emit per-(guid, rounded
-   scale) OBJ variants with pre-multiplied vertices. Test package has
-   scales 0.6–1.8, all currently rendered at 1.0.
-5. **Read GUID/scale at fixed offsets 0x2C/0x3C** in LibraryObject
-   records (the current size−20/size−4 heuristic breaks when
-   AttachedObject (0x1002) sub-records extend the record). Also dispatch
-   other 0x25 record types by (type, size) — 0x0A GenericBuilding,
-   0x0C Windsock, 0x0D Effect, 0x0E TaxiwaySign, 0x12 ExtrusionBridge —
-   at minimum warn with counts instead of silently skipping.
+Tasks 1–5 were implemented and landed 2026-07-20 (cloud session, branch
+`claude/msfs-xplane-scenery-research-bg9mdm`), each with headless tests;
+all validated end-to-end against the synthetic packages
+(`tools/make_synth_msfs_packages.py`) and regression-checked against the
+real LMML compiled package (see
+`docs/msfs_converter_real_package_run.md`). Notes per task below.
+
+1. **[DONE] Per-node winding correction.** `gltf_reader` now marks every
+   primitive instance with ``mirrored`` (sign of det(node world
+   transform)); reversal is per-primitive (base convention XOR mirror)
+   and `detect_source_winding` inverts votes from mirrored primitives.
+   Synthetic mirrored-wing model: 48/48 triangles correct (was 24/48).
+2. **[DONE] Exclusion zones from model extents.** `convert()` manifests
+   now carry per-object OBJ8 bounds; `PlacedObject.bounds_obj8` feeds
+   `compute_exclusion_rectangles`, which rotates the XZ footprint by the
+   placement heading and pads that (padded-point fallback when bounds
+   are unknown).
+3. **[DONE] `OBJECT_AGL`/`OBJECT_MSL`.** DSFTool text row order verified
+   by round-trip with the bundled binary: elevation comes BEFORE
+   rotation (`OBJECT_AGL <def> <lon> <lat> <elev m> <rot deg>`); the DSF
+   encoding quantizes elevation to ~1 m pool steps. AGL-0 placements
+   keep the plain `OBJECT` form.
+4. **[DONE] Bake placement scale.** Per-(guid, scale rounded to 2 dp)
+   OBJ variants via `convert.write_scaled_obj8` (uniform VT-position
+   scaling); files named `<base>_s<scale>.obj` (e.g. `_s1_50`).
+   Non-positive scales fall back to 1.0 with a warning.
+5. **[DONE] Fixed offsets 0x2C/0x3C + record census.** GUID/scale read
+   at fixed offsets (AttachedObject-extended records now parse; the
+   synthetic extended record survives the full pipeline). All 0x25
+   record types are counted (`read_object_placements_with_stats`) and
+   `read_package` warns per BGL with per-type counts. New empirical
+   fact: MSFS compiles `<Windsock>` to record type **0x18** (LMML: 2
+   source windsocks = exactly its 2 type-0x18 records); FSX-era 0x0C
+   kept in the name table too.
 6. **Glass treatment for dark glass textures.** Hold-room/window texture
    groups (SKY*, WINDOW*) render matte near-black in X-Plane; split them
    into BLEND_GLASS objects with high gloss so XP12 reflections read

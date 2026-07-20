@@ -69,12 +69,25 @@ class PlacedObject:
     ``object_relative_path`` is the pack-relative path with forward
     slashes, for example ``"objects/foo.obj"``. ``heading_degrees_true``
     is the true heading in degrees clockwise from north.
+
+    ``altitude_meters`` / ``altitude_is_agl`` carry the MSFS placement
+    altitude: AGL 0 means ground-clamped (a plain DSF ``OBJECT``),
+    a non-zero AGL value becomes ``OBJECT_AGL`` and an MSL value becomes
+    ``OBJECT_MSL``.
+
+    ``bounds_obj8``, when known, is the object's OBJ8-space axis-aligned
+    bounding box ``(min_x, min_y, min_z, max_x, max_y, max_z)`` in meters
+    (+X east, +Z south at heading 0); exclusion rectangles are then sized
+    from the heading-rotated footprint instead of a padded point.
     """
 
     object_relative_path: str
     longitude: float
     latitude: float
     heading_degrees_true: float
+    altitude_meters: float = 0.0
+    altitude_is_agl: bool = True
+    bounds_obj8: Optional[Tuple[float, float, float, float, float, float]] = None
 
 
 def _parse_header_identifier(stripped_line: str) -> Optional[str]:
@@ -361,26 +374,89 @@ def _union_rectangle(
     )
 
 
+def _footprint_extents_meters(
+    placement: PlacedObject,
+) -> Tuple[float, float, float, float]:
+    """Return the placement's ``(west, south, east, north)`` extents in meters.
+
+    Extents are measured from the placement point. With known
+    ``bounds_obj8`` the object's XZ footprint corners are rotated by the
+    placement heading (OBJ8: +X east, +Z south at heading 0; heading is
+    clockwise from north); without bounds the extents are zero (a point).
+    """
+    bounds = placement.bounds_obj8
+    if bounds is None:
+        return (0.0, 0.0, 0.0, 0.0)
+    min_x, _min_y, min_z, max_x, _max_y, max_z = bounds
+    heading_radians = math.radians(placement.heading_degrees_true)
+    cosine = math.cos(heading_radians)
+    sine = math.sin(heading_radians)
+    east_values: List[float] = []
+    north_values: List[float] = []
+    for corner_x in (min_x, max_x):
+        for corner_z in (min_z, max_z):
+            east_local = corner_x
+            north_local = -corner_z
+            east_values.append(east_local * cosine + north_local * sine)
+            north_values.append(-east_local * sine + north_local * cosine)
+    return (min(east_values), min(north_values), max(east_values), max(north_values))
+
+
+def _placement_rectangle(
+    placement: PlacedObject, padding_meters: float
+) -> Tuple[float, float, float, float]:
+    """Return one placement's padded ``(west, south, east, north)`` box in degrees."""
+    extent_west, extent_south, extent_east, extent_north = (
+        _footprint_extents_meters(placement)
+    )
+    latitude_padding, longitude_padding = _degree_padding_for_latitude(
+        padding_meters, placement.latitude
+    )
+    metres_per_degree_longitude = _METRES_PER_DEGREE_LATITUDE * max(
+        math.cos(math.radians(placement.latitude)), 1e-9
+    )
+    return (
+        placement.longitude
+        + extent_west / metres_per_degree_longitude
+        - longitude_padding,
+        placement.latitude
+        + extent_south / _METRES_PER_DEGREE_LATITUDE
+        - latitude_padding,
+        placement.longitude
+        + extent_east / metres_per_degree_longitude
+        + longitude_padding,
+        placement.latitude
+        + extent_north / _METRES_PER_DEGREE_LATITUDE
+        + latitude_padding,
+    )
+
+
 def compute_exclusion_rectangles(
     placed_objects: List[PlacedObject],
     padding_meters: float = 20.0,
 ) -> List[Tuple[float, float, float, float]]:
     """Return degree rectangles suppressing default 3D under placements.
 
-    Each placement is expanded into a padded box (the longitude padding
-    scaled by ``cos(latitude)``); overlapping boxes are merged. When all
-    placements span less than two kilometres they collapse to a single
+    Each placement is expanded into its heading-rotated object footprint
+    (when ``bounds_obj8`` is known; a point otherwise) plus
+    ``padding_meters`` of padding, the longitude padding scaled by
+    ``cos(latitude)``; overlapping boxes are merged. When everything
+    spans less than two kilometres the boxes collapse to their single
     bounding rectangle. Each rectangle is ``(west, south, east, north)``
     in degrees.
     """
     if not placed_objects:
         return []
 
-    minimum_latitude = min(placement.latitude for placement in placed_objects)
-    maximum_latitude = max(placement.latitude for placement in placed_objects)
-    minimum_longitude = min(placement.longitude for placement in placed_objects)
-    maximum_longitude = max(placement.longitude for placement in placed_objects)
-    mean_latitude = (minimum_latitude + maximum_latitude) / 2.0
+    padded_boxes = [
+        _placement_rectangle(placement, padding_meters)
+        for placement in placed_objects
+    ]
+
+    minimum_longitude = min(box[0] for box in padded_boxes)
+    minimum_latitude = min(box[1] for box in padded_boxes)
+    maximum_longitude = max(box[2] for box in padded_boxes)
+    maximum_latitude = max(box[3] for box in padded_boxes)
 
     span_kilometres = _haversine_kilometres(
         minimum_latitude,
@@ -389,31 +465,14 @@ def compute_exclusion_rectangles(
         maximum_longitude,
     )
     if span_kilometres < _SINGLE_RECTANGLE_SPAN_KILOMETRES:
-        latitude_padding, longitude_padding = _degree_padding_for_latitude(
-            padding_meters, mean_latitude
-        )
         return [
             (
-                minimum_longitude - longitude_padding,
-                minimum_latitude - latitude_padding,
-                maximum_longitude + longitude_padding,
-                maximum_latitude + latitude_padding,
+                minimum_longitude,
+                minimum_latitude,
+                maximum_longitude,
+                maximum_latitude,
             )
         ]
-
-    padded_boxes: List[Tuple[float, float, float, float]] = []
-    for placement in placed_objects:
-        latitude_padding, longitude_padding = _degree_padding_for_latitude(
-            padding_meters, placement.latitude
-        )
-        padded_boxes.append(
-            (
-                placement.longitude - longitude_padding,
-                placement.latitude - latitude_padding,
-                placement.longitude + longitude_padding,
-                placement.latitude + latitude_padding,
-            )
-        )
 
     merged_rectangles: List[Tuple[float, float, float, float]] = []
     for box in padded_boxes:
@@ -514,14 +573,32 @@ def _build_tile_dsf_text(
 
     for placement in tile_placements:
         definition_index = definition_index_by_path[placement.object_relative_path]
-        lines.append(
-            "OBJECT {:d} {:.9f} {:.9f} {:.6f}".format(
-                definition_index,
-                placement.longitude,
-                placement.latitude,
-                placement.heading_degrees_true,
+        if placement.altitude_is_agl and abs(placement.altitude_meters) < 1e-6:
+            # Ground-clamped: the plain OBJECT form.
+            lines.append(
+                "OBJECT {:d} {:.9f} {:.9f} {:.6f}".format(
+                    definition_index,
+                    placement.longitude,
+                    placement.latitude,
+                    placement.heading_degrees_true,
+                )
             )
-        )
+        else:
+            # Elevated placement. DSFTool's text form puts the elevation
+            # BEFORE the rotation (verified by text2dsf/dsf2text round
+            # trip with the bundled binary): OBJECT_AGL|OBJECT_MSL
+            # <def> <lon> <lat> <elevation m> <rotation deg>.
+            row_type = "OBJECT_AGL" if placement.altitude_is_agl else "OBJECT_MSL"
+            lines.append(
+                "{} {:d} {:.9f} {:.9f} {:.9f} {:.6f}".format(
+                    row_type,
+                    definition_index,
+                    placement.longitude,
+                    placement.latitude,
+                    placement.altitude_meters,
+                    placement.heading_degrees_true,
+                )
+            )
 
     return "\n".join(lines) + "\n"
 

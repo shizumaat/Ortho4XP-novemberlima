@@ -926,3 +926,172 @@ def test_palette_uvs_sit_at_cell_centers(tmp_path: Path) -> None:
         v_pixel = (1.0 - v) * canvas_height
         assert abs((u_pixel % material_fidelity.CELL_SIZE) - half) < 1e-3
         assert abs((v_pixel % material_fidelity.CELL_SIZE) - half) < 1e-3
+
+
+# --------------------------------------------------------------------------
+# Per-node winding correction (task 1), manifest bounds (task 2 support),
+# and pre-scaled OBJ variants (task 4 support).
+# --------------------------------------------------------------------------
+def _build_mirrored_pair_glb() -> bytes:
+    """One CCW-front triangle mesh instanced twice: plain and x-mirrored.
+
+    The triangle lies in the XZ plane with authored normal +Y and
+    spec-conformant CCW-front winding, so the file's base convention is
+    "gltf". Node 1 instances the same mesh under scale (-1, 1, 1) -- a
+    mirror, whose world-space winding is flipped by the transform itself.
+    """
+    positions = [(0.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)]
+    normals = [(0.0, 1.0, 0.0)] * 3
+    indices = [0, 1, 2]
+
+    binary = b"".join(struct.pack("<3f", *p) for p in positions)
+    normal_offset = len(binary)
+    binary += b"".join(struct.pack("<3f", *n) for n in normals)
+    index_offset = len(binary)
+    binary += b"".join(struct.pack("<H", i) for i in indices)
+
+    document = {
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0, 1]}],
+        "nodes": [
+            {"mesh": 0},
+            {"mesh": 0, "scale": [-1.0, 1.0, 1.0],
+             "translation": [5.0, 0.0, 0.0]},
+        ],
+        "meshes": [{
+            "primitives": [{
+                "attributes": {"POSITION": 0, "NORMAL": 1},
+                "indices": 2,
+            }],
+        }],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": 3,
+             "type": "VEC3", "min": [0.0, 0.0, 0.0], "max": [1.0, 0.0, 1.0]},
+            {"bufferView": 1, "componentType": 5126, "count": 3,
+             "type": "VEC3"},
+            {"bufferView": 2, "componentType": 5123, "count": 3,
+             "type": "SCALAR"},
+        ],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": normal_offset},
+            {"buffer": 0, "byteOffset": normal_offset,
+             "byteLength": index_offset - normal_offset},
+            {"buffer": 0, "byteOffset": index_offset,
+             "byteLength": len(binary) - index_offset},
+        ],
+        "buffers": [{"byteLength": len(binary)}],
+    }
+
+    json_bytes = json.dumps(document).encode("utf-8")
+    while len(json_bytes) % 4 != 0:
+        json_bytes += b" "
+    padded_binary = binary
+    while len(padded_binary) % 4 != 0:
+        padded_binary += b"\x00"
+    total_length = 12 + 8 + len(json_bytes) + 8 + len(padded_binary)
+    glb = bytearray()
+    glb += struct.pack("<III", 0x46546C67, 2, total_length)
+    glb += struct.pack("<II", len(json_bytes), 0x4E4F534A)
+    glb += json_bytes
+    glb += struct.pack("<II", len(padded_binary), 0x004E4942)
+    glb += padded_binary
+    return bytes(glb)
+
+
+def _triangle_orientation_dots(obj_text: str) -> List[float]:
+    """dot(right-handed geometric normal, authored normal) per triangle.
+
+    OBJ8 is CW-front, so a correctly wound output triangle yields a
+    NEGATIVE dot (the CCW-math cross product opposes the authored,
+    outward-facing normal).
+    """
+    vertices = _parse_obj_vt(obj_text)
+    indices = _parse_obj_indices(obj_text)
+    dots: List[float] = []
+    for k in range(0, len(indices), 3):
+        v0, v1, v2 = (vertices[indices[k + j]] for j in range(3))
+        edge_a = [v1[j] - v0[j] for j in range(3)]
+        edge_b = [v2[j] - v0[j] for j in range(3)]
+        cross = [
+            edge_a[1] * edge_b[2] - edge_a[2] * edge_b[1],
+            edge_a[2] * edge_b[0] - edge_a[0] * edge_b[2],
+            edge_a[0] * edge_b[1] - edge_a[1] * edge_b[0],
+        ]
+        authored = [
+            (v0[3 + j] + v1[3 + j] + v2[3 + j]) / 3.0 for j in range(3)
+        ]
+        dots.append(sum(cross[j] * authored[j] for j in range(3)))
+    return dots
+
+
+def test_parser_marks_mirrored_nodes(tmp_path: Path) -> None:
+    glb_path = tmp_path / "mirrored.glb"
+    glb_path.write_bytes(_build_mirrored_pair_glb())
+    parsed = gltf_reader.parse_gltf(glb_path)
+    assert [p["mirrored"] for p in parsed["primitives"]] == [False, True]
+
+
+def test_mirrored_instance_winding_corrected_per_node(tmp_path: Path) -> None:
+    glb_path = tmp_path / "mirrored.glb"
+    glb_path.write_bytes(_build_mirrored_pair_glb())
+    output_directory = tmp_path / "out"
+    manifest = convert_module.convert(glb_path, output_directory)
+
+    obj_files = [o["file"] for o in manifest["objects"]]
+    assert len(obj_files) == 1  # both instances share the palette object
+    obj_text = (output_directory / obj_files[0]).read_text(encoding="ascii")
+    dots = _triangle_orientation_dots(obj_text)
+    assert len(dots) == 2
+    # Both the plain and the mirrored instance must be CW-front in OBJ8;
+    # before the per-node correction the mirrored one came out inverted.
+    assert all(dot < 0.0 for dot in dots), dots
+    # The mirror-normalized vote still detects the file convention.
+    assert any("winding auto-detected: gltf" in w for w in manifest["warnings"])
+
+
+def test_manifest_objects_carry_obj8_bounds(tmp_path: Path) -> None:
+    glb_path = tmp_path / "model.glb"
+    glb_path.write_bytes(_build_test_glb())
+    output_directory = tmp_path / "out"
+    manifest = convert_module.convert(glb_path, output_directory)
+
+    for entry in manifest["objects"]:
+        bounds = entry["bounds"]
+        assert len(bounds) == 6
+        obj_text = (output_directory / entry["file"]).read_text(encoding="ascii")
+        vertices = _parse_obj_vt(obj_text)
+        for axis in range(3):
+            assert bounds[axis] == pytest.approx(
+                min(v[axis] for v in vertices), abs=1e-3
+            )
+            assert bounds[3 + axis] == pytest.approx(
+                max(v[axis] for v in vertices), abs=1e-3
+            )
+
+
+def test_write_scaled_obj8_scales_positions_only(tmp_path: Path) -> None:
+    glb_path = tmp_path / "model.glb"
+    glb_path.write_bytes(_build_test_glb())
+    output_directory = tmp_path / "out"
+    manifest = convert_module.convert(glb_path, output_directory)
+    source_name = manifest["objects"][0]["file"]
+    source_path = output_directory / source_name
+    scaled_path = output_directory / "scaled.obj"
+
+    convert_module.write_scaled_obj8(source_path, scaled_path, 1.5)
+
+    source_vertices = _parse_obj_vt(source_path.read_text(encoding="ascii"))
+    scaled_vertices = _parse_obj_vt(scaled_path.read_text(encoding="ascii"))
+    assert len(source_vertices) == len(scaled_vertices)
+    for source_vertex, scaled_vertex in zip(source_vertices, scaled_vertices):
+        for axis in range(3):  # positions scale
+            assert scaled_vertex[axis] == pytest.approx(
+                source_vertex[axis] * 1.5, abs=1e-3
+            )
+        for k in range(3, 8):  # normals and UVs unchanged
+            assert scaled_vertex[k] == pytest.approx(source_vertex[k], abs=1e-6)
+    # Index stream and directives unchanged.
+    assert _parse_obj_indices(
+        scaled_path.read_text(encoding="ascii")
+    ) == _parse_obj_indices(source_path.read_text(encoding="ascii"))

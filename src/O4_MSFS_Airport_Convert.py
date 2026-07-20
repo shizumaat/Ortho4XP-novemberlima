@@ -157,7 +157,7 @@ def convert_msfs_airport(
     # 4. Convert every model that is actually placed.
     # ------------------------------------------------------------------
     placed_unique_guids = sorted(set(p.guid for p in usable_placements))
-    object_files_by_guid: Dict[str, List[str]] = {}
+    object_entries_by_guid: Dict[str, List[Dict]] = {}
     converted = 0
     for index, guid in enumerate(placed_unique_guids):
         if UI.red_flag:
@@ -178,24 +178,77 @@ def convert_msfs_airport(
         for warning in manifest["warnings"]:
             if "auto-detected" not in warning:
                 warnings.append(f"{guid[:12]}: {warning}")
-        object_files_by_guid[guid] = [o["file"] for o in manifest["objects"]]
+        object_entries_by_guid[guid] = list(manifest["objects"])
         converted += 1
     shutil.rmtree(pack_directory / "_msfs_staging", ignore_errors=True)
 
     # ------------------------------------------------------------------
-    # 5+6. Place converted objects in the overlay DSF, with exclusion
-    #      rectangles suppressing the default gateway 3D underneath.
+    # 5. Bake placement scales. DSF placements carry no scale, so each
+    #    distinct (guid, rounded scale) gets its own pre-scaled OBJ
+    #    variant; scale 1.0 uses the base objects unchanged.
+    # ------------------------------------------------------------------
+    def placement_scale_key(placement_scale: float) -> float:
+        key = round(placement_scale, 2)
+        return key if key > 0.0 else 1.0
+
+    bad_scales = sorted(
+        {p.scale for p in usable_placements if round(p.scale, 2) <= 0.0}
+    )
+    if bad_scales:
+        warnings.append(
+            f"placement scale(s) {bad_scales} not positive; treated as 1.0"
+        )
+
+    # (guid, scale_key) -> list of (object file name, OBJ8 bounds or None).
+    variants: Dict[tuple, List[tuple]] = {}
+    objects_written = 0
+    for guid, scale_key in sorted(
+        {(p.guid, placement_scale_key(p.scale)) for p in usable_placements}
+    ):
+        entries = object_entries_by_guid.get(guid, [])
+        variant_files: List[tuple] = []
+        for entry_dict in entries:
+            bounds = entry_dict.get("bounds")
+            if scale_key == 1.0:
+                file_name = entry_dict["file"]
+            else:
+                scale_slug = "{:.2f}".format(scale_key).replace(".", "_")
+                file_name = "{}_s{}.obj".format(
+                    entry_dict["file"][: -len(".obj")], scale_slug
+                )
+                msfs_convert.write_scaled_obj8(
+                    objects_directory / entry_dict["file"],
+                    objects_directory / file_name,
+                    scale_key,
+                )
+                if bounds is not None:
+                    bounds = [value * scale_key for value in bounds]
+            variant_files.append(
+                (file_name, tuple(bounds) if bounds is not None else None)
+            )
+            objects_written += 1
+        variants[(guid, scale_key)] = variant_files
+
+    # ------------------------------------------------------------------
+    # 6+7. Place converted objects in the overlay DSF (with altitude when
+    #      the MSFS placement carries one), with exclusion rectangles
+    #      sized from the objects' extents suppressing the default
+    #      gateway 3D underneath.
     # ------------------------------------------------------------------
     report(85, "Writing overlay DSF with placements and exclusions")
     placed_objects: List[XP_PACK.PlacedObject] = []
     for placement in usable_placements:
-        for object_file in object_files_by_guid.get(placement.guid, []):
+        scale_key = placement_scale_key(placement.scale)
+        for object_file, bounds in variants.get((placement.guid, scale_key), []):
             placed_objects.append(
                 XP_PACK.PlacedObject(
                     object_relative_path=f"objects/{object_file}",
                     longitude=placement.longitude,
                     latitude=placement.latitude,
                     heading_degrees_true=placement.heading_degrees_true,
+                    altitude_meters=placement.altitude_meters,
+                    altitude_is_agl=placement.is_above_ground,
+                    bounds_obj8=bounds,
                 )
             )
     exclusions = XP_PACK.compute_exclusion_rectangles(placed_objects)
@@ -208,7 +261,7 @@ def convert_msfs_airport(
         package_path=pack_directory,
         airport_icao=airport_icao,
         models_converted=converted,
-        objects_written=sum(len(v) for v in object_files_by_guid.values()),
+        objects_written=objects_written,
         placements_written=len(placed_objects),
         placements_skipped=skipped,
         exclusion_rectangles=len(exclusions),

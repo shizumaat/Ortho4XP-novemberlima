@@ -49,6 +49,9 @@ class StubPlacedObject:
     longitude: float
     latitude: float
     heading_degrees_true: float
+    altitude_meters: float = 0.0
+    altitude_is_agl: bool = True
+    bounds_obj8: tuple | None = None
 
 
 def _install_stub_modules(monkeypatch, models, placements, recorded):
@@ -191,3 +194,100 @@ def test_cancellation_between_steps(tmp_path, monkeypatch):
             progress_callback=cancel_on_first_progress,
         )
     UI.red_flag = False
+
+
+def test_scale_variants_and_altitude_plumbing(tmp_path, monkeypatch):
+    glb_bytes = _build_test_glb()
+    models = [StubModelEntry("aaaa0001", glb_bytes, "modellib.bgl")]
+    placements = [
+        # scale 1.0, ground-clamped.
+        StubPlacement("aaaa0001", 44.2531, -121.1608, 0.0, True, 62.4, 0, 0, 1.0, "p.bgl"),
+        # scale 1.5, 8 m AGL.
+        StubPlacement("aaaa0001", 44.2535, -121.1601, 8.0, True, 242.4, 0, 0, 1.5, "p.bgl"),
+        # scale 1.5 again (same variant reused), MSL altitude.
+        StubPlacement("aaaa0001", 44.2536, -121.1602, 920.0, False, 0.0, 0, 0, 1.5, "p.bgl"),
+    ]
+    msfs_directory = tmp_path / "msfs_package"
+    msfs_directory.mkdir()
+    custom_scenery = tmp_path / "Custom Scenery"
+    custom_scenery.mkdir()
+    recorded: dict = {}
+    _install_stub_modules(monkeypatch, models, placements, recorded)
+    import O4_MSFS_Airport_Convert as CONVERT
+
+    report = CONVERT.convert_msfs_airport(
+        msfs_directory, custom_scenery, tmp_path / "nonexistent", "/usr/bin/true",
+        package_name="Scale Pack",
+    )
+
+    objects_directory = report.package_path / "objects"
+    base_files = sorted(
+        p.name for p in objects_directory.glob("*.obj") if "_s1_50" not in p.name
+    )
+    scaled_files = sorted(
+        p.name for p in objects_directory.glob("*_s1_50.obj")
+    )
+    # Every base object has exactly one 1.5x variant.
+    assert base_files and len(scaled_files) == len(base_files)
+    # objects_written counts base + scaled variants.
+    assert report.objects_written == len(base_files) + len(scaled_files)
+
+    # The 1.5x variant's positions are 1.5x the base object's.
+    base_text = (objects_directory / base_files[0]).read_text(encoding="ascii")
+    scaled_text = (objects_directory / scaled_files[0]).read_text(encoding="ascii")
+
+    def first_vt(text):
+        for line in text.splitlines():
+            if line.startswith("VT "):
+                return [float(v) for v in line.split()[1:4]]
+        raise AssertionError("no VT line")
+
+    assert first_vt(scaled_text) == pytest.approx(
+        [v * 1.5 for v in first_vt(base_text)], abs=1e-3
+    )
+
+    # Placements route to the right variant and carry altitude + bounds.
+    placed = recorded["dsf_objects"]
+    per_placement = len(placed) // 3
+    assert len(placed) == 3 * per_placement
+    ground = [p for p in placed if p.altitude_meters == 0.0 and p.altitude_is_agl]
+    agl = [p for p in placed if p.altitude_meters == 8.0 and p.altitude_is_agl]
+    msl = [p for p in placed if not p.altitude_is_agl]
+    assert len(ground) == per_placement
+    assert len(agl) == per_placement
+    assert len(msl) == per_placement
+    for placed_object in ground:
+        assert "_s1_50" not in placed_object.object_relative_path
+        assert placed_object.bounds_obj8 is not None
+    for placed_object in agl + msl:
+        assert placed_object.object_relative_path.endswith("_s1_50.obj")
+        assert placed_object.altitude_meters in (8.0, 920.0)
+    # Scaled placements carry 1.5x bounds.
+    ground_bounds = ground[0].bounds_obj8
+    scaled_bounds = agl[0].bounds_obj8
+    assert scaled_bounds == pytest.approx(
+        [v * 1.5 for v in ground_bounds], abs=1e-3
+    )
+
+
+def test_non_positive_scale_treated_as_unit_with_warning(tmp_path, monkeypatch):
+    glb_bytes = _build_test_glb()
+    models = [StubModelEntry("aaaa0001", glb_bytes, "modellib.bgl")]
+    placements = [
+        StubPlacement("aaaa0001", 44.2531, -121.1608, 0.0, True, 0.0, 0, 0, 0.0, "p.bgl"),
+    ]
+    msfs_directory = tmp_path / "msfs_package"
+    msfs_directory.mkdir()
+    custom_scenery = tmp_path / "Custom Scenery"
+    custom_scenery.mkdir()
+    recorded: dict = {}
+    _install_stub_modules(monkeypatch, models, placements, recorded)
+    import O4_MSFS_Airport_Convert as CONVERT
+
+    report = CONVERT.convert_msfs_airport(
+        msfs_directory, custom_scenery, tmp_path / "nonexistent", "/usr/bin/true",
+        package_name="Zero Scale Pack",
+    )
+    assert any("not positive" in w for w in report.warnings)
+    for placed_object in recorded["dsf_objects"]:
+        assert "_s" not in Path(placed_object.object_relative_path).stem[12:]

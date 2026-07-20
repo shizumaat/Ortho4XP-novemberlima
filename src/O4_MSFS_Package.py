@@ -73,12 +73,21 @@ LibraryObject record (64 bytes in the sample) is::
     0x16  uint16  heading     raw * 360 / 2**16
     0x18  uint16  image_complexity
     ...   (reserved / padding, zero in the sample)
-    end-20  GUID   16 bytes   (same layout & byte order as the model index)
-    end-4   float  scale
+    0x2c  GUID   16 bytes   (same layout & byte order as the model index)
+    0x3c  float  scale
 
-The GUID and scale sit at the *end* of the record (object-specific data
-after the common header), so we read them at ``record_size - 20`` and
-``record_size - 4`` rather than at fixed offsets.
+The GUID and scale sit at FIXED offsets ``0x2C``/``0x3C`` (validated
+2026-07-19 against FSDeveloper/fs-parse and empirically on real
+packages).  In a plain 64-byte record those coincide with the record
+tail, but AttachedObject (0x1002) sub-records may extend the record
+past 64 bytes -- reading relative to the end then misparses the GUID
+(the scale float bleeds into it), so the fixed offsets are load-bearing.
+
+Other 0x25 record types observed in the wild -- 0x0A GenericBuilding,
+0x0C Windsock (FSX-era), 0x0D Effect, 0x0E TaxiwaySign,
+0x12 ExtrusionBridge, 0x18 Windsock (MSFS-compiled) -- are not
+converted; ``read_package`` reports per-type counts in its warnings
+instead of skipping them silently.
 
 Coordinate formulas (EMPIRICALLY DETERMINED for MSFS -- these deviate
 from the classic FSX ``raw * 360 / 2**32 - 180`` mapping):
@@ -111,7 +120,7 @@ import shutil
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Container / section constants
@@ -127,6 +136,24 @@ _SECTION_TYPE_SCENERY_OBJECT = 0x25
 
 _MODEL_INDEX_RECORD_SIZE = 24
 _RECORD_TYPE_LIBRARY_OBJECT = 0x0B
+
+# Fixed field offsets inside a LibraryObject record (see module docstring).
+_LIBRARY_OBJECT_GUID_OFFSET = 0x2C
+_LIBRARY_OBJECT_SCALE_OFFSET = 0x3C
+
+# Known-but-unconverted 0x25 record types, reported with counts by
+# read_package so nothing is skipped silently.  0x0C is the FSX-era
+# windsock; 0x18 is the type MSFS compiles <Windsock> elements to
+# (empirically: the LMML package's 2 source windsocks are its BGL's
+# exactly 2 type-0x18 records).
+_KNOWN_UNHANDLED_RECORD_TYPES = {
+    0x0A: "GenericBuilding",
+    0x0C: "Windsock",
+    0x0D: "Effect",
+    0x0E: "TaxiwaySign",
+    0x12: "ExtrusionBridge",
+    0x18: "Windsock",
+}
 
 # Coordinate / angle scaling (empirically determined for MSFS).
 _LATITUDE_SCALE = 180.0 / 2 ** 29
@@ -323,14 +350,30 @@ def read_object_placements(bgl_path: Path) -> List[ObjectPlacement]:
 
     Returns an empty list if the file holds no scenery-object section.
     """
+    placements, _record_type_counts = read_object_placements_with_stats(bgl_path)
+    return placements
+
+
+def read_object_placements_with_stats(
+    bgl_path: Path,
+) -> Tuple[List[ObjectPlacement], Dict[int, int]]:
+    """Parse placements plus a census of every 0x25 record type seen.
+
+    Returns ``(placements, record_type_counts)`` where
+    ``record_type_counts`` maps each record type found in the
+    SceneryObject section (including converted LibraryObjects, type 0x0b)
+    to its record count.  Both are empty if the file holds no
+    scenery-object section.
+    """
     bgl_path = Path(bgl_path)
+    record_type_counts: Dict[int, int] = {}
     try:
         data = bgl_path.read_bytes()
     except OSError:
-        return []
+        return [], record_type_counts
     sections = _read_bgl_sections(data)
     if not sections:
-        return []
+        return [], record_type_counts
 
     source = str(bgl_path)
     placements: List[ObjectPlacement] = []
@@ -348,6 +391,9 @@ def read_object_placements(bgl_path: Path) -> List[ObjectPlacement]:
                     break
                 if record_offset + record_size > payload_end:
                     break
+                record_type_counts[record_type] = (
+                    record_type_counts.get(record_type, 0) + 1
+                )
                 if record_type == _RECORD_TYPE_LIBRARY_OBJECT and record_size >= 64:
                     placements.append(
                         _parse_library_object(
@@ -355,7 +401,7 @@ def read_object_placements(bgl_path: Path) -> List[ObjectPlacement]:
                         )
                     )
                 record_offset += record_size
-    return placements
+    return placements, record_type_counts
 
 
 def _parse_library_object(
@@ -369,9 +415,13 @@ def _parse_library_object(
     pitch_raw = struct.unpack_from("<H", data, offset + 18)[0]
     bank_raw = struct.unpack_from("<H", data, offset + 20)[0]
     heading_raw = struct.unpack_from("<H", data, offset + 22)[0]
-    # GUID and scale are the object-specific tail of the record.
-    guid_bytes = data[offset + size - 20 : offset + size - 4]
-    scale = struct.unpack_from("<f", data, offset + size - 4)[0]
+    # GUID and scale sit at FIXED offsets: AttachedObject sub-records may
+    # extend the record past 64 bytes, so end-relative reads misparse.
+    guid_start = offset + _LIBRARY_OBJECT_GUID_OFFSET
+    guid_bytes = data[guid_start : guid_start + 16]
+    scale = struct.unpack_from(
+        "<f", data, offset + _LIBRARY_OBJECT_SCALE_OFFSET
+    )[0]
 
     longitude = longitude_raw * _LONGITUDE_SCALE - 180.0
     latitude = 90.0 - latitude_raw * _LATITUDE_SCALE
@@ -418,7 +468,20 @@ def read_package(
                 best_by_guid[entry.guid] = entry
 
         try:
-            placements.extend(read_object_placements(bgl_path))
+            bgl_placements, record_type_counts = (
+                read_object_placements_with_stats(bgl_path)
+            )
+            placements.extend(bgl_placements)
+            skipped_parts = [
+                f"{count} {_KNOWN_UNHANDLED_RECORD_TYPES.get(record_type, hex(record_type))}"
+                for record_type, count in sorted(record_type_counts.items())
+                if record_type != _RECORD_TYPE_LIBRARY_OBJECT
+            ]
+            if skipped_parts:
+                warnings.append(
+                    f"{bgl_path.name}: unconverted scenery record(s): "
+                    + ", ".join(skipped_parts)
+                )
         except Exception as error:  # pragma: no cover - defensive
             warnings.append(f"failed to read placements {bgl_path}: {error}")
 

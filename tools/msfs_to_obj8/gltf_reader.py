@@ -125,6 +125,23 @@ def _transform_point(
     )
 
 
+def _upper_left_determinant(matrix: List[float]) -> float:
+    """Determinant of the upper-left 3x3 of a row-major 4x4 matrix.
+
+    A negative determinant means the transform mirrors (odd number of
+    negative scale axes), which flips the world-space triangle winding of
+    everything under the node.
+    """
+    a, b, c = matrix[0], matrix[1], matrix[2]
+    d, e, f = matrix[4], matrix[5], matrix[6]
+    g, h, i = matrix[8], matrix[9], matrix[10]
+    return (
+        a * (e * i - f * h)
+        - b * (d * i - f * g)
+        + c * (d * h - e * g)
+    )
+
+
 def _normal_matrix(matrix: List[float]) -> List[float]:
     """Inverse-transpose of the upper-left 3x3, returned row-major 3x3.
 
@@ -528,8 +545,10 @@ def parse_gltf(path: str | Path) -> Dict[str, Any]:
         List of dicts, one per (node, primitive) instance that carries
         renderable triangles.  Each has ``positions`` and ``normals``
         (world-transformed float triples), ``texcoords`` (float pairs,
-        v NOT yet flipped), ``indices`` (ints), and ``material`` (index or
-        ``None``).
+        v NOT yet flipped), ``indices`` (ints), ``material`` (index or
+        ``None``), and ``mirrored`` (``True`` when the node's world
+        transform has a negative determinant, flipping the world-space
+        triangle winding of this instance).
     ``materials``
         List of ``{name, base_color_image, base_color_dds_image}``.
     ``images``
@@ -613,6 +632,10 @@ def _emit_mesh_primitives(
 ) -> None:
     """Decode and world-transform one mesh's primitives into ``primitives``."""
     normal_matrix = _normal_matrix(world_matrix)
+    # A mirroring node transform (negative determinant) flips the
+    # world-space winding of its triangles; the converter must reverse
+    # these primitives relative to the file's base convention.
+    mirrored = _upper_left_determinant(world_matrix) < 0.0
     mesh_name = mesh.get("name") or f"mesh_{mesh_index}"
     for primitive_index, primitive in enumerate(mesh.get("primitives", [])):
         label = f"{mesh_name}/primitive_{primitive_index}"
@@ -699,4 +722,5 @@ def _emit_mesh_primitives(
             "texcoords": texcoords,
             "indices": indices,
             "material": primitive.get("material"),
+            "mirrored": mirrored,
         })

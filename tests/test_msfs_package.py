@@ -348,3 +348,73 @@ def test_krdm_placements_resolve_to_package_models():
     assert model_guids <= placement_guids  # every model is placed
     resolving = [p for p in placements if p.guid in model_guids]
     assert len(resolving) >= 90
+
+
+# ---------------------------------------------------------------------------
+# Unit tests -- fixed-offset GUID/scale and record-type census (task 5)
+# ---------------------------------------------------------------------------
+def _make_raw_record(record_type: int, record_size: int) -> bytes:
+    """A structurally valid but unconverted 0x25 record of the given type."""
+    record = bytearray(record_size)
+    struct.pack_into("<H", record, 0, record_type)
+    struct.pack_into("<H", record, 2, record_size)
+    return bytes(record)
+
+
+def test_library_object_extended_record_reads_fixed_offsets(tmp_path):
+    # An AttachedObject (0x1002) sub-record extends the LibraryObject
+    # past 64 bytes. GUID/scale must still parse from fixed offsets
+    # 0x2C/0x3C; the old end-relative heuristic would read the scale
+    # float into the GUID and garbage into the scale.
+    base = bytearray(
+        _make_library_object(_GUID_A, -121.161, 44.253, heading=57.5, scale=1.5)
+    )
+    attached_sub_record = struct.pack("<HH", 0x1002, 20) + b"\xAB" * 16
+    extended = base + attached_sub_record
+    struct.pack_into("<H", extended, 2, len(extended))
+    bgl = _make_bgl([(MSFS._SECTION_TYPE_SCENERY_OBJECT, bytes(extended))])
+    bgl_path = tmp_path / "extended.bgl"
+    bgl_path.write_bytes(bgl)
+
+    placements = MSFS.read_object_placements(bgl_path)
+    assert len(placements) == 1
+    placement = placements[0]
+    assert placement.guid == "eec7ed06305049a32fefa2eff5126c93"
+    assert placement.scale == pytest.approx(1.5)
+    assert placement.longitude == pytest.approx(-121.161, abs=1e-4)
+
+
+def test_read_object_placements_with_stats_counts_types(tmp_path):
+    records = (
+        _make_library_object(_GUID_A, -121.161, 44.253, heading=0.0)
+        + _make_raw_record(0x0C, 24)  # Windsock
+        + _make_raw_record(0x0D, 16)  # Effect
+        + _make_raw_record(0x0D, 16)  # Effect
+        + _make_raw_record(0x99, 8)   # unknown type
+    )
+    bgl = _make_bgl([(MSFS._SECTION_TYPE_SCENERY_OBJECT, records)])
+    bgl_path = tmp_path / "mixed.bgl"
+    bgl_path.write_bytes(bgl)
+
+    placements, counts = MSFS.read_object_placements_with_stats(bgl_path)
+    assert len(placements) == 1
+    assert counts == {0x0B: 1, 0x0C: 1, 0x0D: 2, 0x99: 1}
+
+
+def test_read_package_warns_about_unhandled_record_types(tmp_path):
+    records = (
+        _make_library_object(_GUID_A, -121.161, 44.253, heading=0.0)
+        + _make_raw_record(0x0C, 24)
+        + _make_raw_record(0x0D, 16)
+        + _make_raw_record(0x99, 8)
+    )
+    bgl = _make_bgl([(MSFS._SECTION_TYPE_SCENERY_OBJECT, records)])
+    (tmp_path / "scenery.bgl").write_bytes(bgl)
+
+    _models, placements, warnings = MSFS.read_package(tmp_path)
+    assert len(placements) == 1
+    census_warnings = [w for w in warnings if "unconverted scenery record" in w]
+    assert len(census_warnings) == 1
+    assert "1 Windsock" in census_warnings[0]
+    assert "1 Effect" in census_warnings[0]
+    assert "0x99" in census_warnings[0]
