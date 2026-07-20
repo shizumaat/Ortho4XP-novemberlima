@@ -43,12 +43,15 @@ each 24 bytes::
                               section payload start (data_offset)
     blob_size      uint32     length of the model blob
 
-Each blob is a RIFF container tagged ``glTF`` holding three chunks:
+Each blob is a RIFF container whose form FourCC reads ``GLTF`` -- a
+misnomer: the container itself is not glTF data.  Its chunks are
 ``GXML`` (an XML ``<ModelInfo guid="{...}" .../>`` descriptor whose GUID
-equals the index GUID), ``GLBD``, and ``GLB\\0`` -- the last one wraps the
-actual binary-glTF (``glTF`` magic, ``version == 2``, first chunk
-``JSON``).  We locate the ``glTF`` magic inside the blob, read the total
-length from its header, and slice out exactly that many bytes.
+equals the index GUID), ``GLBD`` (a collection of binary-glTF payloads,
+one per LOD), and ``GLB\\0`` wrappers around each actual binary-glTF
+(``glTF`` magic, ``version == 2``, first chunk ``JSON``).  We locate the
+``glTF`` magic inside the blob, read the total length from its header,
+and slice out exactly that many bytes -- which works regardless of the
+container's FourCC labels.
 
 Verified on ``rdm4.BGL``: 21 blobs, every extracted GLB has magic
 ``glTF`` / version 2 / JSON first chunk, and every index GUID matches its
@@ -73,12 +76,20 @@ LibraryObject record (64 bytes in the sample) is::
     0x16  uint16  heading     raw * 360 / 2**16
     0x18  uint16  image_complexity
     ...   (reserved / padding, zero in the sample)
-    end-20  GUID   16 bytes   (same layout & byte order as the model index)
-    end-4   float  scale
+    0x2c  GUID   16 bytes   (same layout & byte order as the model index)
+    0x3c  float  scale
 
-The GUID and scale sit at the *end* of the record (object-specific data
-after the common header), so we read them at ``record_size - 20`` and
-``record_size - 4`` rather than at fixed offsets.
+The GUID and scale sit at the *fixed* offsets ``0x2c`` and ``0x3c``.  In
+the 64-byte sample records those coincide with ``record_size - 20`` /
+``record_size - 4``, but the offsets must not be derived from the record
+size: ``AttachedObject`` (0x1002) sub-records may extend the record
+beyond 64 bytes, and reading relative to its end then lands in the
+sub-record data.
+
+Other 0x25 record types seen in the wild -- 0x0a GenericBuilding,
+0x0c Windsock, 0x0d Effect, 0x0e TaxiwaySign, 0x12 ExtrusionBridge --
+are not converted; the reader counts them per source BGL and reports the
+counts as warnings instead of skipping them silently.
 
 Coordinate formulas (EMPIRICALLY DETERMINED for MSFS -- these deviate
 from the classic FSX ``raw * 360 / 2**32 - 180`` mapping):
@@ -94,8 +105,9 @@ resolves, which pins both the field layout and the byte order.
 
 Altitude note: 866 of 893 placements store 0; the non-zero values
 (a few metres, one ~16 m tower, a couple of negatives) are consistent with
-millimetres, so we divide by 1000.  Altitude is not used downstream by the
-overlay-DSF writer, so a wrong unit here has no visible effect.
+millimetres, so we divide by 1000.  The overlay-DSF writer maps a
+non-zero altitude to ``OBJECT_AGL`` (flag bit 0 set) or ``OBJECT_MSL``
+(clear); zero-altitude placements stay ground-draped ``OBJECT`` rows.
 
 GUID string form: the 16 raw bytes are formatted in canonical Microsoft
 layout with lower-case hex and no braces/dashes -- ``uint32`` + ``uint16``
@@ -127,6 +139,22 @@ _SECTION_TYPE_SCENERY_OBJECT = 0x25
 
 _MODEL_INDEX_RECORD_SIZE = 24
 _RECORD_TYPE_LIBRARY_OBJECT = 0x0B
+
+# LibraryObject field offsets (fixed; see the module docstring -- the
+# record may be extended past 64 bytes by AttachedObject sub-records, so
+# these must never be derived from the record size).
+_LIBRARY_OBJECT_GUID_OFFSET = 0x2C
+_LIBRARY_OBJECT_SCALE_OFFSET = 0x3C
+_LIBRARY_OBJECT_MIN_SIZE = 64
+
+# Known-but-unconverted 0x25 record types, named for the skip warnings.
+_SCENERY_RECORD_TYPE_NAMES = {
+    0x0A: "GenericBuilding",
+    0x0C: "Windsock",
+    0x0D: "Effect",
+    0x0E: "TaxiwaySign",
+    0x12: "ExtrusionBridge",
+}
 
 # Coordinate / angle scaling (empirically determined for MSFS).
 _LATITUDE_SCALE = 180.0 / 2 ** 29
@@ -318,10 +346,15 @@ def read_model_library(bgl_path: Path) -> List[ModelEntry]:
     return entries
 
 
-def read_object_placements(bgl_path: Path) -> List[ObjectPlacement]:
+def read_object_placements(
+    bgl_path: Path, warnings: Optional[List[str]] = None
+) -> List[ObjectPlacement]:
     """Parse library-object placements out of scenery BGL *bgl_path*.
 
     Returns an empty list if the file holds no scenery-object section.
+    When ``warnings`` is given, unconverted 0x25 record types (windsocks,
+    taxiway signs, effects, ...) are counted and reported into it instead
+    of being skipped silently.
     """
     bgl_path = Path(bgl_path)
     try:
@@ -334,6 +367,7 @@ def read_object_placements(bgl_path: Path) -> List[ObjectPlacement]:
 
     source = str(bgl_path)
     placements: List[ObjectPlacement] = []
+    skipped_type_counts: dict[int, int] = {}
     for section in sections:
         if section[0] != _SECTION_TYPE_SCENERY_OBJECT:
             continue
@@ -348,18 +382,36 @@ def read_object_placements(bgl_path: Path) -> List[ObjectPlacement]:
                     break
                 if record_offset + record_size > payload_end:
                     break
-                if record_type == _RECORD_TYPE_LIBRARY_OBJECT and record_size >= 64:
+                if (
+                    record_type == _RECORD_TYPE_LIBRARY_OBJECT
+                    and record_size >= _LIBRARY_OBJECT_MIN_SIZE
+                ):
                     placements.append(
-                        _parse_library_object(
-                            data, record_offset, record_size, source
-                        )
+                        _parse_library_object(data, record_offset, source)
+                    )
+                else:
+                    skipped_type_counts[record_type] = (
+                        skipped_type_counts.get(record_type, 0) + 1
                     )
                 record_offset += record_size
+    if warnings is not None and skipped_type_counts:
+        parts = ", ".join(
+            "{} x {}".format(
+                count,
+                _SCENERY_RECORD_TYPE_NAMES.get(
+                    record_type, "type 0x{:02x}".format(record_type)
+                ),
+            )
+            for record_type, count in sorted(skipped_type_counts.items())
+        )
+        warnings.append(
+            f"{bgl_path.name}: skipped unconverted scenery records: {parts}"
+        )
     return placements
 
 
 def _parse_library_object(
-    data: bytes, offset: int, size: int, source: str
+    data: bytes, offset: int, source: str
 ) -> ObjectPlacement:
     """Decode one LibraryObject record into an :class:`ObjectPlacement`."""
     longitude_raw = struct.unpack_from("<I", data, offset + 4)[0]
@@ -369,9 +421,16 @@ def _parse_library_object(
     pitch_raw = struct.unpack_from("<H", data, offset + 18)[0]
     bank_raw = struct.unpack_from("<H", data, offset + 20)[0]
     heading_raw = struct.unpack_from("<H", data, offset + 22)[0]
-    # GUID and scale are the object-specific tail of the record.
-    guid_bytes = data[offset + size - 20 : offset + size - 4]
-    scale = struct.unpack_from("<f", data, offset + size - 4)[0]
+    # GUID and scale live at fixed offsets; AttachedObject (0x1002)
+    # sub-records may extend the record beyond 64 bytes, so end-relative
+    # reads would land in sub-record data.
+    guid_bytes = data[
+        offset + _LIBRARY_OBJECT_GUID_OFFSET
+        : offset + _LIBRARY_OBJECT_GUID_OFFSET + 16
+    ]
+    scale = struct.unpack_from(
+        "<f", data, offset + _LIBRARY_OBJECT_SCALE_OFFSET
+    )[0]
 
     longitude = longitude_raw * _LONGITUDE_SCALE - 180.0
     latitude = 90.0 - latitude_raw * _LATITUDE_SCALE
@@ -418,7 +477,7 @@ def read_package(
                 best_by_guid[entry.guid] = entry
 
         try:
-            placements.extend(read_object_placements(bgl_path))
+            placements.extend(read_object_placements(bgl_path, warnings))
         except Exception as error:  # pragma: no cover - defensive
             warnings.append(f"failed to read placements {bgl_path}: {error}")
 

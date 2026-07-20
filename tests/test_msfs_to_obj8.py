@@ -279,6 +279,19 @@ def test_converter_rotates_axes_and_flips_v(tmp_path: Path) -> None:
         assert (nx, ny, nz) == pytest.approx((0.0, 1.0, 0.0), abs=1e-4)
 
 
+def test_manifest_records_horizontal_bounds(tmp_path: Path) -> None:
+    glb_path = tmp_path / "model.glb"
+    glb_path.write_bytes(_build_test_glb())
+    output_directory = tmp_path / "out"
+    manifest = convert_module.convert(glb_path, output_directory, base_name="krdm")
+
+    entry = manifest["objects"][0]
+    # World quad corners map to OBJ8 x in [-11, -10], z in [-30, -29]
+    # (the test node's rotation + translation, then the axis map).
+    assert entry["bounds_xz"] == pytest.approx([-11.0, -30.0, -10.0, -29.0],
+                                               abs=1e-3)
+
+
 def test_index_order_is_preserved_for_spec_gltf_sources(tmp_path: Path) -> None:
     glb_path = tmp_path / "model.glb"
     glb_path.write_bytes(_build_test_glb())
@@ -310,6 +323,117 @@ def test_auto_winding_reverses_directx_wound_sources(tmp_path: Path) -> None:
     # identity axis map: index order is preserved.
     assert indices == [0, 1, 2, 0, 2, 3]
     assert any("winding auto-detected: directx" in w for w in manifest["warnings"])
+
+
+def _build_mirrored_instances_glb() -> bytes:
+    """One CW-front (DirectX) quad mesh instanced by three nodes: one
+    identity, two mirrored (scale [-1, 1, 1]) — the mirrored instances are
+    the MAJORITY, which defeats a whole-file winding vote that ignores the
+    node determinant sign."""
+    positions = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0),
+                 (1.0, 0.0, 1.0), (0.0, 0.0, 1.0)]
+    normals = [(0.0, 1.0, 0.0)] * 4
+    indices = [0, 1, 2, 0, 2, 3]
+
+    parts: List[bytes] = []
+    views: List[Tuple[int, int]] = []
+
+    def add_view(data: bytes) -> int:
+        while sum(len(part) for part in parts) % 4 != 0:
+            parts.append(b"\x00")
+        offset = sum(len(part) for part in parts)
+        parts.append(data)
+        views.append((offset, len(data)))
+        return len(views) - 1
+
+    view_positions = add_view(
+        b"".join(struct.pack("<3f", *p) for p in positions)
+    )
+    view_normals = add_view(
+        b"".join(struct.pack("<3f", *n) for n in normals)
+    )
+    view_indices = add_view(
+        b"".join(struct.pack("<H", i) for i in indices)
+    )
+    binary_blob = b"".join(parts)
+
+    document = {
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0, 1, 2]}],
+        "nodes": [
+            {"mesh": 0},
+            {"mesh": 0, "scale": [-1.0, 1.0, 1.0],
+             "translation": [5.0, 0.0, 0.0]},
+            {"mesh": 0, "scale": [-1.0, 1.0, 1.0],
+             "translation": [10.0, 0.0, 0.0]},
+        ],
+        "meshes": [{
+            "primitives": [{
+                "attributes": {"POSITION": 0, "NORMAL": 1},
+                "indices": 2,
+            }]
+        }],
+        "accessors": [
+            {"bufferView": view_positions, "componentType": 5126,
+             "count": 4, "type": "VEC3"},
+            {"bufferView": view_normals, "componentType": 5126,
+             "count": 4, "type": "VEC3"},
+            {"bufferView": view_indices, "componentType": 5123,
+             "count": 6, "type": "SCALAR"},
+        ],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": offset, "byteLength": length}
+            for offset, length in views
+        ],
+        "buffers": [{"byteLength": len(binary_blob)}],
+    }
+
+    json_bytes = json.dumps(document).encode("utf-8")
+    while len(json_bytes) % 4 != 0:
+        json_bytes += b" "
+    padded_binary = binary_blob
+    while len(padded_binary) % 4 != 0:
+        padded_binary += b"\x00"
+
+    total_length = 12 + 8 + len(json_bytes) + 8 + len(padded_binary)
+    glb = bytearray()
+    glb += struct.pack("<III", 0x46546C67, 2, total_length)
+    glb += struct.pack("<II", len(json_bytes), 0x4E4F534A)
+    glb += json_bytes
+    glb += struct.pack("<II", len(padded_binary), 0x004E4942)
+    glb += padded_binary
+    return bytes(glb)
+
+
+def test_parser_flags_mirrored_nodes(tmp_path: Path) -> None:
+    glb_path = tmp_path / "mirrored.glb"
+    glb_path.write_bytes(_build_mirrored_instances_glb())
+
+    parsed = gltf_reader.parse_gltf(glb_path)
+
+    assert [p["mirrored"] for p in parsed["primitives"]] == [False, True, True]
+
+
+def test_mirrored_nodes_get_per_primitive_winding(tmp_path: Path) -> None:
+    # Detection must not be outvoted by the two mirrored instances (the
+    # authored convention is DirectX CW-front), and each mirrored
+    # primitive — whose world-space winding the negative-determinant
+    # transform reversed — must be flipped back individually.
+    glb_path = tmp_path / "mirrored.glb"
+    glb_path.write_bytes(_build_mirrored_instances_glb())
+    output_directory = tmp_path / "out"
+    manifest = convert_module.convert(glb_path, output_directory, base_name="krdm")
+
+    assert any("winding auto-detected: directx" in w for w in manifest["warnings"])
+    obj_text = next(output_directory.glob("*.obj")).read_text()
+    indices = _parse_obj_indices(obj_text)
+    # Instance 1 (identity): kept.  Instances 2-3 (mirrored): reversed.
+    assert indices == [
+        0, 1, 2, 0, 2, 3,
+        4, 6, 5, 4, 7, 6,
+        8, 10, 9, 8, 11, 10,
+    ]
 
 
 def test_skinned_primitive_is_skipped_with_warning(tmp_path: Path) -> None:

@@ -129,10 +129,13 @@ def _make_library_object(
     altitude_mm: int = 0,
     flags: int = 1,
     scale: float = 1.0,
+    attached_tail: bytes = b"",
 ) -> bytes:
-    record = bytearray(64)
+    """Build a LibraryObject record; ``attached_tail`` appends sub-record
+    bytes (e.g. an AttachedObject) that extend the record past 64 bytes."""
+    record = bytearray(64 + len(attached_tail))
     struct.pack_into("<H", record, 0, MSFS._RECORD_TYPE_LIBRARY_OBJECT)
-    struct.pack_into("<H", record, 2, 64)
+    struct.pack_into("<H", record, 2, len(record))
     struct.pack_into("<I", record, 4, _encode_longitude(longitude))
     struct.pack_into("<I", record, 8, _encode_latitude(latitude))
     struct.pack_into("<i", record, 12, altitude_mm)
@@ -141,8 +144,9 @@ def _make_library_object(
     struct.pack_into("<H", record, 20, 0)  # bank
     struct.pack_into("<H", record, 22, _encode_angle(heading))
     struct.pack_into("<H", record, 24, 0)  # image complexity
-    record[64 - 20 : 64 - 4] = guid_bytes
-    struct.pack_into("<f", record, 64 - 4, scale)
+    record[0x2C:0x3C] = guid_bytes
+    struct.pack_into("<f", record, 0x3C, scale)
+    record[64:] = attached_tail
     return bytes(record)
 
 
@@ -232,6 +236,57 @@ def test_read_object_placements_synthetic(tmp_path):
     second = placements[1]
     assert second.altitude_meters == pytest.approx(16.607)
     assert 0.0 <= second.heading_degrees_true < 360.0
+
+
+def test_guid_scale_read_at_fixed_offsets_despite_attached_tail(tmp_path):
+    # An AttachedObject (0x1002) sub-record extends the record past 64
+    # bytes; end-relative reads (size-20 / size-4) would land inside the
+    # tail. The tail bytes here are deliberately GUID/float-like garbage.
+    tail = struct.pack("<HH", 0x1002, 20) + b"\xde\xad\xbe\xef" * 4
+    record = _make_library_object(
+        _GUID_A, -121.161, 44.253, heading=90.0, scale=1.5,
+        attached_tail=tail,
+    )
+    assert struct.unpack_from("<H", record, 2)[0] == 64 + len(tail)
+    bgl = _make_bgl([(MSFS._SECTION_TYPE_SCENERY_OBJECT, record)])
+    bgl_path = tmp_path / "attached.bgl"
+    bgl_path.write_bytes(bgl)
+
+    placements = MSFS.read_object_placements(bgl_path)
+    assert len(placements) == 1
+    assert placements[0].guid == "eec7ed06305049a32fefa2eff5126c93"
+    assert placements[0].scale == pytest.approx(1.5)
+
+
+def test_unconverted_record_types_are_counted_not_silently_skipped(tmp_path):
+    def other_record(record_type: int, size: int = 24) -> bytes:
+        record = bytearray(size)
+        struct.pack_into("<HH", record, 0, record_type, size)
+        return bytes(record)
+
+    records = (
+        _make_library_object(_GUID_A, -121.161, 44.253, heading=0.0)
+        + other_record(0x0C)          # Windsock
+        + other_record(0x0C)          # Windsock
+        + other_record(0x0E)          # TaxiwaySign
+        + other_record(0x77)          # unknown type
+    )
+    bgl = _make_bgl([(MSFS._SECTION_TYPE_SCENERY_OBJECT, records)])
+    bgl_path = tmp_path / "mixed.bgl"
+    bgl_path.write_bytes(bgl)
+
+    warnings: list[str] = []
+    placements = MSFS.read_object_placements(bgl_path, warnings)
+    assert len(placements) == 1
+    assert len(warnings) == 1
+    assert "mixed.bgl" in warnings[0]
+    assert "2 x Windsock" in warnings[0]
+    assert "1 x TaxiwaySign" in warnings[0]
+    assert "1 x type 0x77" in warnings[0]
+
+    # read_package surfaces the same warning.
+    _models, _placements, package_warnings = MSFS.read_package(tmp_path)
+    assert any("2 x Windsock" in w for w in package_warnings)
 
 
 def test_read_object_placements_no_scenery_section(tmp_path):

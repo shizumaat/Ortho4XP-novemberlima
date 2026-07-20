@@ -157,7 +157,8 @@ def convert_msfs_airport(
     # 4. Convert every model that is actually placed.
     # ------------------------------------------------------------------
     placed_unique_guids = sorted(set(p.guid for p in usable_placements))
-    object_files_by_guid: Dict[str, List[str]] = {}
+    # Per GUID: (obj file name, horizontal footprint bounds_xz or None).
+    object_files_by_guid: Dict[str, List[tuple]] = {}
     converted = 0
     for index, guid in enumerate(placed_unique_guids):
         if UI.red_flag:
@@ -178,7 +179,9 @@ def convert_msfs_airport(
         for warning in manifest["warnings"]:
             if "auto-detected" not in warning:
                 warnings.append(f"{guid[:12]}: {warning}")
-        object_files_by_guid[guid] = [o["file"] for o in manifest["objects"]]
+        object_files_by_guid[guid] = [
+            (o["file"], o.get("bounds_xz")) for o in manifest["objects"]
+        ]
         converted += 1
     shutil.rmtree(pack_directory / "_msfs_staging", ignore_errors=True)
 
@@ -189,13 +192,16 @@ def convert_msfs_airport(
     report(85, "Writing overlay DSF with placements and exclusions")
     placed_objects: List[XP_PACK.PlacedObject] = []
     for placement in usable_placements:
-        for object_file in object_files_by_guid.get(placement.guid, []):
+        for object_file, bounds_xz in object_files_by_guid.get(placement.guid, []):
             placed_objects.append(
                 XP_PACK.PlacedObject(
                     object_relative_path=f"objects/{object_file}",
                     longitude=placement.longitude,
                     latitude=placement.latitude,
                     heading_degrees_true=placement.heading_degrees_true,
+                    altitude_meters=placement.altitude_meters,
+                    is_above_ground=placement.is_above_ground,
+                    bounds_xz=tuple(bounds_xz) if bounds_xz else None,
                 )
             )
     exclusions = XP_PACK.compute_exclusion_rectangles(placed_objects)

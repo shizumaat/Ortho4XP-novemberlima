@@ -69,12 +69,28 @@ class PlacedObject:
     ``object_relative_path`` is the pack-relative path with forward
     slashes, for example ``"objects/foo.obj"``. ``heading_degrees_true``
     is the true heading in degrees clockwise from north.
+
+    ``altitude_meters`` and ``is_above_ground`` carry the MSFS placement
+    altitude: above-ground metres when ``is_above_ground`` is true,
+    absolute MSL metres otherwise.  An altitude of exactly 0 is written
+    as a plain ground-draped ``OBJECT`` row regardless of the flag (the
+    overwhelmingly common case, and the safe reading of the ambiguous
+    flag-false zero -- MSL 0 would sink an inland object to sea level).
+
+    ``bounds_xz`` is the object's horizontal footprint in OBJ8 meters,
+    ``(min_x, min_z, max_x, max_z)`` with +X east and +Z south at
+    heading 0 (the converter manifest's ``bounds_xz``).  When present,
+    exclusion rectangles cover the footprint rotated by the placement
+    heading instead of just the placement point.
     """
 
     object_relative_path: str
     longitude: float
     latitude: float
     heading_degrees_true: float
+    altitude_meters: float = 0.0
+    is_above_ground: bool = True
+    bounds_xz: Optional[Tuple[float, float, float, float]] = None
 
 
 def _parse_header_identifier(stripped_line: str) -> Optional[str]:
@@ -361,26 +377,84 @@ def _union_rectangle(
     )
 
 
+def _placement_metre_extents(
+    placement: PlacedObject,
+) -> Tuple[float, float, float, float]:
+    """Return ``(east_min, north_min, east_max, north_max)`` in metres.
+
+    The placement's model footprint (``bounds_xz``, OBJ8 metres: +X east,
+    +Z south at heading 0) is rotated by the true heading (clockwise from
+    north) around the placement point; a placement without a footprint is
+    a point (all zeros).
+    """
+    if placement.bounds_xz is None:
+        return (0.0, 0.0, 0.0, 0.0)
+    min_x, min_z, max_x, max_z = placement.bounds_xz
+    heading_radians = math.radians(placement.heading_degrees_true)
+    cosine = math.cos(heading_radians)
+    sine = math.sin(heading_radians)
+    easts: List[float] = []
+    norths: List[float] = []
+    for corner_x, corner_z in (
+        (min_x, min_z), (min_x, max_z), (max_x, min_z), (max_x, max_z)
+    ):
+        east_local = corner_x
+        north_local = -corner_z
+        easts.append(east_local * cosine + north_local * sine)
+        norths.append(north_local * cosine - east_local * sine)
+    return (min(easts), min(norths), max(easts), max(norths))
+
+
+def _placement_exclusion_box(
+    placement: PlacedObject, padding_meters: float
+) -> Tuple[float, float, float, float]:
+    """Return one placement's padded ``(west, south, east, north)`` box.
+
+    Covers the heading-rotated model footprint (when known) plus
+    ``padding_meters`` on every side, converted to degrees at the
+    placement latitude.
+    """
+    east_min, north_min, east_max, north_max = _placement_metre_extents(
+        placement
+    )
+    # Per-metre degree factors at this latitude.
+    latitude_factor, longitude_factor = _degree_padding_for_latitude(
+        1.0, placement.latitude
+    )
+    return (
+        placement.longitude + (east_min - padding_meters) * longitude_factor,
+        placement.latitude + (north_min - padding_meters) * latitude_factor,
+        placement.longitude + (east_max + padding_meters) * longitude_factor,
+        placement.latitude + (north_max + padding_meters) * latitude_factor,
+    )
+
+
 def compute_exclusion_rectangles(
     placed_objects: List[PlacedObject],
     padding_meters: float = 20.0,
 ) -> List[Tuple[float, float, float, float]]:
     """Return degree rectangles suppressing default 3D under placements.
 
-    Each placement is expanded into a padded box (the longitude padding
-    scaled by ``cos(latitude)``); overlapping boxes are merged. When all
-    placements span less than two kilometres they collapse to a single
-    bounding rectangle. Each rectangle is ``(west, south, east, north)``
-    in degrees.
+    Each placement is expanded into a padded box covering its model
+    footprint rotated by the placement heading (falling back to the bare
+    placement point when the footprint is unknown; the longitude padding
+    is scaled by ``cos(latitude)``); overlapping boxes are merged. When
+    all placements span less than two kilometres they collapse to a
+    single bounding rectangle. Each rectangle is ``(west, south, east,
+    north)`` in degrees.
     """
     if not placed_objects:
         return []
+
+    padded_boxes = [
+        _placement_exclusion_box(placement, padding_meters)
+        for placement in placed_objects
+    ]
 
     minimum_latitude = min(placement.latitude for placement in placed_objects)
     maximum_latitude = max(placement.latitude for placement in placed_objects)
     minimum_longitude = min(placement.longitude for placement in placed_objects)
     maximum_longitude = max(placement.longitude for placement in placed_objects)
-    mean_latitude = (minimum_latitude + maximum_latitude) / 2.0
 
     span_kilometres = _haversine_kilometres(
         minimum_latitude,
@@ -389,31 +463,10 @@ def compute_exclusion_rectangles(
         maximum_longitude,
     )
     if span_kilometres < _SINGLE_RECTANGLE_SPAN_KILOMETRES:
-        latitude_padding, longitude_padding = _degree_padding_for_latitude(
-            padding_meters, mean_latitude
-        )
-        return [
-            (
-                minimum_longitude - longitude_padding,
-                minimum_latitude - latitude_padding,
-                maximum_longitude + longitude_padding,
-                maximum_latitude + latitude_padding,
-            )
-        ]
-
-    padded_boxes: List[Tuple[float, float, float, float]] = []
-    for placement in placed_objects:
-        latitude_padding, longitude_padding = _degree_padding_for_latitude(
-            padding_meters, placement.latitude
-        )
-        padded_boxes.append(
-            (
-                placement.longitude - longitude_padding,
-                placement.latitude - latitude_padding,
-                placement.longitude + longitude_padding,
-                placement.latitude + latitude_padding,
-            )
-        )
+        bounding = padded_boxes[0]
+        for box in padded_boxes[1:]:
+            bounding = _union_rectangle(bounding, box)
+        return [bounding]
 
     merged_rectangles: List[Tuple[float, float, float, float]] = []
     for box in padded_boxes:
@@ -514,14 +567,28 @@ def _build_tile_dsf_text(
 
     for placement in tile_placements:
         definition_index = definition_index_by_path[placement.object_relative_path]
-        lines.append(
-            "OBJECT {:d} {:.9f} {:.9f} {:.6f}".format(
-                definition_index,
-                placement.longitude,
-                placement.latitude,
-                placement.heading_degrees_true,
+        if placement.altitude_meters == 0.0:
+            # Ground-draped: the default overlay placement row.
+            lines.append(
+                "OBJECT {:d} {:.9f} {:.9f} {:.6f}".format(
+                    definition_index,
+                    placement.longitude,
+                    placement.latitude,
+                    placement.heading_degrees_true,
+                )
             )
-        )
+        else:
+            row_type = "OBJECT_AGL" if placement.is_above_ground else "OBJECT_MSL"
+            lines.append(
+                "{} {:d} {:.9f} {:.9f} {:.6f} {:.3f}".format(
+                    row_type,
+                    definition_index,
+                    placement.longitude,
+                    placement.latitude,
+                    placement.heading_degrees_true,
+                    placement.altitude_meters,
+                )
+            )
 
     return "\n".join(lines) + "\n"
 

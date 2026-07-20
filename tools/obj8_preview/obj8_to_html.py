@@ -735,8 +735,11 @@ animate();
 def parse_dsf_text_placements(dsf_text: str) -> list[dict]:
     """Parse OBJECT_DEF / OBJECT rows out of DSFTool --dsf2text output.
 
-    Returns [{"object_relative_path", "longitude", "latitude",
-    "heading_degrees_true"}, ...].
+    Handles the plain ``OBJECT`` row and the elevated ``OBJECT_AGL`` /
+    ``OBJECT_MSL`` forms (elevation as a trailing 5th value).  Returns
+    [{"object_relative_path", "longitude", "latitude",
+    "heading_degrees_true", "altitude_meters", "is_above_ground"}, ...];
+    a plain ``OBJECT`` reads as AGL 0.
     """
     definitions: list[str] = []
     placements: list[dict] = []
@@ -754,6 +757,19 @@ def parse_dsf_text_placements(dsf_text: str) -> list[dict]:
                     "longitude": float(tokens[2]),
                     "latitude": float(tokens[3]),
                     "heading_degrees_true": float(tokens[4]),
+                    "altitude_meters": 0.0,
+                    "is_above_ground": True,
+                })
+        elif tokens[0] in ("OBJECT_AGL", "OBJECT_MSL") and len(tokens) >= 6:
+            definition_index = int(tokens[1])
+            if 0 <= definition_index < len(definitions):
+                placements.append({
+                    "object_relative_path": definitions[definition_index],
+                    "longitude": float(tokens[2]),
+                    "latitude": float(tokens[3]),
+                    "heading_degrees_true": float(tokens[4]),
+                    "altitude_meters": float(tokens[5]),
+                    "is_above_ground": tokens[0] == "OBJECT_AGL",
                 })
     return placements
 
@@ -873,10 +889,17 @@ def generate_pack_scene_html(
             )
         east = (placement["longitude"] - longitude_center) * meters_per_degree_longitude
         north = (placement["latitude"] - latitude_center) * meters_per_degree_latitude
+        # The preview ground plane is flat y=0, so an AGL altitude is a
+        # direct vertical offset; MSL cannot be resolved without terrain
+        # elevation, so those placements preview at ground level.
+        height = (
+            placement.get("altitude_meters", 0.0)
+            if placement.get("is_above_ground", True) else 0.0
+        )
         entries.append({
             "name": template["name"],
             "template": template["templateIndex"],
-            "position": [round(east, 1), 0.0, round(-north, 1)],
+            "position": [round(east, 1), round(height, 2), round(-north, 1)],
             "headingDegrees": round(placement["heading_degrees_true"], 2),
         })
 

@@ -49,6 +49,9 @@ class StubPlacedObject:
     longitude: float
     latitude: float
     heading_degrees_true: float
+    altitude_meters: float = 0.0
+    is_above_ground: bool = True
+    bounds_xz: tuple | None = None
 
 
 def _install_stub_modules(monkeypatch, models, placements, recorded):
@@ -146,6 +149,12 @@ def test_full_orchestration_flow(tmp_path, monkeypatch):
     assert recorded["dsf_exclusions"] == [(-121.2, 44.2, -121.1, 44.3)]
     for placed in recorded["dsf_objects"]:
         assert placed.object_relative_path.startswith("objects/")
+    # Model footprints flow from the converter manifest into the
+    # exclusion computation (extent-sized exclusion zones).
+    for placed in recorded["exclusion_input"]:
+        assert placed.bounds_xz is not None
+        min_x, min_z, max_x, max_z = placed.bounds_xz
+        assert min_x < max_x and min_z < max_z
     # Converted objects landed inside the pack.
     pack = report.package_path
     assert pack.parent == custom_scenery

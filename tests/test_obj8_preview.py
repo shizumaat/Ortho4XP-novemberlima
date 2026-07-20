@@ -241,3 +241,33 @@ def test_texture_override(tmp_path: Path) -> None:
     html = output_path.read_text(encoding="utf-8")
     expected_b64 = base64.b64encode(_MINIMAL_PNG_BYTES).decode("ascii")
     assert f"data:image/png;base64,{expected_b64}" in html
+
+
+def test_parse_dsf_text_placements_handles_elevated_rows() -> None:
+    """OBJECT_AGL / OBJECT_MSL rows parse with their altitude; a plain
+    OBJECT row reads as AGL 0."""
+    dsf_text = "\n".join(
+        [
+            "PROPERTY sim/overlay 1",
+            "OBJECT_DEF objects/alpha.obj",
+            "OBJECT_DEF objects/bravo.obj",
+            "OBJECT 0 -121.161000000 44.254000000 90.000000",
+            "OBJECT_AGL 1 -121.160000000 44.255000000 180.000000 16.250",
+            "OBJECT_MSL 0 -121.159000000 44.256000000 45.000000 938.000",
+        ]
+    )
+    placements = obj8_to_html.parse_dsf_text_placements(dsf_text)
+    assert len(placements) == 3
+
+    plain, agl, msl = placements
+    assert plain["object_relative_path"] == "objects/alpha.obj"
+    assert plain["altitude_meters"] == 0.0
+    assert plain["is_above_ground"] is True
+
+    assert agl["object_relative_path"] == "objects/bravo.obj"
+    assert agl["altitude_meters"] == 16.25
+    assert agl["is_above_ground"] is True
+
+    assert msl["object_relative_path"] == "objects/alpha.obj"
+    assert msl["altitude_meters"] == 938.0
+    assert msl["is_above_ground"] is False

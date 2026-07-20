@@ -10,7 +10,9 @@ For every glTF material that carries triangles this writes one OBJ8 file
 used base-color texture, and a ``manifest.json`` describing the result::
 
     {
-      "objects": [{"file", "material", "triangles", "texture"}, ...],
+      "objects": [{"file", "material", "triangles", "texture",
+                   "bounds_xz" (horizontal footprint [min_x, min_z,
+                   max_x, max_z] in OBJ8 meters, +X east +Z south)}, ...],
       "warnings": [...]
     }
 
@@ -70,6 +72,14 @@ normals agree with the authored vertex normals, keeps CW-front sources
 as-is, and reverses spec-CCW sources so the OBJ8 output is always
 CW-front. Override with --winding gltf|directx if a file lies about its
 normals.
+
+Per-node correction: the glTF spec reverses the winding of a node whose
+world transform has a NEGATIVE determinant (mirrored, e.g. a negative
+scale). The reader records that sign per primitive; detection votes are
+sign-corrected so mirrored instances cannot outvote the authored
+convention, and each primitive's reversal is the XOR of the file-level
+decision with its own mirror flag — a mirrored node no longer renders
+inside-out.
 """
 from __future__ import annotations
 
@@ -305,13 +315,18 @@ def detect_source_winding(primitives: List[Dict[str, Any]]) -> str:
     BGL model libraries).
 
     Tests whether right-handed geometric triangle normals agree with the
-    authored vertex normals across a sample of triangles.
+    authored vertex normals across a sample of triangles.  A mirrored
+    (negative-determinant) node reverses its world-space winding relative
+    to the index order AND flips the geometric-vs-authored comparison, so
+    its votes are sign-corrected — the result describes the AUTHORED
+    convention, independent of how many instances happen to be mirrored.
     """
     agree = disagree = 0
     for primitive in primitives:
         positions = primitive["positions"]
         normals = primitive["normals"]
         indices = primitive["indices"]
+        vote_sign = -1.0 if primitive.get("mirrored") else 1.0
         for k in range(0, min(len(indices), 600), 3):
             i0, i1, i2 = indices[k : k + 3]
             edge_a = [positions[i1][j] - positions[i0][j] for j in range(3)]
@@ -325,7 +340,7 @@ def detect_source_winding(primitives: List[Dict[str, Any]]) -> str:
                 (normals[i0][j] + normals[i1][j] + normals[i2][j]) / 3.0
                 for j in range(3)
             ]
-            dot = sum(cross[j] * authored[j] for j in range(3))
+            dot = vote_sign * sum(cross[j] * authored[j] for j in range(3))
             if dot > 1e-12:
                 agree += 1
             elif dot < -1e-12:
@@ -442,6 +457,11 @@ def _build_group_geometry(
     groups return their cell centre).  Alongside the merged vertices/indices
     this accumulates the triangle-area-weighted roughness and emissive so the
     caller can emit an object-level ``ATTR_shiny_rat`` and scale a LIT map.
+
+    ``reverse_triangles`` is the file-level decision for the AUTHORED
+    convention; a primitive from a mirrored (negative-determinant) node has
+    its world-space winding already reversed by the transform, so the
+    per-primitive reversal is the XOR of the two.
     """
     vertices: List[Tuple[float, ...]] = []
     indices: List[int] = []
@@ -462,7 +482,7 @@ def _build_group_geometry(
                 uv_source(primitive, vertex_index),
             ))
         primitive_indices = primitive["indices"]
-        if reverse_triangles:
+        if reverse_triangles != bool(primitive.get("mirrored")):
             for k in range(0, len(primitive_indices) - 2, 3):
                 indices.append(base_offset + primitive_indices[k])
                 indices.append(base_offset + primitive_indices[k + 2])
@@ -519,8 +539,10 @@ def convert(
     the textures, and writes a ``manifest.json``.  Returns the manifest dict.
 
     ``winding``: "auto" (detect per file), "gltf" (spec CCW-front source,
-    keep index order), or "directx" (CW-front source, reverse each
-    triangle so the OBJ8 output stays CW-front after the z-reflection).
+    reverse each triangle to reach OBJ8's CW-front), or "directx"
+    (CW-front source, keep index order).  Whichever way it is decided,
+    a primitive from a mirrored (negative-determinant) node additionally
+    flips that decision (see the module docstring).
 
     ``atlas`` (default ``True``): when two or more plain textured groups have
     UVs inside the unit square, pack their textures into one power-of-two
@@ -649,6 +671,16 @@ def convert(
             "triangles": len(indices) // 3,
             "texture": texture_png,
         }
+        vertices = geometry["vertices"]
+        if vertices:
+            # Horizontal footprint in OBJ8 meters (+X east, +Z south),
+            # for placement-time exclusion zones sized to the model.
+            entry["bounds_xz"] = [
+                round(min(vertex[0] for vertex in vertices), 3),
+                round(min(vertex[2] for vertex in vertices), 3),
+                round(max(vertex[0] for vertex in vertices), 3),
+                round(max(vertex[2] for vertex in vertices), 3),
+            ]
         if texture_lit is not None:
             entry["texture_lit"] = texture_lit
         if texture_normal is not None:

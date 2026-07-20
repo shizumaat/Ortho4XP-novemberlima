@@ -235,6 +235,61 @@ def test_compute_exclusion_two_nearby_objects_merge_with_padding():
     assert longitude_padding_degrees > latitude_padding_degrees
 
 
+def test_compute_exclusion_covers_rotated_model_footprint():
+    # A 200 m x 10 m model (x in [-100, 100], z in [-5, 5]) placed at
+    # heading 0 spans east-west; at heading 90 the same footprint spans
+    # north-south. The exclusion box must follow the rotation.
+    latitude = 44.25
+    padding_meters = 20.0
+    bounds = (-100.0, -5.0, 100.0, 5.0)
+    metres_per_degree_latitude = 111320.0
+    metres_per_degree_longitude = metres_per_degree_latitude * math.cos(
+        math.radians(latitude)
+    )
+
+    def box_for(heading):
+        objects = [
+            PACK.PlacedObject(
+                "objects/terminal.obj", -121.150, latitude, heading,
+                bounds_xz=bounds,
+            )
+        ]
+        rectangles = PACK.compute_exclusion_rectangles(objects, padding_meters)
+        assert len(rectangles) == 1
+        return rectangles[0]
+
+    west, south, east, north = box_for(0.0)
+    assert (east - west) * metres_per_degree_longitude == pytest.approx(
+        2 * (100.0 + padding_meters), rel=1e-6
+    )
+    assert (north - south) * metres_per_degree_latitude == pytest.approx(
+        2 * (5.0 + padding_meters), rel=1e-6
+    )
+
+    west, south, east, north = box_for(90.0)
+    assert (east - west) * metres_per_degree_longitude == pytest.approx(
+        2 * (5.0 + padding_meters), rel=1e-6
+    )
+    assert (north - south) * metres_per_degree_latitude == pytest.approx(
+        2 * (100.0 + padding_meters), rel=1e-6
+    )
+
+
+def test_compute_exclusion_point_placements_unchanged_without_bounds():
+    # No bounds: behaves exactly like the old point-plus-padding rule.
+    latitude = 44.25
+    objects = [PACK.PlacedObject("objects/a.obj", -121.150, latitude, 0.0)]
+    rectangles = PACK.compute_exclusion_rectangles(objects, 20.0)
+    assert len(rectangles) == 1
+    west, south, east, north = rectangles[0]
+    latitude_padding = 20.0 / 111320.0
+    longitude_padding = 20.0 / (111320.0 * math.cos(math.radians(latitude)))
+    assert west == pytest.approx(-121.150 - longitude_padding, abs=1e-12)
+    assert east == pytest.approx(-121.150 + longitude_padding, abs=1e-12)
+    assert south == pytest.approx(latitude - latitude_padding, abs=1e-12)
+    assert north == pytest.approx(latitude + latitude_padding, abs=1e-12)
+
+
 def test_compute_exclusion_far_apart_objects_stay_separate():
     # Two objects ~4 km apart (span > 2 km) with small padding must not
     # collapse into one bounding rectangle.
@@ -244,6 +299,36 @@ def test_compute_exclusion_far_apart_objects_stay_separate():
     ]
     rectangles = PACK.compute_exclusion_rectangles(objects, padding_meters=20.0)
     assert len(rectangles) == 2
+
+
+# --------------------------------------------------------------------------
+# _build_tile_dsf_text placement rows (headless; no DSFTool needed)
+# --------------------------------------------------------------------------
+def test_dsf_text_places_altitude_as_agl_msl_or_draped():
+    placements = [
+        # Altitude 0: ground-draped OBJECT regardless of the AGL flag.
+        PACK.PlacedObject("objects/a.obj", -121.5, 44.5, 0.0),
+        PACK.PlacedObject("objects/a.obj", -121.4, 44.4, 10.0,
+                          altitude_meters=0.0, is_above_ground=False),
+        # Non-zero + above-ground flag: OBJECT_AGL.
+        PACK.PlacedObject("objects/a.obj", -121.3, 44.3, 20.0,
+                          altitude_meters=16.25, is_above_ground=True),
+        # Non-zero + absolute: OBJECT_MSL.
+        PACK.PlacedObject("objects/a.obj", -121.2, 44.2, 30.0,
+                          altitude_meters=-2.5, is_above_ground=False),
+    ]
+    text = PACK._build_tile_dsf_text(-122, 44, placements, [])
+    object_rows = [
+        line for line in text.splitlines() if line.startswith("OBJECT ")
+        or line.startswith("OBJECT_AGL ") or line.startswith("OBJECT_MSL ")
+    ]
+    assert len(object_rows) == 4
+    assert object_rows[0].startswith("OBJECT 0 -121.5")
+    assert object_rows[1].startswith("OBJECT 0 -121.4")
+    assert object_rows[2].startswith("OBJECT_AGL 0 -121.3")
+    assert object_rows[2].endswith("16.250")
+    assert object_rows[3].startswith("OBJECT_MSL 0 -121.2")
+    assert object_rows[3].endswith("-2.500")
 
 
 # --------------------------------------------------------------------------
@@ -267,6 +352,12 @@ def test_write_overlay_dsf_round_trips_through_dsftool(tmp_path):
     placements = [
         PACK.PlacedObject("objects/alpha.obj", -121.161, 44.254, 90.0),
         PACK.PlacedObject("objects/bravo.obj", -121.160, 44.255, 180.0),
+        # Elevated placements: OBJECT_AGL and OBJECT_MSL rows must survive
+        # the text2dsf/dsf2text round trip.
+        PACK.PlacedObject("objects/alpha.obj", -121.159, 44.256, 0.0,
+                          altitude_meters=16.25, is_above_ground=True),
+        PACK.PlacedObject("objects/bravo.obj", -121.158, 44.257, 45.0,
+                          altitude_meters=938.0, is_above_ground=False),
     ]
     exclusions = PACK.compute_exclusion_rectangles(placements)
     assert len(exclusions) == 1
@@ -292,13 +383,25 @@ def test_write_overlay_dsf_round_trips_through_dsftool(tmp_path):
 
     assert "OBJECT_DEF objects/alpha.obj" in round_tripped
     assert "OBJECT_DEF objects/bravo.obj" in round_tripped
-    # One OBJECT line per placement.
+    # One OBJECT line per ground-draped placement, plus the elevated rows.
     object_lines = [
         line
         for line in round_tripped.splitlines()
         if line.startswith("OBJECT ")
     ]
     assert len(object_lines) == 2
+    agl_lines = [
+        line
+        for line in round_tripped.splitlines()
+        if line.startswith("OBJECT_AGL ")
+    ]
+    msl_lines = [
+        line
+        for line in round_tripped.splitlines()
+        if line.startswith("OBJECT_MSL ")
+    ]
+    assert len(agl_lines) == 1 and "16.25" in agl_lines[0]
+    assert len(msl_lines) == 1 and "938" in msl_lines[0]
 
     # The exclusion properties survive with the slash-separated value.
     west, south, east, north = exclusions[0]

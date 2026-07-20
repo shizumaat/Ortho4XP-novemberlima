@@ -1,8 +1,46 @@
 # MSFS → X-Plane airport converter — cloud-session handoff
 
-State of the work as of 2026-07-19 (branch `dev`). This document exists so
+State of the work as of 2026-07-20 (branch `dev`). This document exists so
 a claude.ai cloud session (driven from any device) can continue the work
 with full context. Read this before touching the converter.
+
+## 2026-07-20 cloud session — tasks 1, 2, 3, 5, 10 DONE
+
+All landed with headless tests (73 green in the MSFS/obj8 suites):
+
+1. ~~Per-node winding~~ DONE: `gltf_reader` records per-primitive
+   `mirrored` (sign of det of the node world transform); detection votes
+   are sign-corrected so mirrored instances can't outvote the authored
+   convention; per-primitive reversal = file decision XOR mirror flag.
+2. ~~Exclusion zones from model extents~~ DONE: converter manifests carry
+   `bounds_xz` (horizontal footprint, OBJ8 meters); `PlacedObject` takes
+   `bounds_xz`; `compute_exclusion_rectangles` covers the heading-rotated
+   footprint + padding (point+padding fallback preserved byte-identically
+   when bounds are absent).
+3. ~~Placement altitude~~ DONE: `PlacedObject` carries
+   `altitude_meters`/`is_above_ground`; the DSF writer emits `OBJECT_AGL`
+   (flag set) / `OBJECT_MSL` (clear) for non-zero altitudes; altitude 0
+   stays a ground-draped `OBJECT` row regardless of the flag (the safe
+   reading of the ambiguous flag-false zero). The obj8 previewer parses
+   the new rows (AGL = y offset; MSL previews at ground).
+5. ~~Fixed offsets~~ DONE: GUID/scale read at 0x2C/0x3C (end-relative
+   reads removed); unconverted 0x25 record types (GenericBuilding,
+   Windsock, Effect, TaxiwaySign, ExtrusionBridge, unknown) are counted
+   per BGL and reported as warnings.
+10. ~~FourCC docstring~~ DONE (RIFF form `GLTF` misnomer named; GLBD =
+    one GLB per LOD).
+
+**Needs a sim / local check** (this environment has neither X-Plane nor
+the KRDM package): (a) DSFTool round-trip of `OBJECT_AGL`/`OBJECT_MSL`
+rows — the round-trip test was extended and runs only on the local
+macOS-arm64 machine; (b) KRDM reconversion: mirrored-node objects no
+longer inside-out, exclusion boxes now cover the full terminal complex
+(watch for over-exclusion), the ~16 m tower now rides at its authored
+altitude; (c) the skipped-record-type warning counts on the real package
+(expect windsocks/taxiway signs).
+
+Remaining open tasks: 4 (bake placement scale), 6 (glass), 7 (XP12 PBR),
+8 (LOD translation), 9 (stock-library GUID mapping).
 
 ## What this is
 

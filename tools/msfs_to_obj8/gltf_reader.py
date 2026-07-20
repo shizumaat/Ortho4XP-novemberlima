@@ -125,6 +125,23 @@ def _transform_point(
     )
 
 
+def _determinant3(matrix: List[float]) -> float:
+    """Determinant of the upper-left 3x3 of a row-major 4x4 matrix.
+
+    Its sign tells whether the transform is orientation-preserving; a
+    negative determinant (mirrored node) reverses the winding of the
+    node's world-space triangles relative to their index order.
+    """
+    a, b, c = matrix[0], matrix[1], matrix[2]
+    d, e, f = matrix[4], matrix[5], matrix[6]
+    g, h, i = matrix[8], matrix[9], matrix[10]
+    return (
+        a * (e * i - f * h)
+        - b * (d * i - f * g)
+        + c * (d * h - e * g)
+    )
+
+
 def _normal_matrix(matrix: List[float]) -> List[float]:
     """Inverse-transpose of the upper-left 3x3, returned row-major 3x3.
 
@@ -135,11 +152,7 @@ def _normal_matrix(matrix: List[float]) -> List[float]:
     a, b, c = matrix[0], matrix[1], matrix[2]
     d, e, f = matrix[4], matrix[5], matrix[6]
     g, h, i = matrix[8], matrix[9], matrix[10]
-    determinant = (
-        a * (e * i - f * h)
-        - b * (d * i - f * g)
-        + c * (d * h - e * g)
-    )
+    determinant = _determinant3(matrix)
     if abs(determinant) < 1e-12:
         # Singular upper 3x3: use it directly (best effort).
         return [a, b, c, d, e, f, g, h, i]
@@ -528,8 +541,10 @@ def parse_gltf(path: str | Path) -> Dict[str, Any]:
         List of dicts, one per (node, primitive) instance that carries
         renderable triangles.  Each has ``positions`` and ``normals``
         (world-transformed float triples), ``texcoords`` (float pairs,
-        v NOT yet flipped), ``indices`` (ints), and ``material`` (index or
-        ``None``).
+        v NOT yet flipped), ``indices`` (ints), ``material`` (index or
+        ``None``), and ``mirrored`` (bool: the node's world transform has a
+        negative determinant, so the world-space winding of the triangles is
+        the REVERSE of their index order).
     ``materials``
         List of ``{name, base_color_image, base_color_dds_image}``.
     ``images``
@@ -613,6 +628,7 @@ def _emit_mesh_primitives(
 ) -> None:
     """Decode and world-transform one mesh's primitives into ``primitives``."""
     normal_matrix = _normal_matrix(world_matrix)
+    mirrored = _determinant3(world_matrix) < 0.0
     mesh_name = mesh.get("name") or f"mesh_{mesh_index}"
     for primitive_index, primitive in enumerate(mesh.get("primitives", [])):
         label = f"{mesh_name}/primitive_{primitive_index}"
@@ -699,4 +715,5 @@ def _emit_mesh_primitives(
             "texcoords": texcoords,
             "indices": indices,
             "material": primitive.get("material"),
+            "mirrored": mirrored,
         })
